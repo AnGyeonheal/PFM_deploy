@@ -4,3 +4,15 @@ headless = true
 
 [browser]
 gatherUsageStats = false
+
+[client]
+# 개발자 툴바/단축키(C=Clear cache, R=Rerun) 비활성화 → Ctrl+C(복사) 시 Clear cache 안 뜸
+toolbarMode = "viewer"
+
+[theme]
+base = "light"
+primaryColor = "#3182F6"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F2F4F6"
+textColor = "#191F28"
+font = "sans serif"

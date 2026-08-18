@@ -197,6 +197,61 @@ def parse_brokerage_full_transactions(raw_text, broker_name="증권사"):
         return None, f"거래내역 파싱 중 에러: {e}"
 
 
+def parse_brokerage_dividends(raw_text, broker_name="증권사"):
+    """증권사 거래내역/입출금 내역에서 '배당금/분배금' 수령 기록만 추출합니다.
+    반환 스키마: [{"증권사","일자","티커","종목명","통화","배당금"}, ...]
+    """
+    load_dotenv()
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요":
+        return None, "[오류] .env 파일에 유효한 GEMINI_API_KEY가 없습니다."
+
+    genai.configure(api_key=gemini_key)
+
+    prompt = f"""
+당신은 증권사 거래내역/입출금 파일에서 '배당금·분배금 수령' 기록만 뽑아내는 데이터 파서입니다.
+아래 '{broker_name}'의 원본에서 **실제로 입금된 배당금/분배금(distribution)** 항목만 JSON 배열로 출력하세요.
+
+각 원소(배당 1건)의 필드:
+- "증권사": "{broker_name}"
+- "일자": 배당 입금일 "YYYY-MM-DD"
+- "티커": 종목코드 (국내 6자리 "005930", 미국 심볼 "AAPL", ETF는 그 심볼 예 "MSTY")
+- "종목명": 종목/ETF 이름
+- "통화": "KRW" | "USD"
+- "배당금": 실제 수령 금액 (숫자, 통화 단위 그대로. 세금 공제 후 실수령액이 있으면 그 값)
+
+⚠️ 매우 중요:
+1. **배당금·분배금 입금 행만** 포함하세요. 주식 매수/매도, 예수금 입출금, 수수료 행은 제외합니다.
+2. 같은 종목이라도 **입금일이 다르면 각각 별도 건**으로 나열하세요(합치지 마세요).
+3. 금액은 부호 없는 양수로, 통화 단위(원/달러) 그대로 적으세요.
+4. 배당 기록이 전혀 없으면 빈 배열 []을 출력하세요.
+5. 반드시 JSON 배열만 출력하세요. 설명·코드펜스(```) 없이 순수 JSON만.
+
+[원본 데이터]
+{raw_text[:14000]}
+"""
+    response, err = _generate_with_fallback(prompt)
+    if response is None:
+        if _is_quota_error(err):
+            return None, "⚠️ Gemini 무료 사용량(하루 한도)을 초과했습니다. 잠시 후 다시 시도해 주세요."
+        return None, f"배당 파싱 중 에러: {err}"
+    try:
+        text = (response.text or "").strip()
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        text = text.strip()
+        data = json.loads(text)
+        if isinstance(data, dict):
+            data = data.get("result") or data.get("dividends") or []
+        return data, None
+    except json.JSONDecodeError:
+        return None, f"AI 응답을 JSON으로 변환하지 못했습니다. 원본 형식을 확인하세요.\n응답: {text[:300]}"
+    except Exception as e:
+        return None, f"배당 파싱 중 에러: {e}"
+
+
 def _build_toss_tools(token, account="1"):
     """Gemini가 자율적으로 호출할 수 있는 토스증권 API 도구 함수들을 생성합니다."""
 

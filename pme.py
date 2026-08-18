@@ -75,7 +75,7 @@ def build_pme_table(orders, fx_now=1400.0, name_map=None):
         cur = next(r["currency"] for r in recs if r["symbol"] == s)
         yft = to_yf_ticker(s, "KR" if cur == "KRW" else "US")
         h = get_history(yft, period="5d")
-        price_now[s] = float(h.iloc[-1]) if not h.empty else None
+        price_now[s] = float(h.iloc[-1]) if (not h.empty and pd.notna(h.iloc[-1])) else None
 
     by = {}
     for r in recs:
@@ -103,9 +103,10 @@ def build_pme_table(orders, fx_now=1400.0, name_map=None):
     rows = []
     for s, e in by.items():
         pn = price_now.get(s)
-        if pn is None:
-            continue
-        stock_val = e["qty"] * pn * (fx_now if e["cur"] == "USD" else 1)
+        is_open = abs(e["qty"]) > 1e-6
+        if is_open and pn is None:
+            continue  # 보유중인데 현재가를 못 구하면 평가 불가 → 제외
+        stock_val = e["qty"] * (pn or 0.0) * (fx_now if e["cur"] == "USD" else 1)  # 청산(qty≈0)은 0
         spy_val = e["spy"] * spy_now * fx_now
         my_profit = stock_val + e["sell"] - e["buy"]
         spy_profit = spy_val + e["sell"] - e["buy"]
@@ -120,9 +121,11 @@ def build_pme_table(orders, fx_now=1400.0, name_map=None):
             "S&P500 PME(%)": round(spy_ret, 2),
             "초과수익(%p)": round(my_ret - spy_ret, 2),
             "초과손익(원)": round(my_profit - spy_profit),
-            "보유상태": "보유중" if abs(e["qty"]) > 1e-6 else "청산",
+            "보유상태": "보유중" if is_open else "청산",
         })
 
+    if not rows:
+        return pd.DataFrame()
     return pd.DataFrame(rows).sort_values("초과수익(%p)", ascending=False).reset_index(drop=True)
 
 
@@ -136,8 +139,8 @@ def build_pme_growth(orders, fx_now=1400.0):
         return pd.DataFrame()
 
     symbols = sorted(set(r["symbol"] for r in recs))
-    spy_hist = get_history(BENCHMARK_TICKER, period="2y")
-    fx_hist = get_usdkrw_history("2y")
+    spy_hist = get_history(BENCHMARK_TICKER, period="10y")
+    fx_hist = get_usdkrw_history("10y")
     if spy_hist.empty:
         return pd.DataFrame()
 
@@ -154,7 +157,7 @@ def build_pme_growth(orders, fx_now=1400.0):
     sym_hist = {}
     for s in symbols:
         yft = to_yf_ticker(s, "KR" if sym_cur[s] == "KRW" else "US")
-        h = get_history(yft, period="2y")
+        h = get_history(yft, period="10y")
         if not h.empty:
             sym_hist[s] = align(h)
 
@@ -208,7 +211,7 @@ def _current_prices(symbols, currencies):
         cur = currencies.get(s, "KRW")
         yft = to_yf_ticker(s, "KR" if cur == "KRW" else "US")
         h = get_history(yft, period="5d")
-        price_now[s] = float(h.iloc[-1]) if not h.empty else None
+        price_now[s] = float(h.iloc[-1]) if (not h.empty and pd.notna(h.iloc[-1])) else None
     return price_now
 
 
@@ -270,23 +273,24 @@ def build_trade_spy_table(orders, fx_now=1400.0, name_map=None):
     return df
 
 
-def build_ticker_profit_growth(orders, fx_now=1400.0, ticker=None):
-    """특정 종목의 '수익금(평가액-투자원금)' 성장 추이 vs S&P500 PME 수익금(원화).
-    투자원금을 제외한 순수 수익금의 성장을 벤치마크와 비교합니다.
-    반환: DataFrame(index=날짜, [내 수익금, S&P500 수익금])
+def build_ticker_profit_growth(orders, fx_now=1400.0, ticker=None, native=False):
+    """특정 종목의 '수익금(평가액-투자원금)' 성장 추이 vs S&P500 PME 수익금.
+    native=True이고 미국(USD) 종목이면 환율 효과를 제거해 달러 기준으로 계산합니다.
+    반환: DataFrame(index=날짜, [내 수익금, S&P500 수익금, 투자원금])
     """
     recs = [r for r in _trade_records(orders) if r["symbol"] == ticker]
     if not recs:
         return pd.DataFrame()
 
-    spy = get_history(BENCHMARK_TICKER, period="2y")
-    fx_hist = get_usdkrw_history("2y")
+    spy = get_history(BENCHMARK_TICKER, period="10y")
+    fx_hist = get_usdkrw_history("10y")
     if spy.empty:
         return pd.DataFrame()
 
     cur = recs[0]["currency"]
+    use_native = bool(native) and cur == "USD"  # 달러 기준(환율 제거)
     yft = to_yf_ticker(ticker, "KR" if cur == "KRW" else "US")
-    hist = get_history(yft, period="2y")
+    hist = get_history(yft, period="10y")
     if hist.empty:
         return pd.DataFrame()
 
@@ -311,17 +315,323 @@ def build_ticker_profit_growth(orders, fx_now=1400.0, ticker=None):
         qty_steps.loc[qty_steps.index >= r["date"]] += sign * r["qty"]
         if cur == "USD":
             spy_shares.loc[spy_shares.index >= r["date"]] += sign * (r["amount"] / spy_px)
-            invested.loc[invested.index >= r["date"]] += sign * (r["amount"] * fx_d)
+            inv_amt = r["amount"] if use_native else r["amount"] * fx_d
+            invested.loc[invested.index >= r["date"]] += sign * inv_amt
         else:
             spy_shares.loc[spy_shares.index >= r["date"]] += sign * (r["amount"] / (spy_px * fx_d))
             invested.loc[invested.index >= r["date"]] += sign * r["amount"]
 
-    my_value_krw = qty_steps * px_daily * (fx_daily if cur == "USD" else 1.0)
-    spy_value_krw = spy_shares * spy_daily * fx_daily
+    if use_native:  # 달러 기준: 환율 곱 제거
+        my_value = qty_steps * px_daily
+        spy_value = spy_shares * spy_daily
+    else:
+        my_value = qty_steps * px_daily * (fx_daily if cur == "USD" else 1.0)
+        spy_value = spy_shares * spy_daily * fx_daily
 
     out = pd.DataFrame({
-        "내 수익금": my_value_krw - invested,
-        "S&P500 수익금": spy_value_krw - invested,
+        "내 수익금": my_value - invested,
+        "S&P500 수익금": spy_value - invested,
+        "투자원금": invested,
     })
     return out
+
+
+def compute_rolling_beta(orders, fx_now=1400.0, ticker=None, window=60, period="10y"):
+    """대상(전체 또는 특정 종목)의 시장(S&P500) 대비 롤링 베타 시계열을 계산합니다.
+    - 종목: 해당 종목 주가 수익률 vs S&P500 수익률(통화 일치)
+    - 전체: 기여금 제거 포트폴리오 일간 수익률 vs S&P500(원화) 수익률
+    반환: pd.Series(index=날짜, 값=롤링 베타)
+    """
+    recs = _trade_records(orders)
+    if ticker:
+        recs = [r for r in recs if r["symbol"] == ticker]
+    if not recs:
+        return pd.Series(dtype=float)
+
+    spy = get_history(BENCHMARK_TICKER, period=period)
+    fx_hist = get_usdkrw_history(period)
+    if spy.empty:
+        return pd.Series(dtype=float)
+
+    symbols = sorted(set(r["symbol"] for r in recs))
+    sym_cur = {s: next(r["currency"] for r in recs if r["symbol"] == s) for s in symbols}
+    start = min(r["date"] for r in recs)
+    idx = pd.date_range(start=start, end=spy.index.max(), freq="D")
+
+    def align(s):
+        return s.reindex(idx.union(s.index)).ffill().reindex(idx).bfill()
+
+    fx_daily = align(fx_hist) if not fx_hist.empty else pd.Series(fx_now, index=idx)
+    spy_daily = align(spy)
+
+    if ticker:
+        cur = sym_cur[ticker]
+        yft = to_yf_ticker(ticker, "KR" if cur == "KRW" else "US")
+        h = get_history(yft, period=period)
+        if h.empty:
+            return pd.Series(dtype=float)
+        px = align(h)
+        rp = px.pct_change()
+        market = spy_daily if cur == "USD" else spy_daily * fx_daily
+        rm = market.pct_change()
+    else:
+        my_val = pd.Series(0.0, index=idx)
+        invested = pd.Series(0.0, index=idx)
+        recs_sorted = sorted(recs, key=lambda r: r["date"])
+        sym_hist = {}
+        for s in symbols:
+            yft = to_yf_ticker(s, "KR" if sym_cur[s] == "KRW" else "US")
+            hh = get_history(yft, period=period)
+            if not hh.empty:
+                sym_hist[s] = align(hh)
+        for s in symbols:
+            if s not in sym_hist:
+                continue
+            qty = pd.Series(0.0, index=idx)
+            for r in [x for x in recs_sorted if x["symbol"] == s]:
+                sign = 1 if r["side"] == "BUY" else -1
+                qty.loc[qty.index >= r["date"]] += sign * r["qty"]
+            my_val = my_val.add(qty * sym_hist[s] * (fx_daily if sym_cur[s] == "USD" else 1.0), fill_value=0)
+        for r in recs_sorted:
+            sign = 1 if r["side"] == "BUY" else -1
+            fx_d = _safe_asof(fx_hist, r["date"], fx_now)
+            cf = r["amount"] * fx_d if r["currency"] == "USD" else r["amount"]
+            invested.loc[invested.index >= r["date"]] += sign * cf
+        prev = my_val.shift(1)
+        rp = ((my_val - prev - invested.diff().fillna(0.0)) / prev).where(prev > 0)
+        rm = (spy_daily * fx_daily).pct_change()
+
+    reg = (pd.concat([rp, rm], axis=1, keys=["rp", "rm"])
+           .replace([float("inf"), float("-inf")], pd.NA).dropna())
+    if len(reg) < window:
+        return pd.Series(dtype=float)
+    cov = reg["rp"].rolling(window).cov(reg["rm"])
+    var = reg["rm"].rolling(window).var()
+    beta = (cov / var).replace([float("inf"), float("-inf")], pd.NA).dropna()
+    beta.name = "베타"
+    return beta
+
+
+def build_total_profit_growth(orders, fx_now=1400.0):
+    """전체 자산의 '수익금(평가액−투자원금)' 성장 추이 vs S&P500 PME 수익금(원화).
+    build_pme_growth 결과를 재사용해 개별 종목 그래프와 동일한 형식으로 반환합니다.
+    반환: DataFrame(index=날짜, [내 수익금, S&P500 수익금, 투자원금])
+    """
+    g = build_pme_growth(orders, fx_now)
+    if g is None or g.empty:
+        return pd.DataFrame()
+    return pd.DataFrame({
+        "내 수익금": g["내 포트폴리오"] - g["누적 투자원금"],
+        "S&P500 수익금": g["S&P500 PME"] - g["누적 투자원금"],
+        "투자원금": g["누적 투자원금"],
+    })
+
+
+def build_ticker_price_trades(orders, ticker, start=None):
+    """개별 종목의 주가 시계열과 내 매수/매도 시점(체결단가, native)을 반환합니다.
+    반환: (price(Series, native), buys(DataFrame[date,price]), sells(DataFrame[date,price]), currency)
+    """
+    recs = [r for r in _trade_records(orders) if r["symbol"] == ticker]
+    if not recs:
+        empty = pd.DataFrame(columns=["date", "price"])
+        return pd.Series(dtype=float), empty, empty, "KRW"
+    cur = recs[0]["currency"]
+    yft = to_yf_ticker(ticker, "KR" if cur == "KRW" else "US")
+    start_str = pd.to_datetime(start).strftime("%Y-%m-%d") if start is not None else None
+    hist = get_history(yft, start=start_str, period="10y")
+    buys = [{"date": r["date"], "price": r["amount"] / r["qty"]}
+            for r in recs if r["side"] == "BUY" and r["qty"]]
+    sells = [{"date": r["date"], "price": r["amount"] / r["qty"]}
+             for r in recs if r["side"] == "SELL" and r["qty"]]
+    return hist, pd.DataFrame(buys), pd.DataFrame(sells), cur
+
+
+# ───────────── 달러 평단가 · 10년 환율 · S&P500 알파/베타 (방법 A: 현금흐름 PME) ─────────────
+
+def compute_usd_avg_cost(orders, fx_now=1400.0):
+    """USD 매수 체결의 '그 날 환율'을 매수금액(USD)으로 가중평균한 달러 평단가(원/달러).
+    매수일이 오래되어도 정확하도록 10년 환율 이력을 사용합니다.
+    반환: dict(avg_fx, total_usd, current_fx, invested_krw, fx_pnl_krw) 또는 None(USD 매수 없음)
+    """
+    fx_hist = get_usdkrw_history(period="10y")
+
+    def fx_on(date):
+        if fx_hist.empty:
+            return fx_now
+        try:
+            v = fx_hist.asof(pd.to_datetime(date).tz_localize(None).normalize())
+            return float(v) if pd.notna(v) else float(fx_hist.iloc[0])
+        except Exception:
+            return fx_now
+
+    total_usd = 0.0
+    weighted = 0.0
+    for o in orders:
+        if o.get("currency") != "USD" or o.get("side") != "BUY":
+            continue
+        ex = o.get("execution") or {}
+        usd_amt = float(ex.get("filledAmount") or 0)
+        if usd_amt <= 0:
+            continue
+        weighted += usd_amt * fx_on(ex.get("filledAt") or o.get("orderedAt"))
+        total_usd += usd_amt
+
+    if total_usd <= 0:
+        return None
+    avg_fx = weighted / total_usd
+    return {
+        "avg_fx": avg_fx,
+        "total_usd": total_usd,
+        "current_fx": fx_now,
+        "invested_krw": weighted,
+        "fx_pnl_krw": total_usd * (fx_now - avg_fx),
+    }
+
+
+def build_usdkrw_history_frame(period="10y"):
+    """USD/KRW 환율 시계열을 그래프용 DataFrame(index=날짜, 열='원/달러')으로 반환합니다."""
+    s = get_usdkrw_history(period=period)
+    if s is None or s.empty:
+        return pd.DataFrame()
+    return s.rename("원/달러").to_frame()
+
+
+def _xnpv(rate, cashflows):
+    """불규칙 현금흐름의 순현재가치(NPV). cashflows: [(Timestamp, amount)]."""
+    t0 = min(d for d, _ in cashflows)
+    return sum(cf / (1.0 + rate) ** ((d - t0).days / 365.0) for d, cf in cashflows)
+
+
+def xirr(cashflows):
+    """불규칙 현금흐름의 연환산 내부수익률(XIRR, 소수)을 이분법으로 계산합니다.
+    cashflows: [(Timestamp, amount)] — 유출(-)·유입(+). 해가 없으면 None.
+    """
+    if not cashflows:
+        return None
+    amounts = [cf for _, cf in cashflows]
+    if not (any(a > 0 for a in amounts) and any(a < 0 for a in amounts)):
+        return None
+    lo, hi = -0.9999, 100.0
+    f_lo = _xnpv(lo, cashflows)
+    f_hi = _xnpv(hi, cashflows)
+    if f_lo == 0:
+        return lo
+    if f_hi == 0:
+        return hi
+    if f_lo * f_hi > 0:  # 부호 변화가 없으면 유효한 해가 없음
+        return None
+    for _ in range(200):
+        mid = (lo + hi) / 2.0
+        f_mid = _xnpv(mid, cashflows)
+        if abs(f_mid) < 1e-7:
+            return mid
+        if f_lo * f_mid < 0:
+            hi, f_hi = mid, f_mid
+        else:
+            lo, f_lo = mid, f_mid
+    return (lo + hi) / 2.0
+
+
+def compute_alpha_beta(orders, fx_now=1400.0, period="10y"):
+    """방법 A(현금흐름 기반 S&P500 가상펀드)로 포트폴리오 전체 알파와 베타를 계산합니다.
+    - 알파: 내 포트폴리오 XIRR − S&P500 가상펀드 XIRR (청산·보유 종목 모두 현금흐름으로 반영)
+    - 베타: 기여금(매수·매도)을 제거한 일간 수익률의 시장(SPY 원화 환산) 대비 회귀계수
+    반환: dict 또는 None
+    """
+    recs = _trade_records(orders)
+    if not recs:
+        return None
+
+    symbols = sorted(set(r["symbol"] for r in recs))
+    spy_hist = get_history(BENCHMARK_TICKER, period=period)
+    fx_hist = get_usdkrw_history(period)
+    if spy_hist.empty:
+        return None
+
+    start = min(r["date"] for r in recs)
+    idx = pd.date_range(start=start, end=spy_hist.index.max(), freq="D")
+
+    def align(series):
+        return series.reindex(idx.union(series.index)).ffill().reindex(idx).bfill()
+
+    fx_daily = align(fx_hist) if not fx_hist.empty else pd.Series(fx_now, index=idx)
+    spy_daily = align(spy_hist)
+
+    sym_cur = {s: next(r["currency"] for r in recs if r["symbol"] == s) for s in symbols}
+    sym_hist = {}
+    for s in symbols:
+        yft = to_yf_ticker(s, "KR" if sym_cur[s] == "KRW" else "US")
+        h = get_history(yft, period=period)
+        if not h.empty:
+            sym_hist[s] = align(h)
+
+    recs_sorted = sorted(recs, key=lambda r: r["date"])
+
+    # 내 포트폴리오 일별 평가액(원화)
+    my_val = pd.Series(0.0, index=idx)
+    for s in symbols:
+        if s not in sym_hist:
+            continue
+        qty_steps = pd.Series(0.0, index=idx)
+        for r in [x for x in recs_sorted if x["symbol"] == s]:
+            sign = 1 if r["side"] == "BUY" else -1
+            qty_steps.loc[qty_steps.index >= r["date"]] += sign * r["qty"]
+        val = qty_steps * sym_hist[s] * (fx_daily if sym_cur[s] == "USD" else 1.0)
+        my_val = my_val.add(val, fill_value=0)
+
+    # S&P500 가상펀드: 같은 날짜·금액으로 SPY 매매 + 현금흐름 기록
+    spy_shares = pd.Series(0.0, index=idx)
+    invested = pd.Series(0.0, index=idx)
+    cashflows = []
+    for r in recs_sorted:
+        sign = 1 if r["side"] == "BUY" else -1
+        spy_px = _safe_asof(spy_hist, r["date"], float(spy_hist.iloc[-1]))
+        fx_d = _safe_asof(fx_hist, r["date"], fx_now)
+        if r["currency"] == "USD":
+            delta = sign * (r["amount"] / spy_px)
+            cf = r["amount"] * fx_d
+        else:
+            delta = sign * (r["amount"] / (spy_px * fx_d))
+            cf = r["amount"]
+        spy_shares.loc[spy_shares.index >= r["date"]] += delta
+        invested.loc[invested.index >= r["date"]] += sign * cf
+        cashflows.append((r["date"], -cf if r["side"] == "BUY" else cf))  # 매수=유출(-), 매도=유입(+)
+
+    spy_val = spy_shares * spy_daily * fx_daily
+    today = idx.max()
+    my_final = float(my_val.iloc[-1])
+    spy_final = float(spy_val.iloc[-1])
+
+    port_xirr = xirr(cashflows + [(today, my_final)])
+    spy_xirr = xirr(cashflows + [(today, spy_final)])
+    alpha_pct = ((port_xirr - spy_xirr) * 100.0) if (port_xirr is not None and spy_xirr is not None) else None
+
+    # 베타: 기여금 제거 일간 수익률 vs 시장(SPY 원화)
+    market = spy_daily * fx_daily
+    contrib = invested.diff().fillna(0.0)
+    prev_val = my_val.shift(1)
+    gain = my_val - prev_val - contrib
+    rp = (gain / prev_val).where(prev_val > 0)
+    rm = market.pct_change()
+    reg = (
+        pd.concat([rp, rm], axis=1, keys=["rp", "rm"])
+        .replace([float("inf"), float("-inf")], pd.NA)
+        .dropna()
+    )
+    beta = corr = None
+    if len(reg) > 5 and reg["rm"].var() > 0:
+        beta = float(reg["rp"].cov(reg["rm"]) / reg["rm"].var())
+        corr = float(reg["rp"].corr(reg["rm"]))
+
+    return {
+        "port_xirr_pct": round(port_xirr * 100, 2) if port_xirr is not None else None,
+        "spy_xirr_pct": round(spy_xirr * 100, 2) if spy_xirr is not None else None,
+        "alpha_pct": round(alpha_pct, 2) if alpha_pct is not None else None,
+        "beta": round(beta, 3) if beta is not None else None,
+        "corr": round(corr, 3) if corr is not None else None,
+        "my_final_krw": round(my_final),
+        "spy_final_krw": round(spy_final),
+        "invested_krw": round(float(invested.iloc[-1])),
+        "n_days": int(len(reg)),
+    }
 

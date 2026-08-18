@@ -34,6 +34,7 @@ def get_history(yf_ticker, start=None, period="2y"):
             return pd.Series(dtype=float)
         s = df["Close"].copy()
         s.index = pd.to_datetime(s.index).tz_localize(None).normalize()
+        s = s.dropna()  # yfinance가 붙이는 당일 미완성 봉(NaN 종가) 제거
         s.name = yf_ticker
         return s
     except Exception as e:

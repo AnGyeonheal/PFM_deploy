@@ -11,22 +11,25 @@ from benchmark import to_yf_ticker, get_history
 
 MANUAL_CSV = os.path.join(os.path.dirname(__file__), "manual_holdings.csv")
 TX_CSV = os.path.join(os.path.dirname(__file__), "manual_transactions.csv")
+DIV_CSV = os.path.join(os.path.dirname(__file__), "manual_dividends.csv")
 
 COLUMNS = ["증권사", "티커", "종목명", "시장", "수량", "평균매수가", "통화", "매수일"]
 TX_COLUMNS = ["증권사", "일자", "티커", "종목명", "시장", "구분", "수량", "단가", "통화"]
+DIV_COLUMNS = ["증권사", "일자", "티커", "종목명", "통화", "배당금"]
 
 
 def set_data_dir(directory):
     """사용자별 데이터 폴더로 CSV 저장 경로를 변경합니다(로그인 시 호출)."""
-    global MANUAL_CSV, TX_CSV
+    global MANUAL_CSV, TX_CSV, DIV_CSV
     MANUAL_CSV = os.path.join(directory, "manual_holdings.csv")
     TX_CSV = os.path.join(directory, "manual_transactions.csv")
+    DIV_CSV = os.path.join(directory, "manual_dividends.csv")
 
 
 def clear_all_imports():
-    """현재 사용자 폴더의 임포트 데이터(거래내역·잔고)를 모두 삭제합니다."""
+    """현재 사용자 폴더의 임포트 데이터(거래내역·잔고·배당)를 모두 삭제합니다."""
     removed = 0
-    for p in (MANUAL_CSV, TX_CSV):
+    for p in (MANUAL_CSV, TX_CSV, DIV_CSV):
         if os.path.exists(p):
             try:
                 os.remove(p)
@@ -105,6 +108,64 @@ def save_parsed_transactions(rows, replace_broker=None):
     else:
         combined = new_df
     combined.to_csv(TX_CSV, index=False, encoding="utf-8-sig")
+    return len(new_df)
+
+
+# ───────────────────────── 배당/분배금 (검증된 임포트 기록) ─────────────────────────
+
+def read_dividends_csv():
+    """임포트한 배당/분배금 기록 CSV를 읽어 반환합니다."""
+    if not os.path.exists(DIV_CSV):
+        return pd.DataFrame(columns=DIV_COLUMNS)
+    try:
+        df = pd.read_csv(DIV_CSV, encoding="utf-8-sig", dtype={"티커": str})
+        for c in DIV_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+        df["배당금"] = pd.to_numeric(df["배당금"], errors="coerce")
+        for c in ("증권사", "일자", "티커", "종목명", "통화"):
+            df[c] = df[c].fillna("").astype(str)
+        df["티커"] = df["티커"].map(normalize_ticker)
+        return df[DIV_COLUMNS]
+    except Exception as e:
+        print(f"[경고] 배당 CSV 읽기 실패: {e}")
+        return pd.DataFrame(columns=DIV_COLUMNS)
+
+
+def write_dividends_csv(df):
+    """편집된 배당 기록 DataFrame을 CSV로 저장합니다. (빈 티커·0 배당 제외)"""
+    if df is None or df.empty:
+        pd.DataFrame(columns=DIV_COLUMNS).to_csv(DIV_CSV, index=False, encoding="utf-8-sig")
+        return 0
+    out = df.copy()
+    for c in DIV_COLUMNS:
+        if c not in out.columns:
+            out[c] = ""
+    out = out[DIV_COLUMNS]
+    out = out[out["티커"].astype(str).str.strip() != ""]
+    out.to_csv(DIV_CSV, index=False, encoding="utf-8-sig")
+    return len(out)
+
+
+def save_parsed_dividends(rows, replace_broker=None):
+    """AI가 파싱한 배당/분배금 기록(dict 리스트)을 manual_dividends.csv에 저장합니다."""
+    new_df = pd.DataFrame(rows)
+    if new_df.empty:
+        return 0
+    for c in DIV_COLUMNS:
+        if c not in new_df.columns:
+            new_df[c] = ""
+    new_df = new_df[DIV_COLUMNS]
+    if replace_broker and os.path.exists(DIV_CSV):
+        try:
+            old = pd.read_csv(DIV_CSV, encoding="utf-8-sig", dtype={"티커": str})
+            old = old[old.get("증권사") != replace_broker]
+            combined = pd.concat([old, new_df], ignore_index=True)
+        except Exception:
+            combined = new_df
+    else:
+        combined = new_df
+    combined.to_csv(DIV_CSV, index=False, encoding="utf-8-sig")
     return len(new_df)
 
 
@@ -194,10 +255,16 @@ def derive_holdings_from_tx(tx_df, fx_rate=1400.0):
         yft = to_yf_ticker(e["티커"], country, market)
         hist = get_history(yft, period="5d")
         last_price = float(hist.iloc[-1]) if not hist.empty else avg_price
+        if pd.isna(last_price):  # 시세는 있으나 최근 종가가 결측이면 평단가로 대체
+            last_price = avg_price
         cur = e["통화"]
         eval_native = last_price * e["net_qty"]
         eval_krw = eval_native * fx_rate if cur == "USD" else eval_native
+        if pd.isna(eval_krw):
+            eval_krw = 0.0
         return_pct = (last_price / avg_price - 1) * 100 if avg_price else 0
+        if pd.isna(return_pct):
+            return_pct = 0.0
         rows.append({
             "증권사": e["증권사"], "티커": e["티커"], "종목명": e["종목명"] or e["티커"],
             "시장": market, "통화": cur, "수량": e["net_qty"],
@@ -306,10 +373,16 @@ def load_manual_holdings(fx_rate=1400.0):
             yft = to_yf_ticker(r.get("티커"), country, market)
             hist = get_history(yft, period="5d")
             last_price = float(hist.iloc[-1]) if not hist.empty else avg_price
+            if pd.isna(last_price):  # 최근 종가 결측이면 평단가로 대체
+                last_price = avg_price
 
             eval_native = last_price * qty
             eval_krw = eval_native * fx_rate if currency == "USD" else eval_native
+            if pd.isna(eval_krw):
+                eval_krw = 0.0
             return_pct = (last_price / avg_price - 1) * 100 if avg_price else 0
+            if pd.isna(return_pct):
+                return_pct = 0.0
 
             rows.append({
                 "증권사": r.get("증권사", "수동입력"),

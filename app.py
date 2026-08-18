@@ -1,38 +1,108 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
+import plotly.io as pio
+from plotly.subplots import make_subplots
 import os
 from dotenv import load_dotenv
 
 from pm import get_access_token, get_holdings, get_buying_power, get_exchange_rate, get_order_history, get_stock_info
-from analytics_engine import transform_to_mvp_json, build_transaction_detail, build_period_performance
-from ai_copilot import generate_portfolio_report, chat_with_portfolio
-from benchmark import to_yf_ticker, build_growth_frame, quarterly_excess_returns
+from analytics_engine import transform_to_mvp_json, build_transaction_detail
+from ai_copilot import chat_with_portfolio
+from benchmark import to_yf_ticker, get_usdkrw_history
 from manual_holdings import (
     load_manual_holdings, save_parsed_holdings, manual_to_orders,
     read_manual_csv, write_manual_csv,
     read_transactions_csv, write_transactions_csv, save_parsed_transactions,
     transactions_to_orders, derive_holdings_from_tx,
+    read_dividends_csv, write_dividends_csv, save_parsed_dividends,
     set_data_dir, clear_all_imports,
 )
-from advanced_analytics import compute_dividends, compute_fx_pnl
-from pme import build_pme_table, build_pme_growth, build_trade_spy_table, build_ticker_profit_growth
-from ai_copilot import parse_brokerage_transactions, parse_brokerage_full_transactions
+from pme import (
+    build_ticker_profit_growth, compute_usd_avg_cost, build_usdkrw_history_frame,
+    compute_alpha_beta, build_total_profit_growth, build_ticker_price_trades, compute_rolling_beta,
+)
+from performance import compute_performance_summary, build_holdings_breakdown
+from advanced_analytics import compute_dividends
+from ai_copilot import parse_brokerage_transactions, parse_brokerage_full_transactions, parse_brokerage_dividends
 from auth import register_user, verify_user, user_dir
 
 # 1. 페이지 설정 (반드시 최상단에 위치)
-st.set_page_config(page_title="AI 포트폴리오 코파일럿", layout="wide", page_icon="📈")
+st.set_page_config(page_title="자산관리 대시보드", layout="wide", page_icon="📈")
 
-# 분석 섹션(PME·배당·환차·AI) 임시 비활성화 플래그 (True로 바꾸면 다시 표시)
-SHOW_ANALYSIS = False
+# ── 토스 스타일 테마 (Pretendard 폰트 · 카드형 UI · 토스 블루) ──────────────
+# 주의: 마크다운이 코드블록으로 오인하지 않도록 각 줄을 들여쓰지 말 것
+st.markdown(
+"""
+<link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css" />
+<style>
+:root {
+--toss-blue: #3182F6;
+--toss-blue-dark: #1B64DA;
+--toss-bg: #F2F4F6;
+--toss-card: #FFFFFF;
+--toss-ink: #191F28;
+--toss-sub: #6B7684;
+--toss-border: #E5E8EB;
+--toss-red: #F04452;
+}
+html, body, [class*="css"], .stApp, [data-testid="stAppViewContainer"] {
+font-family: 'Pretendard Variable', Pretendard, -apple-system, BlinkMacSystemFont, system-ui, 'Segoe UI', Roboto, 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif;
+}
+.stApp { background: var(--toss-bg); }
+[data-testid="stHeader"] { background: transparent; }
+.block-container { padding-top: 2.0rem; padding-bottom: 4rem; max-width: 1400px; }
+h1, h2, h3, h4 { color: var(--toss-ink); font-weight: 700; letter-spacing: -0.02em; }
+h1 { font-size: 1.8rem !important; }
+h2 { font-size: 1.3rem !important; margin-top: 0.3rem; }
+h3 { font-size: 1.1rem !important; }
+p, span, label, li { color: var(--toss-ink); }
+[data-testid="stCaptionContainer"], .stCaption, small { color: var(--toss-sub) !important; }
+[data-testid="stMetric"] { background: var(--toss-card); border: 1px solid var(--toss-border); border-radius: 20px; padding: 18px 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); transition: transform .12s ease, box-shadow .12s ease; }
+[data-testid="stMetric"]:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(49,130,246,0.10); }
+[data-testid="stMetricLabel"] p { color: var(--toss-sub) !important; font-size: 0.86rem; font-weight: 600; }
+[data-testid="stMetricValue"] { color: var(--toss-ink); font-weight: 700; font-size: 1.5rem; }
+.stButton > button, .stDownloadButton > button, [data-testid="stFormSubmitButton"] > button { border-radius: 14px; border: 1px solid var(--toss-border); background: #FFFFFF; color: var(--toss-ink); font-weight: 600; padding: 0.5rem 1.1rem; transition: all .12s ease; }
+.stButton > button:hover { border-color: var(--toss-blue); color: var(--toss-blue); }
+.stButton > button[kind="primary"], [data-testid="stFormSubmitButton"] > button { background: var(--toss-blue); color: #fff; border: none; }
+.stButton > button[kind="primary"]:hover { background: var(--toss-blue-dark); }
+.stTabs [data-baseweb="tab-list"] { gap: 6px; }
+.stTabs [data-baseweb="tab"] { border-radius: 12px; padding: 6px 16px; background: #EEF1F4; color: var(--toss-sub); }
+.stTabs [aria-selected="true"] { background: var(--toss-blue) !important; color: #fff !important; }
+[data-baseweb="input"], [data-baseweb="select"] > div, .stTextInput input, .stNumberInput input, .stTextArea textarea { border-radius: 12px !important; }
+div[data-baseweb="select"] > div { border: 1.6px solid var(--toss-blue) !important; background: #F4F8FF !important; }
+div[data-baseweb="select"] svg { color: var(--toss-blue) !important; fill: var(--toss-blue) !important; }
+[data-testid="stDataFrame"], [data-testid="stTable"] { border-radius: 16px; overflow: hidden; border: 1px solid var(--toss-border); }
+[data-testid="stExpander"] { border: 1px solid var(--toss-border); border-radius: 16px; background: var(--toss-card); }
+.stPlotlyChart { background: var(--toss-card); border: 1px solid var(--toss-border); border-radius: 16px; padding: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.03); }
+hr { border-color: var(--toss-border); margin: 1.4rem 0; }
+[data-testid="stAlert"] { border-radius: 14px; }
+[data-testid="stSidebar"] { background: #FFFFFF; border-right: 1px solid var(--toss-border); min-width: 330px !important; width: 330px !important; }
+[data-testid="stChatMessage"] { background: var(--toss-bg); border-radius: 12px; padding: 4px 10px; }
+[data-testid="stChatMessage"] p, [data-testid="stChatMessage"] li { font-size: 0.84rem; line-height: 1.45; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# Plotly 전역 스타일: 화이트 배경·Pretendard 폰트
+_toss_tpl = pio.templates["plotly_white"]
+_toss_tpl.layout.font.family = "Pretendard, 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif"
+_toss_tpl.layout.font.color = "#191F28"
+_toss_tpl.layout.colorway = ["#3182F6", "#F04452", "#00A676", "#F9A825", "#8B5CF6", "#6B7684"]
+_toss_tpl.layout.paper_bgcolor = "rgba(0,0,0,0)"
+_toss_tpl.layout.plot_bgcolor = "rgba(0,0,0,0)"
+pio.templates.default = "plotly_white"
 
 # ── 로그인 게이트 ─────────────────────────────────────────────
 if "username" not in st.session_state:
     st.session_state.username = None
 
 def _do_login_page():
-    st.title("🔐 AI 포트폴리오 코파일럿 로그인")
-    st.caption("로그인하면 임포트한 타 증권사 거래내역을 계정별로 저장하고 다음에 다시 불러올 수 있습니다.")
+    st.title("🔐 자산관리 대시보드 로그인")
+    st.caption("로그인하면 임포트한 증권사 거래내역을 계정별로 저장하고 다시 불러올 수 있습니다.")
     tab_login, tab_signup = st.tabs(["로그인", "회원가입"])
     with tab_login:
         u = st.text_input("아이디", key="login_id")
@@ -41,8 +111,7 @@ def _do_login_page():
             ok, msg = verify_user(u, p)
             if ok:
                 st.session_state.username = u.strip()
-                st.session_state.import_answered = False
-                st.cache_data.clear()  # 이전 사용자 캐시 제거
+                st.cache_data.clear()
                 st.rerun()
             else:
                 st.error(msg)
@@ -54,14 +123,14 @@ def _do_login_page():
             (st.success if ok else st.error)(msg)
 
 if not st.session_state.username:
-    _do_login_page()
-    st.stop()
+    # ── 임시: 로그인 비활성화(테스트용 admin 자동 로그인). 원복 시 아래 한 줄을 지우고 아래 두 줄 주석 해제 ──
+    st.session_state.username = "admin"
+    # _do_login_page()
+    # st.stop()
 
-# 로그인된 사용자 데이터 폴더로 저장 경로 설정
 _USER = st.session_state.username
 set_data_dir(user_dir(_USER))
 
-# 최초 로그인 시, 루트에 있던 기존 임포트 데이터를 이 계정 폴더로 1회 이관
 def _migrate_legacy_imports():
     import shutil
     legacy_dir = os.path.dirname(os.path.abspath(__file__))
@@ -78,141 +147,106 @@ if not st.session_state.get("_migrated"):
     _migrate_legacy_imports()
     st.session_state["_migrated"] = True
 
-# 사이드바: 사용자 정보 / 로그아웃 / 저장 데이터 삭제
-with st.sidebar:
-    st.markdown(f"### 👤 {_USER}")
-    if st.button("로그아웃"):
-        for k in ("username", "import_answered", "chat_messages"):
-            st.session_state.pop(k, None)
-        st.cache_data.clear()
-        st.rerun()
-    st.divider()
-    st.markdown("#### 💾 저장된 임포트 데이터")
-    _saved_tx = read_transactions_csv()
-    _saved_hold = read_manual_csv()
-    st.caption(f"거래내역 {len(_saved_tx)}건 · 잔고 {len(_saved_hold)}종목 저장됨")
-    if st.button("🗑️ 저장된 임포트 전체 삭제"):
-        clear_all_imports()
-        st.cache_data.clear()
-        st.success("저장된 임포트 데이터를 삭제했습니다.")
-        st.rerun()
 
-# 2. 메인 타이틀 및 헤더
-st.title("📈 AI 기반 포트폴리오 성과 검진 대시보드")
-st.markdown("토스증권 데이터를 실시간 연동하여 보유 자산 수익률(XIRR 등)을 점검하고, **Gemini AI**를 통한 리밸런싱 인사이트를 얻어보세요.")
-
-# 3. 데이터 로딩 (캐싱 적용으로 API 호출 낭비 방지)
-@st.cache_data(ttl=300) # 5분간 데이터 캐시 유지
+# ── 데이터 로딩 (캐싱) ─────────────────────────────────────────
+@st.cache_data(ttl=300)
 def fetch_portfolio_data():
     load_dotenv()
     CLIENT_ID = os.getenv("TOSS_CLIENT_ID")
     CLIENT_SECRET = os.getenv("TOSS_CLIENT_SECRET")
     ACCOUNT_NO = os.getenv("TOSS_ACCOUNT_NO", "1")
-    
     token = get_access_token(CLIENT_ID, CLIENT_SECRET)
     if not token:
-        return None, "토스증권 API 토큰 발급에 실패했습니다. API 키(CLIENT_ID, SECRET)를 확인하세요."
-        
+        return None, "토스증권 API 토큰 발급에 실패했습니다. API 키(CLIENT_ID, SECRET)와 등록 IP를 확인하세요."
     toss_data = get_holdings(token, ACCOUNT_NO)
     if not toss_data:
-        return None, "계좌/자산 데이터를 불러오는 데 실패했습니다."
-
-    # 실제 예수금(KRW + USD 환산) 조회
+        return None, "계좌·자산 데이터를 불러오지 못했습니다."
     krw_cash = get_buying_power(token, ACCOUNT_NO, "KRW")
     usd_cash = get_buying_power(token, ACCOUNT_NO, "USD")
     fx_rate = get_exchange_rate(token)
     cash_krw = krw_cash + usd_cash * fx_rate
-
     portfolio_json = transform_to_mvp_json("usr_102938", toss_data, cash_krw, fx_rate)
+    portfolio_json.setdefault("asset_summary", {})
+    portfolio_json["asset_summary"]["cash_krw_native"] = krw_cash
+    portfolio_json["asset_summary"]["cash_usd_native"] = usd_cash
+    portfolio_json["asset_summary"]["fx_rate"] = fx_rate
     return portfolio_json, None
 
 @st.cache_data(ttl=300)
 def fetch_trade_data():
-    """체결 이력 + 종목명 매핑 후 상세 거래내역 DataFrame과 원본 주문 리스트 반환"""
     load_dotenv()
     CLIENT_ID = os.getenv("TOSS_CLIENT_ID")
     CLIENT_SECRET = os.getenv("TOSS_CLIENT_SECRET")
     ACCOUNT_NO = os.getenv("TOSS_ACCOUNT_NO", "1")
-
     token = get_access_token(CLIENT_ID, CLIENT_SECRET)
     if not token:
         return pd.DataFrame(), [], 0.0, {}
     fx_rate = get_exchange_rate(token)
     orders = get_order_history(token, ACCOUNT_NO)
-
-    # 보유 종목에서 티커→종목명 매핑 확보
     holdings_data = get_holdings(token, ACCOUNT_NO) or {}
-    name_map = {
-        i.get("symbol"): i.get("name")
-        for i in holdings_data.get("result", {}).get("items", [])
-    }
+    name_map = {i.get("symbol"): i.get("name") for i in holdings_data.get("result", {}).get("items", [])}
     detail_df = build_transaction_detail(orders, fx_rate, name_map)
     return detail_df, orders, fx_rate, name_map
 
-def _build_ticker_map(holdings, max_items=6):
-    """보유 종목 리스트에서 {종목명: yfinance티커} 매핑 생성 (비중 상위 위주)."""
-    tmap = {}
-    for h in holdings[:max_items]:
-        country = "KR" if h.get("currency") == "KRW" else "US"
-        yft = to_yf_ticker(h.get("ticker"), country)
-        if yft:
-            tmap[h.get("name") or h.get("ticker")] = yft
-    return tmap
-
-@st.cache_data(ttl=1800)  # 벤치마크(yfinance)는 30분 캐시
-def fetch_benchmark_analysis(ticker_map, period="2y"):
-    """정규화 성장 시계열 + 분기별 S&P500 대비 초과수익률 표를 반환."""
-    growth = build_growth_frame(ticker_map, period="1y")
-    excess = quarterly_excess_returns(ticker_map, period=period)
-    return growth, excess
-
 @st.cache_data(ttl=1800)
 def fetch_manual_holdings(fx_rate, user):
-    """한화투자증권 등 수동 입력 보유 종목 로드 (user별 캐시)."""
     return load_manual_holdings(fx_rate)
 
 @st.cache_data(ttl=1800)
 def fetch_manual_transactions(user):
-    """전체 거래내역(청산 포함) CSV 로드 (user별 캐시)."""
     return read_transactions_csv()
 
 @st.cache_data(ttl=1800)
+def fetch_dividends(user):
+    return read_dividends_csv()
+
+@st.cache_data(ttl=1800)
+def fetch_div_estimate(orders, fx):
+    """보유수량 타임라인 × yfinance 주당배당으로 배당 추정 (검증값 없는 종목 보완용)."""
+    return compute_dividends(orders, fx)
+
+@st.cache_data(ttl=1800)
 def fetch_tx_derived_holdings(fx_rate, user):
-    """거래내역에서 현재 순보유(청산 제외) 산출 (user별 캐시)."""
     return derive_holdings_from_tx(read_transactions_csv(), fx_rate)
 
 @st.cache_data(ttl=1800)
-def fetch_income_analysis(orders, fx):
-    """배당 수령 추정 + 환차손익 분석 (yfinance 배당·환율 활용). orders=토스+수동 합산."""
-    div_df = compute_dividends(orders, fx)
-    fx_summary, fx_df = compute_fx_pnl(orders, fx)
-    return div_df, fx_summary, fx_df, fx
+def fetch_ticker_profit_growth(orders, fx, ticker, native=False):
+    return build_ticker_profit_growth(orders, fx, ticker, native)
 
 @st.cache_data(ttl=1800)
-def fetch_pme_analysis(orders, fx, name_map):
-    """매매 타이밍을 반영한 PME 종목별 초과수익표 + 포트폴리오 성장 추이. orders=토스+수동 합산."""
-    pme_table = build_pme_table(orders, fx, name_map)
-    pme_growth = build_pme_growth(orders, fx)
-    return pme_table, pme_growth
+def fetch_rolling_beta(orders, fx, ticker):
+    return compute_rolling_beta(orders, fx, ticker)
 
 @st.cache_data(ttl=1800)
-def fetch_pme_table_only(orders, fx, name_map):
-    """종목별 실현/평가 성과 표(청산 포함)만 계산 (성장추이 제외로 가볍게)."""
-    return build_pme_table(orders, fx, name_map)
+def fetch_usd_avg_cost(orders, fx):
+    return compute_usd_avg_cost(orders, fx)
+
+@st.cache_data(ttl=3600)
+def fetch_fx_10y():
+    return build_usdkrw_history_frame("10y")
 
 @st.cache_data(ttl=1800)
-def fetch_trade_spy_table(orders, fx, name_map):
-    """거래별 S&P500 대비 초과수익 투명 비교표."""
-    return build_trade_spy_table(orders, fx, name_map)
+def fetch_alpha_beta(orders, fx):
+    return compute_alpha_beta(orders, fx)
 
 @st.cache_data(ttl=1800)
-def fetch_ticker_profit_growth(orders, fx, ticker):
-    """종목별 수익금 성장 vs S&P500 수익금 시계열."""
-    return build_ticker_profit_growth(orders, fx, ticker)
+def fetch_performance_summary(orders, fx, dkn, dun):
+    return compute_performance_summary(orders, fx, dkn, dun)
+
+@st.cache_data(ttl=1800)
+def fetch_total_profit_growth(orders, fx):
+    return build_total_profit_growth(orders, fx)
+
+@st.cache_data(ttl=1800)
+def fetch_holdings_breakdown(orders, fx, name_map, div_items):
+    return build_holdings_breakdown(orders, fx, name_map, dict(div_items))
+
+@st.cache_data(ttl=1800)
+def fetch_ticker_price_trades(orders, ticker, start):
+    return build_ticker_price_trades(orders, ticker, start)
 
 @st.cache_data(ttl=3600)
 def fetch_stock_names(tickers):
-    """청산 종목 등 미보유 티커의 종목명을 토스 stocks API로 일괄 조회."""
     if not tickers:
         return {}
     load_dotenv()
@@ -220,8 +254,7 @@ def fetch_stock_names(tickers):
     if not token:
         return {}
     names = {}
-    joined = ",".join(tickers)
-    data = get_stock_info(token, joined) or {}
+    data = get_stock_info(token, ",".join(tickers)) or {}
     for item in data.get("result", []):
         if item.get("symbol") and item.get("name"):
             names[item["symbol"]] = item["name"]
@@ -229,13 +262,11 @@ def fetch_stock_names(tickers):
 
 
 def merge_manual_into_portfolio(portfolio_json, manual_df):
-    """수동(타 증권사) 보유를 토스 포트폴리오에 병합. 같은 티커는 증권사 통합 합산."""
+    """수동/타 증권사 보유를 포트폴리오에 병합. 같은 티커는 증권사 통합 합산."""
     if manual_df is None or manual_df.empty:
         return portfolio_json
     out = dict(portfolio_json)
     summary = dict(portfolio_json.get("asset_summary", {}))
-
-    # 티커 기준 통합 맵 구성 (토스 보유부터)
     merged = {}
     for h in portfolio_json.get("holdings", []):
         tk = h.get("ticker")
@@ -243,16 +274,10 @@ def merge_manual_into_portfolio(portfolio_json, manual_df):
         ret = float(h.get("return_pct", 0) or 0)
         cost = eval_krw / (1 + ret / 100) if (1 + ret / 100) != 0 else eval_krw
         merged[tk] = {
-            "ticker": tk,
-            "name": h.get("name"),
-            "currency": h.get("currency"),
-            "quantity": float(h.get("quantity", 0) or 0),
-            "eval_krw": eval_krw,
-            "cost_krw": cost,
-            "sector": h.get("sector", "Unknown"),
-            "brokers": {"토스증권"},
+            "ticker": tk, "name": h.get("name"), "currency": h.get("currency"),
+            "quantity": float(h.get("quantity", 0) or 0), "eval_krw": eval_krw,
+            "cost_krw": cost, "sector": h.get("sector", "Unknown"), "brokers": {"토스증권"},
         }
-
     add_eval = 0.0
     add_purchase = 0.0
     for _, r in manual_df.iterrows():
@@ -270,8 +295,7 @@ def merge_manual_into_portfolio(portfolio_json, manual_df):
         add_eval += eval_krw
         add_purchase += purchase_krw
         broker = r.get("증권사", "타증권사")
-
-        if tk in merged:  # 같은 종목 → 합산
+        if tk in merged:
             m = merged[tk]
             m["quantity"] += qty
             m["eval_krw"] += eval_krw
@@ -279,33 +303,22 @@ def merge_manual_into_portfolio(portfolio_json, manual_df):
             m["brokers"].add(broker)
         else:
             merged[tk] = {
-                "ticker": tk,
-                "name": r.get("종목명"),
-                "currency": cur,
-                "quantity": qty,
-                "eval_krw": eval_krw,
-                "cost_krw": purchase_krw,
-                "sector": "Unknown",
+                "ticker": tk, "name": r.get("종목명"), "currency": cur, "quantity": qty,
+                "eval_krw": eval_krw, "cost_krw": purchase_krw, "sector": "Unknown",
                 "brokers": {broker},
             }
-
     new_stock = sum(m["eval_krw"] for m in merged.values())
     holdings = []
     for m in merged.values():
         ret = (m["eval_krw"] / m["cost_krw"] - 1) * 100 if m["cost_krw"] else 0
         holdings.append({
-            "ticker": m["ticker"],
-            "name": m["name"],
-            "currency": m["currency"],
-            "quantity": round(m["quantity"], 4),
-            "eval_krw": round(m["eval_krw"]),
+            "ticker": m["ticker"], "name": m["name"], "currency": m["currency"],
+            "quantity": round(m["quantity"], 4), "eval_krw": round(m["eval_krw"]),
             "weight_pct": round(m["eval_krw"] / new_stock * 100, 2) if new_stock else 0,
-            "sector": m["sector"],
-            "return_pct": round(ret, 2),
+            "sector": m["sector"], "return_pct": round(ret, 2),
             "brokers": ", ".join(sorted(m["brokers"])),
         })
     holdings.sort(key=lambda x: x["weight_pct"], reverse=True)
-
     summary["stock_eval_krw"] = round(new_stock)
     base_total = float(portfolio_json.get("asset_summary", {}).get("total_asset_krw", 0) or 0)
     summary["total_asset_krw"] = round(base_total + add_eval)
@@ -315,48 +328,38 @@ def merge_manual_into_portfolio(portfolio_json, manual_df):
     return out
 
 
-# 4. 임포트 여부 게이트(예/아니오) → 답변 후에만 토스 API 로드
-if "import_answered" not in st.session_state:
-    st.session_state.import_answered = False
+def _empty_portfolio(fx=1400.0):
+    return {
+        "user_profile": {"user_id": _USER, "target_benchmark": "S&P 500"},
+        "asset_summary": {
+            "total_asset_krw": 0, "stock_eval_krw": 0, "purchase_krw": 0, "cash_krw": 0,
+            "cash_krw_native": 0, "cash_usd_native": 0, "fx_rate": fx,
+        },
+        "holdings": [],
+    }
 
-if not st.session_state.import_answered:
-    st.header("📥 다른 증권사 거래내역을 임포트하시겠어요?")
-    _saved_tx0 = read_transactions_csv()
-    _saved_h0 = read_manual_csv()
-    if len(_saved_tx0) or len(_saved_h0):
-        st.info(f"이 계정에 저장된 임포트: 거래내역 {len(_saved_tx0)}건 · 잔고 {len(_saved_h0)}종목 — 그대로 사용할 수 있어요.")
-    st.markdown("토스증권은 API로 자동 연동됩니다. **한화투자증권 등 API가 없는 증권사** 종목도 함께 분석하려면 임포트하세요.")
-    gc1, gc2 = st.columns(2)
-    with gc1:
-        if st.button("✅ 예, 임포트/관리하기", type="primary", key="gate_yes"):
-            st.session_state.show_import_ui = True
-    with gc2:
-        if st.button("➡️ 아니오, 바로 분석 시작", key="gate_no"):
-            st.session_state.import_answered = True
-            st.session_state.show_import_ui = False
-            st.rerun()
 
-    if st.session_state.get("show_import_ui"):
-        st.markdown("각 증권사에서 **거래내역/잔고를 다운로드**해 올리면 AI가 표준 형식으로 변환·저장합니다.")
-        with st.container(border=True):
-            broker_name = st.text_input("증권사 이름", value="한화투자증권", key="broker_name")
+def _current_usdkrw():
+    s = get_usdkrw_history("5d")
+    return float(s.iloc[-1]) if (s is not None and not s.empty) else 1421.0
+
+
+# ── 임포트 UI (거래내역/잔고 업로드·붙여넣기) ─────────────────────
+def render_import_ui(key_prefix="imp"):
+    st.caption("증권사에서 내려받은 거래내역/잔고 파일을 올리면 AI가 표준 형식으로 변환·저장합니다.")
+    broker_name = st.text_input("증권사 이름", value="한화투자증권", key=f"{key_prefix}_broker")
     import_mode = st.radio(
         "임포트 유형",
-        ["전체 거래내역 (매수·매도 전부, 청산 종목 포함) ⭐권장", "현재 잔고만 (보유 종목 스냅샷)"],
-        key="import_mode",
+        ["전체 거래내역 (매수·매도 전체, 청산 종목 포함) · 권장", "현재 잔고만 (보유 종목 스냅샷)"],
+        key=f"{key_prefix}_mode",
     )
     is_full_tx = import_mode.startswith("전체")
-    st.caption(
-        "⭐ **전체 거래내역**을 올리면 이미 매도한(청산) 종목까지 성과 분석에 포함됩니다. "
-        "잔고만 있으면 현재 보유 종목만 반영됩니다."
-    )
     ups = st.file_uploader(
-        "거래내역/잔고 파일 (여러 개 선택 가능 · CSV·TXT·엑셀)",
-        type=["csv", "txt", "xlsx", "xls"], accept_multiple_files=True, key="import_files"
+        "파일 업로드 (CSV·TXT·엑셀, 복수 선택 가능)",
+        type=["csv", "txt", "xlsx", "xls"], accept_multiple_files=True, key=f"{key_prefix}_files",
     )
-    pasted = st.text_area("또는 여기에 직접 붙여넣기", height=140, key="import_paste",
-                          placeholder="매수/매도 일자·종목·수량·단가가 포함된 거래내역을 붙여넣으세요")
-
+    pasted = st.text_area("또는 직접 붙여넣기", height=120, key=f"{key_prefix}_paste",
+                          placeholder="매수/매도 일자·종목·수량·단가가 포함된 거래내역")
     raw_texts = []
     if ups:
         for up in ups:
@@ -369,10 +372,10 @@ if not st.session_state.import_answered:
                 st.error(f"'{up.name}' 파일을 읽지 못했습니다: {e}")
     if pasted.strip():
         raw_texts.append(pasted)
-
-    if st.button("🤖 AI로 변환 후 합산 저장", type="primary", disabled=not raw_texts):
+    if st.button("AI로 변환 후 저장", type="primary", disabled=not raw_texts, key=f"{key_prefix}_go"):
         all_rows = []
-        with st.spinner("AI가 거래내역을 분석하는 중입니다..."):
+        all_divs = []
+        with st.spinner("AI가 파일을 분석하는 중입니다..."):
             for rt in raw_texts:
                 if is_full_tx:
                     parsed, perr = parse_brokerage_full_transactions(rt, broker_name)
@@ -382,598 +385,806 @@ if not st.session_state.import_answered:
                     st.warning(perr)
                 elif parsed:
                     all_rows.extend(parsed)
-        if all_rows:
-            st.markdown("**변환 결과 미리보기**")
-            preview_df = pd.DataFrame(all_rows)
-            numcols = ("수량", "단가") if is_full_tx else ("수량", "평균매수가")
-            for c in numcols:
-                if c in preview_df.columns:
-                    preview_df[c] = pd.to_numeric(preview_df[c], errors="coerce")
-            st.dataframe(preview_df, use_container_width=True, hide_index=True)
+                if is_full_tx:  # 같은 파일에서 배당/분배금 기록도 함께 추출
+                    dparsed, derr = parse_brokerage_dividends(rt, broker_name)
+                    if dparsed:
+                        all_divs.extend(dparsed)
+        if all_rows or all_divs:
             if is_full_tx:
-                saved = save_parsed_transactions(all_rows, replace_broker=broker_name)
-                # 같은 증권사의 잔고 스냅샷은 제거(중복 방지)
+                saved = save_parsed_transactions(all_rows, replace_broker=broker_name) if all_rows else 0
                 _hold = read_manual_csv()
                 if not _hold.empty:
                     write_manual_csv(_hold[_hold["증권사"] != broker_name])
-                msg = f"{saved}건의 거래(매수·매도·청산 포함)를 '{broker_name}'로 저장했습니다."
+                dsaved = save_parsed_dividends(all_divs, replace_broker=broker_name) if all_divs else 0
+                msg = f"{saved}건의 거래 · {dsaved}건의 배당을 '{broker_name}'로 저장했습니다."
             else:
                 saved = save_parsed_holdings(all_rows, replace_broker=broker_name)
                 msg = f"{saved}개 보유 종목을 '{broker_name}'로 저장했습니다."
             st.cache_data.clear()
-            st.success(msg + " 아래 분석에 자동 합산됩니다.")
+            st.success(msg)
             st.rerun()
         else:
             st.warning("변환된 항목이 없습니다. 원본 형식을 확인해 주세요.")
 
-        if st.button("분석 시작 →", type="primary", key="gate_done"):
-            st.session_state.import_answered = True
-            st.rerun()
+
+# ════════════════════════════════════════════════════════════════
+# 1) 데이터 소스 선택 게이트
+# ════════════════════════════════════════════════════════════════
+if "data_source" not in st.session_state:
+    st.session_state.data_source = None
+if "view" not in st.session_state:
+    st.session_state.view = "개요"
+
+SOURCE_LABELS = {
+    "tx": "거래내역 임포트",
+    "toss": "토스증권 API",
+    "both": "거래내역 + 토스증권 API",
+}
+
+if st.session_state.data_source is None:
+    st.title("📈 자산관리 대시보드")
+    st.markdown("분석에 사용할 **데이터 소스**를 선택하세요. 언제든 왼쪽 사이드바에서 변경할 수 있습니다.")
+    _saved_tx = read_transactions_csv()
+    _saved_hold = read_manual_csv()
+    if len(_saved_tx) or len(_saved_hold):
+        st.info(f"저장된 임포트 데이터: 거래내역 {len(_saved_tx)}건 · 잔고 {len(_saved_hold)}종목")
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        with st.container(border=True):
+            st.markdown("#### 📥 거래내역 임포트")
+            st.caption("증권사 거래내역/잔고 파일을 올려 분석합니다. 토스 API 없이도 사용할 수 있습니다.")
+            if st.button("이 방식으로 시작", key="src_tx", use_container_width=True):
+                st.session_state.data_source = "tx"
+                st.rerun()
+    with s2:
+        with st.container(border=True):
+            st.markdown("#### 🔗 토스증권 API")
+            st.caption("토스증권 계좌를 실시간 연동합니다. API 키(.env)와 등록 IP가 필요합니다.")
+            if st.button("이 방식으로 시작", key="src_toss", use_container_width=True):
+                st.session_state.data_source = "toss"
+                st.rerun()
+    with s3:
+        with st.container(border=True):
+            st.markdown("#### 🧩 거래내역 + 토스 API")
+            st.caption("토스증권 계좌와 타 증권사 거래내역을 통합해 분석합니다. (권장)")
+            if st.button("이 방식으로 시작", type="primary", key="src_both", use_container_width=True):
+                st.session_state.data_source = "both"
+                st.rerun()
     st.stop()
 
-# ── 임포트 답변 완료 → 토스 API 로드 + 대시보드 ──────────────────
-with st.spinner("증권사 API와 연동 중입니다..."):
-    portfolio_json, error_msg = fetch_portfolio_data()
 
-if error_msg:
-    st.error(error_msg)
-elif portfolio_json:
-    # 거래 이력(토스) + 환율 확보
-    detail_df, toss_orders, fx_rate, toss_name_map = fetch_trade_data()
-    fx_for_manual = fx_rate if fx_rate else 1421.0
+# ════════════════════════════════════════════════════════════════
+# 2) 데이터 로딩 (선택한 소스에 따라)
+# ════════════════════════════════════════════════════════════════
+source = st.session_state.data_source
+use_toss = source in ("toss", "both")
+use_tx = source in ("tx", "both")
 
-    # 타 증권사 데이터: (A) 전체 거래내역(청산 포함) + (B) 잔고 스냅샷
+portfolio_json = None
+toss_orders = []
+toss_name_map = {}
+fx_rate = None
+
+if use_toss:
+    with st.spinner("토스증권 API와 연동 중입니다..."):
+        portfolio_json, toss_err = fetch_portfolio_data()
+    if toss_err or not portfolio_json:
+        if source == "toss":
+            st.error(toss_err or "토스증권 데이터를 불러오지 못했습니다.")
+            st.stop()
+        else:
+            st.warning(f"토스증권 연동 실패 — 임포트한 거래내역만으로 분석합니다. ({toss_err})")
+            use_toss = False
+            portfolio_json = None
+    else:
+        _, toss_orders, fx_rate, toss_name_map = fetch_trade_data()
+
+if not use_toss:
+    fx_rate = _current_usdkrw()
+    portfolio_json = _empty_portfolio(fx_rate)
+if not fx_rate:
+    fx_rate = _current_usdkrw()
+
+# 타 증권사 거래내역·잔고 (tx/both)
+tx_df = pd.DataFrame()
+holdings_snapshot = pd.DataFrame()
+has_tx = False
+if use_tx:
     tx_df = fetch_manual_transactions(_USER)
     has_tx = tx_df is not None and not tx_df.empty
     tx_brokers = set(tx_df["증권사"].unique()) if has_tx else set()
-
-    holdings_snapshot = fetch_manual_holdings(fx_for_manual, _USER)
-    # 거래내역이 있는 증권사는 잔고 스냅샷 대신 거래내역에서 파생 (중복 방지)
+    holdings_snapshot = fetch_manual_holdings(fx_rate, _USER)
     if holdings_snapshot is not None and not holdings_snapshot.empty:
         holdings_snapshot = holdings_snapshot[~holdings_snapshot["증권사"].isin(tx_brokers)]
+    tx_holdings = fetch_tx_derived_holdings(fx_rate, _USER) if has_tx else pd.DataFrame()
+    parts = [d for d in (tx_holdings, holdings_snapshot) if d is not None and not d.empty]
+    manual_df = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+else:
+    manual_df = pd.DataFrame()
+has_manual = not manual_df.empty
 
-    tx_holdings = fetch_tx_derived_holdings(fx_for_manual, _USER) if has_tx else pd.DataFrame()
+if has_manual:
+    portfolio_json = merge_manual_into_portfolio(portfolio_json, manual_df)
 
-    # 화면/병합용 통합 보유 종목 (현재 순보유)
-    manual_parts = [d for d in (tx_holdings, holdings_snapshot) if d is not None and not d.empty]
-    manual_df = pd.concat(manual_parts, ignore_index=True) if manual_parts else pd.DataFrame()
-    has_manual = not manual_df.empty
+# 통합 주문(체결) 리스트
+combined_orders = list(toss_orders)
+if use_tx and has_tx:
+    combined_orders += transactions_to_orders(tx_df)
+if use_tx and holdings_snapshot is not None and not holdings_snapshot.empty:
+    combined_orders += manual_to_orders(holdings_snapshot)
 
-    if has_manual:
-        portfolio_json = merge_manual_into_portfolio(portfolio_json, manual_df)
-    if has_tx or has_manual:
-        n_brokers = manual_df["증권사"].nunique() if has_manual else len(tx_brokers)
-        extra = " (청산 종목 포함 거래내역 반영)" if has_tx else ""
-        st.success(f"토스증권 + {n_brokers}개 타 증권사 데이터를 통합했습니다.{extra}")
-    else:
-        st.success("토스증권 계좌 데이터 연동 성공! (타 증권사 임포트 없음)")
+# 종목명 매핑
+combined_name_map = dict(toss_name_map)
+if has_manual:
+    for _, r in manual_df.iterrows():
+        combined_name_map.setdefault(str(r.get("티커")), r.get("종목명"))
+traded_tickers = {o.get("symbol") for o in combined_orders if o.get("symbol")}
+unknown = tuple(sorted(t for t in traded_tickers if t not in combined_name_map))
+if unknown and use_toss:
+    combined_name_map.update(fetch_stock_names(unknown))
 
-    # 토스 주문 + 타증권사 주문 결합 → 모든 성과 분석에 반영
-    #  - 거래내역(청산 포함): transactions_to_orders  /  잔고 스냅샷: manual_to_orders
-    combined_orders = list(toss_orders)
-    if has_tx:
-        combined_orders += transactions_to_orders(tx_df)
-    if holdings_snapshot is not None and not holdings_snapshot.empty:
-        combined_orders += manual_to_orders(holdings_snapshot)
+detail_df = build_transaction_detail(combined_orders, fx_rate, combined_name_map)
 
-    # 통합 종목명 매핑 + 통합 상세 거래내역 (토스 + 타 증권사)
-    combined_name_map = dict(toss_name_map)
-    if has_manual:
-        for _, r in manual_df.iterrows():
-            combined_name_map.setdefault(str(r.get("티커")), r.get("종목명"))
-    # 청산 종목 등 이름 미상 티커를 토스 stocks API로 보강
-    traded_tickers = {o.get("symbol") for o in combined_orders if o.get("symbol")}
-    unknown = tuple(sorted(t for t in traded_tickers if t not in combined_name_map))
-    if unknown:
-        combined_name_map.update(fetch_stock_names(unknown))
-    detail_df = build_transaction_detail(combined_orders, fx_rate, combined_name_map)
+# 종목별 청산 여부
+net_qty = {}
+for _o in combined_orders:
+    _ex = _o.get("execution") or {}
+    _q = float(_ex.get("filledQuantity") or 0)
+    if _q == 0:
+        continue
+    _sym = _o.get("symbol")
+    net_qty[_sym] = net_qty.get(_sym, 0) + (_q if _o.get("side") == "BUY" else -_q)
+status_map = {s: ("청산" if abs(v) < 1e-6 else "보유중") for s, v in net_qty.items()}
+if detail_df is not None and not detail_df.empty:
+    detail_df["상태"] = detail_df["티커"].map(lambda t: status_map.get(t, "보유중"))
 
-    # 종목별 청산 여부(현재 순보유수량 0 → 청산) 계산 후 거래내역에 표시
-    net_qty = {}
-    for _o in combined_orders:
-        _ex = _o.get("execution") or {}
-        _q = float(_ex.get("filledQuantity") or 0)
-        if _q == 0:
+summary = portfolio_json.get("asset_summary", {})
+holdings = portfolio_json.get("holdings", [])
+has_data = bool(combined_orders) or bool(holdings)
+
+# 배당: 검증(임포트/직접입력) 우선 + yfinance 추정(미입력 종목 보완, 토글)
+# 신뢰성 낮은 배당(합성 고배당 ETF·데이터 오류)은 추정에서 제외하고 직접 입력을 유도
+UNRELIABLE_DIV_YIELD = 0.6  # 연환산 추정 배당수익률 60% 초과 → 신뢰 불가
+UNRELIABLE_DIV_TICKERS = {
+    "MSTY", "TSLY", "NVDY", "CONY", "APLY", "AMZY", "MSFO", "GOOY", "FBY",
+    "YMAX", "YMAG", "ULTY", "AMDY", "PLTY", "MRNY", "SNOY", "OARK", "JEPY",
+}
+st.session_state.setdefault("include_div_est", True)
+include_div_est = st.session_state["include_div_est"]
+div_records = fetch_dividends(_USER) if use_tx else pd.DataFrame()
+div_krw_by_ticker = {}
+div_krw_native = div_usd_native = 0.0
+_div_view_rows = []
+verified_tickers = set()
+unreliable_div_tickers = []
+if div_records is not None and not div_records.empty:
+    for _, r in div_records.iterrows():
+        amt = float(r.get("배당금", 0) or 0)
+        if amt <= 0:
             continue
-        _sym = _o.get("symbol")
-        net_qty[_sym] = net_qty.get(_sym, 0) + (_q if _o.get("side") == "BUY" else -_q)
-    status_map = {s: ("청산" if abs(v) < 1e-6 else "보유중") for s, v in net_qty.items()}
-    if detail_df is not None and not detail_df.empty:
-        detail_df["상태"] = detail_df["티커"].map(lambda t: status_map.get(t, "보유중"))
-
-    summary = portfolio_json.get("asset_summary", {})
-    holdings = portfolio_json.get("holdings", [])
-
-    # 🔖 (임포트 직후) 타 증권사 보유 상세 + 직접 수정
-    st.header("🏦 타 증권사 보유 상세 (임포트)")
-    if has_manual:
-        st.markdown("상단에서 임포트한 타 증권사 종목입니다. (자산 요약·성과 분석에 이미 합산되어 있습니다)")
-        m_cols = ["증권사", "종목명", "티커", "시장", "통화", "수량",
-                  "평균매수가", "현재가", "평가액(원)", "수익률(%)", "매수일"]
-        m_cols = [c for c in m_cols if c in manual_df.columns]
-        st.dataframe(
-            manual_df[m_cols].style.format({
-                "평균매수가": "{:,.2f}", "현재가": "{:,.2f}",
-                "평가액(원)": "{:,.0f}", "수익률(%)": "{:+.2f}", "수량": "{:g}"
-            }),
-            use_container_width=True, hide_index=True
-        )
-        _by_broker = manual_df.groupby("증권사")["평가액(원)"].sum()
-        _cols = st.columns(max(len(_by_broker), 1))
-        for _c, (_bk, _v) in zip(_cols, _by_broker.items()):
-            _c.metric(f"{_bk} 평가액", f"{_v:,.0f} ₩")
-    else:
-        st.info("임포트된 타 증권사 종목이 없습니다. 페이지 상단의 '📥 다른 증권사 거래내역 임포트'로 추가하세요.")
-
-    with st.expander("✏️ 보유 내역 직접 수정하기 (AI 파싱 오류 보정 · 행 추가/삭제)", expanded=False):
-        tab_tx, tab_hold = st.tabs(["📜 전체 거래내역 (청산 포함)", "📦 잔고 스냅샷"])
-
-        with tab_tx:
-            st.caption("매수/매도 개별 거래를 직접 고치거나 추가/삭제한 뒤 저장하세요. 청산 종목도 여기서 관리됩니다.")
-            raw_tx = read_transactions_csv()
-            edited_tx = st.data_editor(
-                raw_tx, num_rows="dynamic", use_container_width=True, hide_index=True,
-                column_config={
-                    "시장": st.column_config.SelectboxColumn("시장", options=["KOSPI", "KOSDAQ", "US"]),
-                    "구분": st.column_config.SelectboxColumn("구분", options=["매수", "매도"]),
-                    "통화": st.column_config.SelectboxColumn("통화", options=["KRW", "USD"]),
-                    "수량": st.column_config.NumberColumn("수량", format="%g"),
-                    "단가": st.column_config.NumberColumn("단가", format="%.2f"),
-                },
-                key="tx_editor",
-            )
-            if st.button("💾 거래내역 저장", type="primary", key="save_tx"):
-                n = write_transactions_csv(edited_tx)
-                fetch_manual_transactions.clear()
-                fetch_tx_derived_holdings.clear()
-                st.success(f"{n}건의 거래를 저장했습니다.")
-                st.rerun()
-
-        with tab_hold:
-            st.caption("잔고(현재 보유)만 입력한 증권사의 종목을 수정합니다.")
-            raw_manual = read_manual_csv()
-            edited = st.data_editor(
-                raw_manual, num_rows="dynamic", use_container_width=True, hide_index=True,
-                column_config={
-                    "시장": st.column_config.SelectboxColumn("시장", options=["KOSPI", "KOSDAQ", "US"]),
-                    "통화": st.column_config.SelectboxColumn("통화", options=["KRW", "USD"]),
-                    "수량": st.column_config.NumberColumn("수량", format="%g"),
-                    "평균매수가": st.column_config.NumberColumn("평균매수가", format="%.2f"),
-                },
-                key="manual_editor",
-            )
-            if st.button("💾 잔고 저장", type="primary", key="save_hold"):
-                n = write_manual_csv(edited)
-                fetch_manual_holdings.clear()
-                st.success(f"{n}개 종목을 저장했습니다.")
-                st.rerun()
-
-    st.divider()
-
-    # 🔖 (1) 주요 지표 섹션 (Metrics)
-    st.header("1. 자산 요약")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("총 자산 (원)", f"{summary.get('total_asset_krw', 0):,.0f} ₩")
-    col2.metric("주식 평가액 (원)", f"{summary.get('stock_eval_krw', 0):,.0f} ₩")
-    col3.metric("포트폴리오 수익률 (XIRR)", f"{summary.get('xirr_annual_pct', 0)} %")
-    col4.metric("지수대비 성과 (PME Alpha)", f"{summary.get('pme_alpha_pct', 0)} %", 
-                delta_color="normal" if summary.get('pme_alpha_pct', 0) >= 0 else "inverse")
-                
-    st.divider()
-
-    # 🔖 (2) 보유 종목 시각화 및 리스트
-    st.header("2. 보유 종목 현황 및 비중")
-    st.caption("여러 증권사에 같은 종목이 있으면 **통합 합산**해 총수량으로 표시합니다.")
-    if holdings:
-        df = pd.DataFrame(holdings)
-        # 숫자 컬럼 타입 통일 (Arrow 직렬화 경고 방지)
-        for c in ("quantity", "eval_krw", "weight_pct", "return_pct"):
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
-        # 컬럼 이름 예쁘게 변경
-        df_display = df.rename(columns={
-            "ticker": "티커", "name": "종목명", "quantity": "수량", "eval_krw": "평가액(원)",
-            "weight_pct": "비중(%)", "return_pct": "수익률(%)", "currency": "통화",
-            "sector": "섹터", "brokers": "보유 증권사"
-        })
-        display_cols = ["종목명", "통화", "수량", "평가액(원)", "비중(%)", "수익률(%)", "보유 증권사"]
-        display_cols = [c for c in display_cols if c in df_display.columns]
-
-        row1, row2 = st.columns([1.5, 1])
-
-        with row1:
-            st.markdown("#### 관심 종목 상세")
-            # 데이터프레임 UI
-            st.dataframe(df_display[display_cols], use_container_width=True, hide_index=True)
-
-        with row2:
-            st.markdown("#### 자산 분포 현황")
-            # 비중 파이 차트
-            fig = px.pie(df, values='weight_pct', names='name', hole=0.4)
-            fig.update_traces(textposition='inside', textinfo='percent+label')
-            st.plotly_chart(fig, use_container_width=True)
-
-    else:
-        st.info("보유 종목이 없습니다.")
-
-    st.divider()
-
-    # 🔖 (3) 통합 거래 내역 (토스 + 임포트, 시간 오름차순)
-    st.header("3. 📜 통합 거래 내역 (토스증권 + 타 증권사)")
-    st.markdown("토스증권 API 체결 내역과 임포트한 타 증권사 거래를 **시간 오름차순**으로 정리했습니다.")
-
-    raw_orders = combined_orders
-    trades_summary_text = None
-    if detail_df is not None and not detail_df.empty:
-        asc = detail_df.sort_values("체결일시", ascending=True).reset_index(drop=True)
-        trades_summary_text = asc.drop(columns=["체결일시"], errors="ignore").to_string(index=False)
-
-        f1, f2, f3, f4 = st.columns(4)
-        with f1:
-            brokers_opt = sorted(asc["증권사"].unique()) if "증권사" in asc.columns else []
-            sel_broker = st.multiselect("증권사 필터", brokers_opt, key="tx_broker")
-        with f2:
-            sel_side = st.multiselect("구분 필터", ["매수", "매도"], key="tx_side")
-        with f3:
-            sel_ticker = st.multiselect("종목 필터", sorted(asc["티커"].unique()), key="tx_ticker")
-        with f4:
-            status_opt = sorted(asc["상태"].unique()) if "상태" in asc.columns else []
-            sel_status = st.multiselect("청산여부 필터", status_opt, key="tx_status")
-
-        view = asc.copy()
-        if sel_broker and "증권사" in view.columns:
-            view = view[view["증권사"].isin(sel_broker)]
-        if sel_side:
-            view = view[view["구분"].isin(sel_side)]
-        if sel_ticker:
-            view = view[view["티커"].isin(sel_ticker)]
-        if sel_status and "상태" in view.columns:
-            view = view[view["상태"].isin(sel_status)]
-
-        cols = ["날짜", "증권사", "종목명", "티커", "상태", "구분", "수량",
-                "체결단가", "통화", "체결금액(원본)", "체결금액(원)", "수수료", "세금"]
-        cols = [c for c in cols if c in view.columns]
-        st.dataframe(
-            view[cols].style.format({
-                "체결단가": "{:,.2f}", "체결금액(원본)": "{:,.2f}",
-                "체결금액(원)": "{:,.0f}", "수수료": "{:,.2f}", "세금": "{:,.2f}", "수량": "{:g}"
-            }),
-            use_container_width=True, hide_index=True, height=560
-        )
-        if len(asc):
-            st.caption(
-                f"총 {len(view)}건 (오름차순) · 가장 오래된 거래 {asc['날짜'].iloc[0]} ~ 최근 {asc['날짜'].iloc[-1]} · "
-                f"적용 환율 1 USD = {fx_rate:,.1f} KRW"
-            )
-        with st.expander("🔬 원본 주문(JSON) 보기 (토스 + 합성 임포트)"):
-            st.json(raw_orders)
-    else:
-        st.info("거래 내역이 없거나 불러오지 못했습니다.")
-
-    st.divider()
-
-    # 🔖 (4) 종목별 실현·평가 성과 (청산 종목 포함) — 항상 표시
-    st.header("4. 🎯 종목별 실현·평가 성과 (청산 종목 포함)")
-    st.markdown("**전량 매도(청산)한 종목**도 매도 시점 기준 실현 수익률과 **S&P500 대비 초과수익**을 함께 보여줍니다. (토스 + 임포트 합산)")
-
-    with st.spinner("종목별 성과(S&P500 대비)를 계산하는 중입니다... (yfinance 시세)"):
-        pme_name_map = dict(combined_name_map)
-        perf_tbl = fetch_pme_table_only(combined_orders, fx_rate, pme_name_map)
-
-    if perf_tbl is not None and not perf_tbl.empty:
-        fmt = {
-            "투자원금(원)": "{:,.0f}", "내 수익률(%)": "{:+.2f}",
-            "S&P500 PME(%)": "{:+.2f}", "초과수익(%p)": "{:+.2f}", "초과손익(원)": "{:,.0f}"
-        }
-        closed = perf_tbl[perf_tbl["보유상태"] == "청산"]
-        held = perf_tbl[perf_tbl["보유상태"] == "보유중"]
-
-        st.markdown("#### 🏁 청산 종목 (매도 시점 기준 실현 성과)")
-        if not closed.empty:
-            st.dataframe(
-                closed.drop(columns=["보유상태"]).style.format(fmt)
-                .background_gradient(cmap="RdYlGn", subset=["초과수익(%p)"]),
-                use_container_width=True, hide_index=True
-            )
-            st.caption(
-                "**내 수익률**: 실제 매수/매도 시점 기준 실현 수익률. **S&P500 PME(%)**: 같은 시점·금액을 SPY에 넣었을 때 수익률. "
-                "**초과수익(%p)** 양수(초록)면 그 기간 S&P500보다 잘 벌고 청산한 것입니다."
-            )
+        tk = str(r.get("티커"))
+        is_usd = str(r.get("통화", "KRW")).upper() == "USD"
+        krw = amt * fx_rate if is_usd else amt
+        verified_tickers.add(tk)
+        div_krw_by_ticker[tk] = div_krw_by_ticker.get(tk, 0.0) + krw
+        if is_usd:
+            div_usd_native += amt
         else:
-            st.info("전량 매도(청산)한 종목이 없습니다.")
+            div_krw_native += amt
+        _div_view_rows.append({"일자": str(r.get("일자", "")), "종목": r.get("종목명") or tk, "티커": tk,
+                               "통화": "USD" if is_usd else "KRW", "배당금": amt, "원화환산": krw, "구분": "검증"})
+if include_div_est and has_data:
+    _est = fetch_div_estimate(combined_orders, fx_rate)
+    if _est is not None and not _est.empty:
+        # 종목별 매수원금(native)·최초 매수일 → 추정 배당의 연환산 수익률로 신뢰성 판단
+        _buy_native = {}
+        _first_date = {}
+        for _o in combined_orders:
+            if _o.get("side") != "BUY":
+                continue
+            _ex = _o.get("execution") or {}
+            _amt = float(_ex.get("filledAmount") or 0)
+            if _amt <= 0:
+                continue
+            _tk = str(_o.get("symbol"))
+            _buy_native[_tk] = _buy_native.get(_tk, 0.0) + _amt
+            try:
+                _d = pd.to_datetime(_ex.get("filledAt") or _o.get("orderedAt")).tz_localize(None)
+                if _tk not in _first_date or _d < _first_date[_tk]:
+                    _first_date[_tk] = _d
+            except Exception:
+                pass
+        _now = pd.Timestamp.now().normalize()
+        for _, r in _est.iterrows():
+            tk = str(r.get("종목"))  # compute_dividends는 종목=티커(symbol)
+            if tk in verified_tickers:  # 검증값이 있으면 추정 무시
+                continue
+            amt = float(r.get("배당수령(원본)", 0) or 0)
+            if amt <= 0:
+                continue
+            # 신뢰성: 연환산 추정 배당수익률(추정배당÷매수원금÷보유연수)이 과도하면 제외
+            _inv = _buy_native.get(tk, 0.0)
+            _yrs = max((_now - _first_date.get(tk, _now)).days / 365.0, 0.1)
+            _yld = (amt / _inv / _yrs) if _inv else 0.0
+            if tk.upper() in UNRELIABLE_DIV_TICKERS or _yld > UNRELIABLE_DIV_YIELD:
+                unreliable_div_tickers.append(tk)  # 추정 제외 → 직접 입력 안내
+                continue
+            is_usd = str(r.get("통화", "KRW")).upper() == "USD"
+            krw = float(r.get("배당수령(원)", 0) or 0)
+            div_krw_by_ticker[tk] = div_krw_by_ticker.get(tk, 0.0) + krw
+            if is_usd:
+                div_usd_native += amt
+            else:
+                div_krw_native += amt
+            _div_view_rows.append({"일자": "", "종목": combined_name_map.get(tk, tk), "티커": tk,
+                                   "통화": "USD" if is_usd else "KRW", "배당금": amt, "원화환산": krw,
+                                   "구분": f"추정({int(r.get('배당횟수', 0))}회)"})
+div_view_df = pd.DataFrame(_div_view_rows)
+div_items = tuple(sorted(div_krw_by_ticker.items()))
 
-        st.markdown("#### 📦 보유중 종목 (현재 평가 성과)")
-        if not held.empty:
-            st.dataframe(
-                held.drop(columns=["보유상태"]).style.format(fmt)
-                .background_gradient(cmap="RdYlGn", subset=["초과수익(%p)"]),
-                use_container_width=True, hide_index=True
-            )
-        else:
-            st.info("보유중 종목이 없습니다.")
-    else:
-        st.info("성과를 계산할 거래 이력이 없습니다.")
+# 공통 분석값(캐시) — 개요·성과·AI 컨텍스트 공유
+perf = fetch_performance_summary(combined_orders, fx_rate, div_krw_native, div_usd_native) if has_data else None
+ab = fetch_alpha_beta(combined_orders, fx_rate) if has_data else None
 
+
+# ════════════════════════════════════════════════════════════════
+# 3) 사이드바 (계정 · 데이터 소스 · 임포트 · 설정)
+# ════════════════════════════════════════════════════════════════
+with st.sidebar:
+    st.markdown(f"### 👤 {_USER}")
+    st.caption(f"데이터 소스 · **{SOURCE_LABELS.get(source, source)}**")
+    if st.button("🔄 데이터 소스 변경", use_container_width=True):
+        st.session_state.data_source = None
+        st.rerun()
     st.divider()
-
-    # 🔖 (5) 거래별 S&P500 대비 초과수익 (투명 계산) — 항상 표시
-    st.header("5. 🔍 S&P500 대비 초과수익 상세 (거래별 투명 계산)")
-    st.markdown(
-        "각 **매수 시점마다 그날 S&P500(SPY)을 샀다면**의 당시 주가와 현재 주가를 나란히 보여주고, "
-        "그 기간 S&P500 수익률과 내 종목 수익률을 비교해 **초과수익(%p)** 을 투명하게 계산합니다. "
-        "(국내 거래는 SPY를 원화로 환산해 공정 비교)"
-    )
-
-    with st.spinner("거래별 S&P500 비교를 계산하는 중입니다..."):
-        trade_tbl = fetch_trade_spy_table(combined_orders, fx_rate, combined_name_map)
-
-    if trade_tbl is not None and not trade_tbl.empty:
-        # 상태(보유중/청산) 컬럼 부착
-        trade_tbl = trade_tbl.copy()
-        trade_tbl["상태"] = trade_tbl["티커"].map(lambda t: status_map.get(t, "보유중"))
-
-        tf1, tf2 = st.columns(2)
-        with tf1:
-            sel_st = st.multiselect("상태 필터", ["보유중", "청산"], key="trade_spy_status")
-        with tf2:
-            sel_tk = st.multiselect("종목 필터", sorted(trade_tbl["티커"].unique()), key="trade_spy_tk")
-        tv = trade_tbl
-        if sel_st:
-            tv = tv[tv["상태"].isin(sel_st)]
-        if sel_tk:
-            tv = tv[tv["티커"].isin(sel_tk)]
-
-        show = ["날짜", "종목", "티커", "상태", "통화", "수량", "내 매수단가",
-                "당시 S&P500", "현재 S&P500", "S&P500 수익률(%)", "내 수익률(%)", "초과수익(%p)"]
-        show = [c for c in show if c in tv.columns]
-        st.dataframe(
-            tv[show].style.format({
-                "내 매수단가": "{:,.2f}", "당시 S&P500": "{:,.2f}", "현재 S&P500": "{:,.2f}",
-                "S&P500 수익률(%)": "{:+.2f}", "내 수익률(%)": "{:+.2f}", "초과수익(%p)": "{:+.2f}", "수량": "{:g}"
-            }).background_gradient(cmap="RdYlGn", subset=["초과수익(%p)"]),
-            use_container_width=True, hide_index=True, height=420
-        )
-        st.caption(
-            "※ '내 수익률'과 '초과수익'은 해당 매수분을 **현재까지 보유했다고 가정**한 값입니다. "
-            "청산 종목은 참고용(현재가 기준)입니다."
-        )
-
-        # 📈 종목별 수익금 성장 vs S&P500 (투자원금 제외 순수익)
-        st.markdown("#### 📈 종목별 수익금 성장 추이 (투자원금 제외) vs S&P500")
-        st.caption("투자한 원금을 뺀 **순수 수익금**이 시간에 따라 어떻게 커졌는지, 같은 돈을 S&P500에 넣었을 때와 비교합니다.")
-        tickers_opt = sorted(trade_tbl["티커"].unique())
-        default_tk = trade_tbl.sort_values("초과수익(%p)", ascending=False)["티커"].iloc[0] if not trade_tbl.empty else None
-        sel_growth_tk = st.selectbox(
-            "종목 선택", tickers_opt,
-            index=tickers_opt.index(default_tk) if default_tk in tickers_opt else 0,
-            format_func=lambda t: f"{combined_name_map.get(t, t)} ({t})",
-            key="growth_ticker",
-        )
-        with st.spinner("수익금 성장 추이를 계산하는 중입니다..."):
-            gdf = fetch_ticker_profit_growth(combined_orders, fx_rate, sel_growth_tk)
-        if gdf is not None and not gdf.empty:
-            gplot = gdf.reset_index().rename(columns={"index": "날짜"})
-            gxcol = gplot.columns[0]
-            long_g = gplot.melt(id_vars=gxcol, value_vars=["내 수익금", "S&P500 수익금"],
-                                var_name="구분", value_name="수익금")
-            fig_g = px.line(
-                long_g, x=gxcol, y="수익금", color="구분",
-                labels={gxcol: "날짜", "수익금": "누적 수익금(원)"},
-                color_discrete_map={"내 수익금": "#EF553B", "S&P500 수익금": "#636EFA"},
-            )
-            for tr in fig_g.data:
-                if "S&P500" in tr.name:
-                    tr.line.dash = "dash"
-            fig_g.add_hline(y=0, line_dash="dot", line_color="gray")
-            st.plotly_chart(fig_g, use_container_width=True)
-            my_p = gdf["내 수익금"].iloc[-1]
-            spy_p = gdf["S&P500 수익금"].iloc[-1]
-            st.caption(
-                f"**{combined_name_map.get(sel_growth_tk, sel_growth_tk)}** 현재 순수익금 {my_p:,.0f}원 vs "
-                f"같은 돈을 S&P500에 넣었다면 {spy_p:,.0f}원 → **차이 {my_p - spy_p:+,.0f}원**"
-            )
-        else:
-            st.info("이 종목의 수익금 성장 데이터를 계산하지 못했습니다.")
-    else:
-        st.info("거래별 비교를 계산할 매수 이력이 없습니다.")
-
+    if use_tx:
+        with st.expander("📥 거래내역 임포트/추가", expanded=not has_data):
+            render_import_ui("side")
+        _saved_tx = read_transactions_csv()
+        _saved_hold = read_manual_csv()
+        _saved_div = read_dividends_csv()
+        st.caption(f"저장됨 · 거래내역 {len(_saved_tx)}건 · 잔고 {len(_saved_hold)}종목 · 배당 {len(_saved_div)}건")
+        if st.button("🗑️ 저장된 임포트 삭제", use_container_width=True):
+            clear_all_imports()
+            st.cache_data.clear()
+            st.rerun()
     st.divider()
+    st.checkbox("yfinance 배당 추정 포함", key="include_div_est",
+                help="직접 입력·임포트한 배당이 없는 종목만 '보유수량 타임라인 × yfinance 주당배당'으로 추정합니다. 검증값(임포트/직접입력)이 있으면 그 종목은 검증값이 우선입니다. (MSTY 등 부정확 종목은 직접 입력 권장)")
+    st.divider()
+    if st.button("로그아웃", use_container_width=True):
+        for k in ("username", "data_source", "chat_messages"):
+            st.session_state.pop(k, None)
+        st.cache_data.clear()
+        st.rerun()
 
-    # ⏸️ 아래 분석 섹션들은 임시 비활성화되어 있습니다. (SHOW_ANALYSIS=True 로 다시 활성화)
-    if not SHOW_ANALYSIS:
-        st.info("📊 분기별 성과·포트폴리오 PME 성장추이·배당/환차손익·AI 진단 등 **일부 분석 기능은 현재 비활성화** 상태입니다. "
-                "거래내역 통합이 완료되면 다시 켤 예정입니다.")
 
-    # 🔖 (5) S&P500 대비 성과 분석 (PME · 매매 타이밍 반영)
-    if SHOW_ANALYSIS:
-        st.header("4. 📊 S&P500 대비 성과 (매매 타이밍 반영)")
-        st.markdown(
-            "단순 주가 비교가 아니라, **내가 실제로 매수/매도한 시점·금액을 그대로 S&P500(SPY)에 투자했다면**과 비교하는 "
-            "**PME(Public Market Equivalent)** 방식입니다. 매매 타이밍이 반영되어 진짜 초과수익(알파)을 보여줍니다."
-        )
+# ════════════════════════════════════════════════════════════════
+# 4) 본문 + 우측 AI 패널 레이아웃
+# ════════════════════════════════════════════════════════════════
+main_col, ai_col = st.columns([2.75, 1.5], gap="large")
 
-        with st.spinner("매매 이력 기반 PME 성과를 계산하는 중입니다... (yfinance 장기 시세)"):
-            pme_name_map = {h.get("ticker"): h.get("name") for h in holdings}
-            pme_table, pme_growth = fetch_pme_analysis(combined_orders, fx_rate, pme_name_map)
-
-        # 포트폴리오 vs S&P500 PME 성장 추이
-        st.markdown("#### 📈 내 포트폴리오 vs S&P500 PME (누적 수익률 %)")
-        if pme_growth is not None and not pme_growth.empty:
-            ret_cols = ["내 수익률(%)", "S&P500 PME 수익률(%)"]
-            rdf = pme_growth.reset_index().rename(columns={"index": "날짜"})
-            xcol = rdf.columns[0]
-            long_r = rdf.melt(id_vars=xcol, value_vars=ret_cols, var_name="구분", value_name="수익률")
-            fig_r = px.line(
-                long_r, x=xcol, y="수익률", color="구분",
-                labels={xcol: "날짜", "수익률": "누적 수익률(%)"},
-                color_discrete_map={"내 수익률(%)": "#EF553B", "S&P500 PME 수익률(%)": "#636EFA"},
-            )
-            for tr in fig_r.data:
-                if "PME" in tr.name:
-                    tr.line.dash = "dash"
-            st.plotly_chart(fig_r, use_container_width=True)
-
-            my_ret = pme_growth["내 수익률(%)"].iloc[-1]
-            spy_ret = pme_growth["S&P500 PME 수익률(%)"].iloc[-1]
-            my_final = pme_growth["내 포트폴리오"].iloc[-1]
-            spy_final = pme_growth["S&P500 PME"].iloc[-1]
-            st.caption(
-                f"현재 내 누적 수익률 **{my_ret:.1f}%** vs S&P500 PME **{spy_ret:.1f}%** → "
-                f"**타이밍 반영 초과수익 {my_ret - spy_ret:+.1f}%p**. "
-                "두 선은 같은 현금흐름을 받으므로 원금 계단은 공유하지만, 벌어지는 간격이 곧 알파입니다."
-            )
-
-            with st.expander("💵 절대 평가액(원) 그래프로 보기"):
-                adf = pme_growth.reset_index().rename(columns={"index": "날짜"})
-                axcol = adf.columns[0]
-                long_a = adf.melt(id_vars=axcol, value_vars=["내 포트폴리오", "S&P500 PME", "누적 투자원금"],
-                                  var_name="구분", value_name="평가액")
-                fig_a = px.line(
-                    long_a, x=axcol, y="평가액", color="구분",
-                    labels={axcol: "날짜", "평가액": "평가액(원)"},
-                    color_discrete_map={"내 포트폴리오": "#EF553B", "S&P500 PME": "#636EFA", "누적 투자원금": "#AAAAAA"},
-                )
-                for tr in fig_a.data:
-                    if tr.name == "S&P500 PME":
-                        tr.line.dash = "dash"
-                    if tr.name == "누적 투자원금":
-                        tr.line.dash = "dot"
-                st.plotly_chart(fig_a, use_container_width=True)
-                st.caption(f"내 포트폴리오 {my_final:,.0f}원 vs S&P500 PME {spy_final:,.0f}원 (격차 {my_final - spy_final:+,.0f}원)")
-        else:
-            st.info("성장 추이를 계산하지 못했습니다.")
-
-        # 종목별 PME 초과수익 표
-        st.markdown("#### 📋 종목별 S&P500 대비 초과수익 (매매 타이밍 반영)")
-        if pme_table is not None and not pme_table.empty:
-            st.dataframe(
-                pme_table.style.format({
-                    "투자원금(원)": "{:,.0f}", "내 수익률(%)": "{:+.2f}",
-                    "S&P500 PME(%)": "{:+.2f}", "초과수익(%p)": "{:+.2f}", "초과손익(원)": "{:,.0f}"
-                }).background_gradient(cmap="RdYlGn", subset=["초과수익(%p)"]),
-                use_container_width=True, hide_index=True, height=430
-            )
-            st.caption(
-                "**내 수익률**: 실제 매수 시점 기준 수익률. **S&P500 PME(%)**: 같은 시점·금액을 SPY에 넣었을 때 수익률. "
-                "**초과수익(%p)** 양수(초록)면 S&P500보다 잘한 것입니다. (청산 종목은 매매 시점 기준 잔여 효과로 계산)"
-            )
-        else:
-            st.info("PME 초과수익을 계산하지 못했습니다.")
-
-        st.divider()
-
-    # ⏸️ 아래 분석 섹션(배당·환차·AI)들은 임시 비활성화 — SHOW_ANALYSIS=True 로 다시 켤 수 있음
-    if not SHOW_ANALYSIS:
+with main_col:
+    st.markdown("## 📈 자산관리 대시보드")
+    if not has_data:
+        st.info("표시할 데이터가 없습니다. "
+                + ("왼쪽 사이드바의 **거래내역 임포트**로 데이터를 추가하세요." if use_tx
+                   else "토스증권 계좌에 거래·보유 내역이 없습니다."))
         st.stop()
 
-    # 🔖 (6) 배당 수익 및 환차손익
-    st.header("6. 💰 배당 수익 & 환차손익")
-    st.markdown("토스 API에는 배당 내역이 없어 **yfinance 배당·환율 데이터**로 추정합니다. (토스+타 증권사 보유 합산)")
+    # ── 중앙 네비게이션 (버튼) ──
+    NAV = ["개요", "보유 종목", "거래 내역", "성과 분석", "환율"]
+    ncols = st.columns(len(NAV))
+    for i, name in enumerate(NAV):
+        active = st.session_state.view == name
+        if ncols[i].button(name, key=f"nav_{name}", use_container_width=True,
+                           type="primary" if active else "secondary"):
+            st.session_state.view = name
+            st.rerun()
+    view = st.session_state.view
+    st.divider()
 
-    with st.spinner("배당·환율 데이터를 분석하는 중입니다..."):
-        div_df, fx_summary, fx_df, inc_fx = fetch_income_analysis(combined_orders, fx_rate)
+    # ─────────────────────────── 개요 ───────────────────────────
+    if view == "개요":
+        st.subheader("자산 및 성과 요약")
+        _krw_cash = float(summary.get("cash_krw_native", 0) or 0)
+        _usd_cash = float(summary.get("cash_usd_native", 0) or 0)
+        _cash_fx = float(summary.get("fx_rate", fx_rate) or fx_rate or 0)
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("총자산", f"{summary.get('total_asset_krw', 0):,.0f} ₩")
+        m2.metric("주식 평가액", f"{summary.get('stock_eval_krw', 0):,.0f} ₩")
+        m3.metric("예수금 (원화)", f"{_krw_cash:,.0f} ₩")
+        m4.metric("예수금 (달러)", f"$ {_usd_cash:,.2f}",
+                  delta=f"≈ {_usd_cash * _cash_fx:,.0f} ₩" if _cash_fx else None, delta_color="off")
 
-    total_div = int(div_df["배당수령(원)"].sum()) if div_df is not None and not div_df.empty else 0
-    total_fx_pnl = int(fx_summary.get("총_환차손익_원", 0)) if fx_summary else 0
+        p1, p2, p3 = st.columns(3)
+        _port_xirr = ab.get("port_xirr_pct") if ab else None
+        _alpha = ab.get("alpha_pct") if ab else None
+        _beta = ab.get("beta") if ab else None
+        p1.metric("연환산 수익률 (XIRR)", f"{_port_xirr:+.2f} %" if _port_xirr is not None else "N/A")
+        p2.metric("S&P500 초과수익 (알파)", f"{_alpha:+.2f} %p" if _alpha is not None else "N/A",
+                  delta="벤치마크 상회" if (_alpha or 0) >= 0 else "벤치마크 하회",
+                  delta_color="normal" if (_alpha or 0) >= 0 else "inverse")
+        p3.metric("시장 민감도 (베타)", f"{_beta}" if _beta is not None else "N/A")
 
-    # 배당 포함 수익률 계산
-    purchase_krw = float(summary.get("purchase_krw", 0) or 0)
-    eval_krw = float(summary.get("stock_eval_krw", 0) or 0)
-    price_pnl = eval_krw - purchase_krw
-    base_return = (price_pnl / purchase_krw * 100) if purchase_krw else 0
-    total_return_with_div = ((price_pnl + total_div) / purchase_krw * 100) if purchase_krw else 0
+        st.divider()
+        st.markdown("#### 손익 구성")
+        if perf:
+            ccy = st.radio("표시 기준", ["원화 (환차 포함)", "달러 (환율 제외·순수 주가)"],
+                           horizontal=True, key="ov_ccy")
+            use_usd = ccy.startswith("달러")
+            g1, g2, g3 = st.columns(3)
+            g1.metric("누적 총손익", f"{perf['all_inclusive_krw']:,.0f} ₩",
+                      delta=f"{perf['all_inclusive_pct']:+.2f}% (투입원금 대비)",
+                      delta_color="normal" if perf["all_inclusive_krw"] >= 0 else "inverse")
+            if use_usd:
+                g2.metric("보유 평가손익 (달러)", f"$ {perf['unreal_native_usd']:,.2f}",
+                          delta=f"{perf['unreal_native_usd_pct']:+.2f}%",
+                          delta_color="normal" if perf["unreal_native_usd"] >= 0 else "inverse")
+            else:
+                g2.metric("보유 평가손익 (원화)", f"{perf['unreal_total_krw']:,.0f} ₩",
+                          delta=f"{perf['unreal_total_pct']:+.2f}%",
+                          delta_color="normal" if perf["unreal_total_krw"] >= 0 else "inverse")
+            g3.metric("실현손익 (매도 확정)", f"{perf['realized_total_krw']:,.0f} ₩",
+                      delta_color="normal" if perf["realized_total_krw"] >= 0 else "inverse")
+            h1, h2, h3 = st.columns(3)
+            h1.metric("순수 주가 손익", f"{perf['pure_price_krw']:,.0f} ₩")
+            _dkn = float(perf.get("div_krw_native", 0) or 0)
+            _dun = float(perf.get("div_usd_native", 0) or 0)
+            h2.metric("배당 수익 (추정·합산)", f"{perf['div_krw']:,.0f} ₩",
+                      delta=f"원화 {_dkn:,.0f}원 + 달러 ${_dun:,.2f}", delta_color="off")
+            h3.metric("환차손익", f"{perf['fx_total_krw']:,.0f} ₩",
+                      delta="환율 이익" if perf["fx_total_krw"] >= 0 else "환율 손실",
+                      delta_color="normal" if perf["fx_total_krw"] >= 0 else "inverse")
+            if _dun > 0 or _dkn > 0:
+                st.caption(f"배당 내역: 원화 {_dkn:,.0f}원 + 달러 ${_dun:,.2f}"
+                           f"(현재 환율 ≈ {_dun * _cash_fx:,.0f}원) → 현재 환율 기준 합산 {perf['div_krw']:,.0f}원.")
+            st.caption("누적 총손익 = 순수 주가손익 + 환차손익 + 배당. 배당·환차손익은 시세 데이터 기반 추정치입니다.")
+        else:
+            st.info("손익을 계산할 거래 이력이 없습니다.")
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("누적 배당 수령(추정)", f"{total_div:,.0f} ₩")
-    m2.metric("가격 수익률", f"{base_return:.2f} %")
-    m3.metric("배당 포함 총수익률", f"{total_return_with_div:.2f} %",
-              delta=f"{total_return_with_div - base_return:+.2f}%p (배당 기여)")
-    m4.metric("누적 환차손익", f"{total_fx_pnl:,.0f} ₩",
-              delta="환율 이득" if total_fx_pnl >= 0 else "환율 손실",
-              delta_color="normal" if total_fx_pnl >= 0 else "inverse")
+        st.divider()
+        st.markdown("#### 보유 비중")
+        if holdings:
+            df = pd.DataFrame(holdings)
+            for c in ("quantity", "eval_krw", "weight_pct", "return_pct"):
+                if c in df.columns:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+            r1, r2 = st.columns([1, 1])
+            with r1:
+                fig = px.pie(df, values="weight_pct", names="name", hole=0.45)
+                fig.update_traces(textposition="inside", textinfo="percent+label")
+                st.plotly_chart(fig, use_container_width=True)
+            with r2:
+                show = df.rename(columns={"name": "종목명", "weight_pct": "비중(%)",
+                                          "eval_krw": "평가액(원)", "return_pct": "수익률(%)"})
+                cols = [c for c in ["종목명", "비중(%)", "평가액(원)", "수익률(%)"] if c in show.columns]
+                st.dataframe(show[cols].style.format({"비중(%)": "{:.2f}", "평가액(원)": "{:,.0f}",
+                                                      "수익률(%)": "{:+.2f}"}),
+                             use_container_width=True, hide_index=True, height=360)
+        else:
+            st.info("보유 종목이 없습니다.")
 
-    col_d, col_f = st.columns(2)
-
-    with col_d:
-        st.markdown("#### 📗 종목별 배당 수령 (추정)")
-        if div_df is not None and not div_df.empty:
+    # ─────────────────────────── 보유 종목 ───────────────────────────
+    elif view == "보유 종목":
+        st.subheader("종목별 실현·평가 성과")
+        st.caption("분할매도를 반영한 평균단가 회계 기준입니다. 청산 종목은 매도 시점 실현가, 보유 종목은 잔여수량 평가 기준으로 계산합니다.")
+        with st.spinner("종목별 성과를 계산하는 중입니다..."):
+            brk_tbl = fetch_holdings_breakdown(combined_orders, fx_rate, combined_name_map, div_items)
+        if brk_tbl is not None and not brk_tbl.empty:
+            f1, f2 = st.columns(2)
+            with f1:
+                sel_st = st.multiselect("보유 상태", ["보유중", "청산"], key="hb_status")
+            with f2:
+                sel_tk = st.multiselect("종목", sorted(brk_tbl["티커"].unique()), key="hb_tk")
+            tv = brk_tbl
+            if sel_st:
+                tv = tv[tv["상태"].isin(sel_st)]
+            if sel_tk:
+                tv = tv[tv["티커"].isin(sel_tk)]
+            show = ["종목", "티커", "통화", "상태", "보유수량", "평단가(달러)", "평단가(원화)",
+                    "투자원금(원)", "매도실현금액(원)", "실현손익(원)", "평가손익(원)", "누적배당금(원)", "수익률(%)"]
+            show = [c for c in show if c in tv.columns]
             st.dataframe(
-                div_df.style.format({
-                    "배당수령(원본)": "{:,.2f}", "배당수령(원)": "{:,.0f}"
+                tv[show].style.format({
+                    "보유수량": "{:g}", "평단가(달러)": "{:,.2f}", "평단가(원화)": "{:,.2f}",
+                    "투자원금(원)": "{:,.0f}", "매도실현금액(원)": "{:,.0f}",
+                    "실현손익(원)": "{:,.0f}", "평가손익(원)": "{:,.0f}",
+                    "누적배당금(원)": "{:,.0f}", "수익률(%)": "{:+.2f}",
+                }, na_rep="-").background_gradient(cmap="RdYlGn", subset=["수익률(%)"]),
+                use_container_width=True, hide_index=True, height=460,
+            )
+            _rp = float(brk_tbl["실현손익(원)"].sum())
+            _up = float(brk_tbl["평가손익(원)"].sum())
+            _inv = float(brk_tbl["투자원금(원)"].sum())
+            t1, t2, t3 = st.columns(3)
+            t1.metric("실현손익 합계", f"{_rp:,.0f} ₩", delta_color="normal" if _rp >= 0 else "inverse")
+            t2.metric("평가손익 합계", f"{_up:,.0f} ₩", delta_color="normal" if _up >= 0 else "inverse")
+            t3.metric("총손익 합계", f"{_rp + _up:,.0f} ₩",
+                      delta=f"{(_rp + _up) / _inv * 100:+.2f}% (투자원금 대비)" if _inv else None,
+                      delta_color="normal" if (_rp + _up) >= 0 else "inverse")
+            st.caption("수익률(%) = (실현손익 + 평가손익) ÷ 투자원금. 평단가는 전체 매수의 수량가중 평균가입니다.")
+        else:
+            st.info("종목별 성과를 계산할 거래 이력이 없습니다.")
+
+    # ─────────────────────────── 거래 내역 ───────────────────────────
+    elif view == "거래 내역":
+        st.subheader("체결 내역")
+        st.caption("전체 체결 내역을 시간 오름차순으로 정리했습니다.")
+        if detail_df is not None and not detail_df.empty:
+            asc = detail_df.sort_values("체결일시", ascending=True).reset_index(drop=True)
+            f1, f2, f3, f4 = st.columns(4)
+            with f1:
+                bopt = sorted(asc["증권사"].unique()) if "증권사" in asc.columns else []
+                sb = st.multiselect("증권사", bopt, key="tx_broker")
+            with f2:
+                ss = st.multiselect("구분", ["매수", "매도"], key="tx_side")
+            with f3:
+                stk = st.multiselect("종목", sorted(asc["티커"].unique()), key="tx_ticker")
+            with f4:
+                sopt = sorted(asc["상태"].unique()) if "상태" in asc.columns else []
+                sstat = st.multiselect("상태", sopt, key="tx_status")
+            v = asc.copy()
+            if sb and "증권사" in v.columns:
+                v = v[v["증권사"].isin(sb)]
+            if ss:
+                v = v[v["구분"].isin(ss)]
+            if stk:
+                v = v[v["티커"].isin(stk)]
+            if sstat and "상태" in v.columns:
+                v = v[v["상태"].isin(sstat)]
+            cols = ["날짜", "증권사", "종목명", "티커", "상태", "구분", "수량",
+                    "체결단가", "통화", "체결금액(원본)", "체결금액(원)", "수수료", "세금"]
+            cols = [c for c in cols if c in v.columns]
+            st.dataframe(
+                v[cols].style.format({
+                    "체결단가": "{:,.2f}", "체결금액(원본)": "{:,.2f}", "체결금액(원)": "{:,.0f}",
+                    "수수료": "{:,.2f}", "세금": "{:,.2f}", "수량": "{:g}",
                 }),
-                use_container_width=True, hide_index=True, height=320
+                use_container_width=True, hide_index=True, height=520,
             )
+            st.caption(f"총 {len(v)}건 · {asc['날짜'].iloc[0]} ~ {asc['날짜'].iloc[-1]} · 적용 환율 1 USD = {fx_rate:,.1f} KRW")
         else:
-            st.info("배당 이력이 있는 보유 종목이 없습니다.")
+            st.info("거래 내역이 없습니다.")
 
-    with col_f:
-        st.markdown("#### 💱 종목별 환차손익 (USD 매수분)")
-        if fx_df is not None and not fx_df.empty:
+        # 배당 내역 (검증 우선 + yfinance 추정 보완)
+        st.divider()
+        st.subheader("배당 내역")
+        st.caption("**검증** = 임포트/직접입력한 실수령액 · **추정** = 보유수량 타임라인 × yfinance 주당배당(부정확할 수 있음). "
+                   "사이드바에서 추정 포함 여부를 켜고 끌 수 있으며, 검증값이 있는 종목은 추정보다 우선합니다.")
+        if unreliable_div_tickers:
+            _uniq = sorted(set(unreliable_div_tickers))
+            _names = ", ".join(f"{combined_name_map.get(t, t)}({t})" for t in _uniq)
+            st.warning(
+                f"⚠️ 다음 종목은 배당 데이터 신뢰성이 낮아 **추정에서 제외**했습니다 — 아래 편집기에서 **직접 입력**하세요: {_names}\n\n"
+                "(MSTY 등 합성 고배당 ETF는 yfinance 주당배당이 실제와 크게 달라 자동 추정을 신뢰할 수 없습니다.)"
+            )
+        if div_view_df is not None and not div_view_df.empty:
+            dv = div_view_df.copy().sort_values(["구분", "일자"], ascending=[True, True])
             st.dataframe(
-                fx_df.style.format({
-                    "매수원금(USD)": "{:,.2f}", "평균매수환율": "{:,.1f}",
-                    "현재환율": "{:,.1f}", "환차손익(원)": "{:,.0f}"
-                }).background_gradient(cmap="RdYlGn", subset=["환차손익(원)"]),
-                use_container_width=True, hide_index=True, height=320
+                dv[["일자", "구분", "종목", "티커", "통화", "배당금", "원화환산"]].style.format(
+                    {"배당금": "{:,.2f}", "원화환산": "{:,.0f}"}),
+                use_container_width=True, hide_index=True, height=300,
             )
-            st.caption(
-                f"평균 매수환율 {fx_summary.get('평균_매수환율')}원 → 현재 {fx_summary.get('현재환율')}원. "
-                "매수 당시보다 원화가 강세면 환차손, 약세면 환차익이 발생합니다."
-            )
+            d1, d2, d3 = st.columns(3)
+            d1.metric("원화 배당 합계", f"{div_krw_native:,.0f} ₩")
+            d2.metric("달러 배당 합계", f"$ {div_usd_native:,.2f}")
+            d3.metric("현재 환율 합산", f"{div_krw_native + div_usd_native * fx_rate:,.0f} ₩")
         else:
-            st.info("USD 매수 내역이 없습니다.")
+            st.info("배당 기록이 없습니다. 전체 거래내역을 임포트하면 배당이 자동 추출되고, 사이드바의 'yfinance 배당 추정 포함'을 켜면 추정치가 채워집니다. 아래 '배당 내역' 탭에서 직접 입력할 수도 있습니다.")
 
-    st.caption("⚠️ 배당은 yfinance 주당 배당 × 배당락일 보유수량 추정치이며, 실제 세후 수령액과 다를 수 있습니다. 환율은 USD/KRW(yfinance) 기준.")
+        if use_tx:
+            with st.expander("✏️ 거래내역/잔고/배당 직접 수정"):
+                tab_tx, tab_hold, tab_div = st.tabs(["거래내역", "잔고 스냅샷", "배당 내역"])
+                with tab_tx:
+                    raw_tx = read_transactions_csv()
+                    edited_tx = st.data_editor(
+                        raw_tx, num_rows="dynamic", use_container_width=True, hide_index=True,
+                        column_config={
+                            "시장": st.column_config.SelectboxColumn("시장", options=["KOSPI", "KOSDAQ", "US"]),
+                            "구분": st.column_config.SelectboxColumn("구분", options=["매수", "매도"]),
+                            "통화": st.column_config.SelectboxColumn("통화", options=["KRW", "USD"]),
+                            "수량": st.column_config.NumberColumn("수량", format="%g"),
+                            "단가": st.column_config.NumberColumn("단가", format="%.2f"),
+                        },
+                        key="tx_editor",
+                    )
+                    if st.button("💾 거래내역 저장", type="primary", key="save_tx"):
+                        n = write_transactions_csv(edited_tx)
+                        st.cache_data.clear()
+                        st.success(f"{n}건 저장했습니다.")
+                        st.rerun()
+                with tab_hold:
+                    raw_manual = read_manual_csv()
+                    edited = st.data_editor(
+                        raw_manual, num_rows="dynamic", use_container_width=True, hide_index=True,
+                        column_config={
+                            "시장": st.column_config.SelectboxColumn("시장", options=["KOSPI", "KOSDAQ", "US"]),
+                            "통화": st.column_config.SelectboxColumn("통화", options=["KRW", "USD"]),
+                            "수량": st.column_config.NumberColumn("수량", format="%g"),
+                            "평균매수가": st.column_config.NumberColumn("평균매수가", format="%.2f"),
+                        },
+                        key="manual_editor",
+                    )
+                    if st.button("💾 잔고 저장", type="primary", key="save_hold"):
+                        n = write_manual_csv(edited)
+                        st.cache_data.clear()
+                        st.success(f"{n}종목 저장했습니다.")
+                        st.rerun()
+                with tab_div:
+                    st.caption("MSTY 등 배당이 이상하면 여기서 직접 실수령액을 입력·수정하세요. (통화 단위 그대로) "
+                               "신뢰성 낮은 종목은 빈 행으로 미리 추가해 두었습니다.")
+                    raw_div = read_dividends_csv()
+                    # 신뢰성 낮아 추정 제외된 종목을 입력 편의를 위해 빈 행으로 시드
+                    _present = set(raw_div["티커"].astype(str)) if not raw_div.empty else set()
+                    _seed = [{"증권사": "직접입력", "일자": "", "티커": t, "종목명": combined_name_map.get(t, t),
+                              "통화": "KRW" if str(t).isdigit() else "USD", "배당금": 0.0}
+                             for t in sorted(set(unreliable_div_tickers)) if t not in _present]
+                    if _seed:
+                        raw_div = pd.concat([raw_div, pd.DataFrame(_seed)], ignore_index=True)
+                    edited_div = st.data_editor(
+                        raw_div, num_rows="dynamic", use_container_width=True, hide_index=True,
+                        column_config={
+                            "통화": st.column_config.SelectboxColumn("통화", options=["KRW", "USD"]),
+                            "배당금": st.column_config.NumberColumn("배당금", format="%.2f"),
+                        },
+                        key="div_editor",
+                    )
+                    if st.button("💾 배당 저장", type="primary", key="save_div"):
+                        n = write_dividends_csv(edited_div)
+                        st.cache_data.clear()
+                        st.success(f"{n}건 저장했습니다.")
+                        st.rerun()
 
-    st.divider()
+    # ─────────────────────────── 성과 분석 ───────────────────────────
+    elif view == "성과 분석":
+        st.subheader("수익금 성장 추이 및 벤치마크 비교")
+        st.caption("투자원금을 제외한 순수 수익금의 성장을 S&P500(SPY)에 동일 현금흐름으로 투자했을 때와 비교합니다. "
+                   "미국 주식은 환율 효과를 제거해 **달러 기준**으로 표시합니다. 그래프의 점을 클릭하면 해당일 알파(초과 %p)가 표시됩니다.")
+        ALL_LABEL = "전체 자산 (합산)"
+        brk_tbl = fetch_holdings_breakdown(combined_orders, fx_rate, combined_name_map, div_items)
+        tickers_opt = sorted(brk_tbl["티커"].unique()) if (brk_tbl is not None and not brk_tbl.empty) else []
+        options = [ALL_LABEL] + tickers_opt
+        sel_growth = st.selectbox("분석 대상", options, index=0,
+                                  format_func=lambda t: t if t == ALL_LABEL else f"{combined_name_map.get(t, t)} ({t})",
+                                  key="growth_target")
+        is_all = sel_growth == ALL_LABEL
+        # 개별 미국 종목이면 달러 기준(환율 제거)
+        sel_ccy = None
+        if not is_all and brk_tbl is not None and not brk_tbl.empty:
+            _r = brk_tbl[brk_tbl["티커"] == sel_growth]
+            if not _r.empty:
+                sel_ccy = str(_r.iloc[0]["통화"]).upper()
+        use_native = (not is_all) and sel_ccy == "USD"
+        unit = "$" if use_native else "₩"
+        mfmt = "%{y:,.2f}" if use_native else "%{y:,.0f}"
+        pyfmt = (lambda x: f"${x:,.2f}") if use_native else (lambda x: f"{x:,.0f}원")
 
-    # 🔖 (7) AI 코파일럿 진단 리포트 구역
-    st.header("7. Gemini AI 퀀트 검진")
-    st.markdown("포트폴리오의 비중 쏠림, 시황 반응성 등을 AI 기반으로 분석합니다.")
-    
-    if st.button("🚀 AI 분석 리포트 받아보기", type="primary"):
-        with st.spinner("AI가 데이터를 분석하고 처방전을 쓰고 있습니다... (약 5~10초 소요)"):
-            report_text = generate_portfolio_report(portfolio_json)
-            
-        st.subheader("💡 진단 결과")
-        with st.expander("AI 리포트 전체 보기", expanded=True):
-            st.markdown(report_text)
+        with st.spinner("성장 추이를 계산하는 중입니다..."):
+            gdf = (fetch_total_profit_growth(combined_orders, fx_rate) if is_all
+                   else fetch_ticker_profit_growth(combined_orders, fx_rate, sel_growth, use_native))
+        if gdf is not None and not gdf.empty:
+            gidx = gdf.index
+            growth_key = f"growth_chart_{'ALL' if is_all else sel_growth}"
+            _prev = st.session_state.get(growth_key)
+            _pts = []
+            try:
+                _pts = _prev.selection["points"]
+            except Exception:
+                try:
+                    _pts = _prev["selection"]["points"]
+                except Exception:
+                    _pts = []
+            click_info = None
+            if _pts:
+                try:
+                    cdate = pd.to_datetime(_pts[-1]["x"]).normalize()
+                    pos = gidx.get_indexer([cdate], method="nearest")[0]
+                    row = gdf.iloc[pos]
+                    inv = float(row.get("투자원금", 0) or 0)
+                    myp = float(row["내 수익금"]); spyp = float(row["S&P500 수익금"])
+                    if inv:
+                        click_info = {"date": gidx[pos], "inv": inv, "myp": myp, "spyp": spyp,
+                                      "my_r": myp / inv * 100, "spy_r": spyp / inv * 100,
+                                      "alpha": (myp - spyp) / inv * 100}
+                except Exception:
+                    click_info = None
 
-    st.divider()
+            fig_g = make_subplots(specs=[[{"secondary_y": True}]])
+            fig_g.add_trace(go.Scatter(x=gidx, y=gdf["내 수익금"], name="내 수익금",
+                                       mode="lines+markers", marker=dict(size=5, color="#EF553B"),
+                                       line=dict(color="#EF553B", width=2.4),
+                                       hovertemplate="%{x|%Y-%m-%d}<br>내 수익금 " + mfmt + unit + "<extra></extra>"),
+                            secondary_y=False)
+            fig_g.add_trace(go.Scatter(x=gidx, y=gdf["S&P500 수익금"], name="S&P500 수익금",
+                                       mode="lines", line=dict(color="#636EFA", dash="dash", width=2),
+                                       hovertemplate="%{x|%Y-%m-%d}<br>S&P500 " + mfmt + unit + "<extra></extra>"),
+                            secondary_y=False)
+            fig_g.add_hline(y=0, line_dash="dot", line_color="gray")
 
-    # 🔖 (8) AI 코파일럿과 대화하기 (챗봇)
-    st.header("8. 💬 AI 코파일럿과 대화하기")
-    st.markdown("내 포트폴리오와 거래 내역을 바탕으로 자유롭게 질문해 보세요. AI가 필요하면 **토스증권 API로 실시간 시세·S&P500(SPY) 벤치마크를 스스로 조회**해 답합니다.")
-    st.caption("예: *내 애플이 S&P500 대비 초과수익 내고 있어?*, *SPY 최근 수익률은?*, *올해 순투자금이 얼마야?*")
+            # 최대 알파 지점 표시
+            _invs = gdf["투자원금"].where(gdf["투자원금"] > 0)
+            _alpha_s = (gdf["내 수익금"] - gdf["S&P500 수익금"]) / _invs * 100
+            if _alpha_s.notna().any():
+                _amax_date = _alpha_s.idxmax()
+                _amax_val = float(_alpha_s.max())
+                fig_g.add_trace(go.Scatter(
+                    x=[_amax_date], y=[float(gdf.loc[_amax_date, "내 수익금"])], name="최대 알파",
+                    mode="markers", marker=dict(symbol="star", size=16, color="#F59E0B", line=dict(width=1, color="#7C4A03")),
+                    hovertemplate=f"최대 알파 {_amax_val:+.2f}%p<br>%{{x|%Y-%m-%d}}<extra></extra>"), secondary_y=False)
+                fig_g.add_annotation(x=_amax_date, y=float(gdf.loc[_amax_date, "내 수익금"]),
+                                     text=f"⭐ 최대 알파 {_amax_val:+.1f}%p", showarrow=True, arrowhead=2,
+                                     arrowcolor="#F59E0B", bgcolor="rgba(255,251,235,0.95)",
+                                     bordercolor="#F59E0B", borderwidth=1, font=dict(size=11, color="#7C4A03"),
+                                     yshift=18)
 
-    # 대화 이력 초기화
-    if "chat_messages" not in st.session_state:
-        st.session_state.chat_messages = []
+            # 개별 종목: 주가(중립색 얇은 선) + 매수/매도(굵은 마커)로 명확히 구분
+            if not is_all:
+                price_hist, buys_df, sells_df, ccy = fetch_ticker_price_trades(combined_orders, sel_growth, gidx.min())
+                punit = "$" if ccy == "USD" else "₩"
+                if price_hist is not None and not price_hist.empty:
+                    fig_g.add_trace(go.Scatter(x=price_hist.index, y=price_hist.values, name=f"주가({punit})",
+                                               mode="lines", line=dict(color="#94A3B8", width=1, dash="solid"),
+                                               opacity=0.7,
+                                               hovertemplate="%{x|%Y-%m-%d}<br>주가 %{y:,.2f}" + punit + "<extra></extra>"),
+                                    secondary_y=True)
+                if buys_df is not None and not buys_df.empty:
+                    fig_g.add_trace(go.Scatter(x=buys_df["date"], y=buys_df["price"], name="🔺 매수", mode="markers",
+                                               marker=dict(symbol="triangle-up", size=15, color="#16A34A",
+                                                           line=dict(width=2, color="#052E16")),
+                                               hovertemplate="매수 %{x|%Y-%m-%d}<br>단가 %{y:,.2f}" + punit + "<extra></extra>"),
+                                    secondary_y=True)
+                if sells_df is not None and not sells_df.empty:
+                    fig_g.add_trace(go.Scatter(x=sells_df["date"], y=sells_df["price"], name="🔻 매도", mode="markers",
+                                               marker=dict(symbol="triangle-down", size=15, color="#DC2626",
+                                                           line=dict(width=2, color="#450A0A")),
+                                               hovertemplate="매도 %{x|%Y-%m-%d}<br>단가 %{y:,.2f}" + punit + "<extra></extra>"),
+                                    secondary_y=True)
+                fig_g.update_yaxes(title_text=f"주가 ({punit})", secondary_y=True, showgrid=False)
 
-    # 이전 대화 렌더링
-    for msg in st.session_state.chat_messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+            fig_g.update_yaxes(title_text=f"누적 수익금 ({unit})", secondary_y=False)
+            fig_g.update_xaxes(title_text="날짜")
+            fig_g.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+            if click_info:
+                d = click_info["date"]
+                fig_g.add_vline(x=d, line_dash="dot", line_color="#888888")
+                fig_g.add_annotation(x=d, y=click_info["myp"], yref="y",
+                                     text=(f"<b>{d.strftime('%Y-%m-%d')}</b><br>알파 {click_info['alpha']:+.2f}%p<br>"
+                                           f"내 {click_info['my_r']:+.2f}% / S&P {click_info['spy_r']:+.2f}%"),
+                                     showarrow=True, arrowhead=2, arrowcolor="#888888",
+                                     bgcolor="rgba(255,255,255,0.9)", bordercolor="#888888", borderwidth=1,
+                                     font=dict(size=12, color="#111111"), align="left")
+            st.plotly_chart(fig_g, use_container_width=True, on_select="rerun", key=growth_key)
+            if click_info:
+                st.success(f"🗓️ {click_info['date'].strftime('%Y-%m-%d')} · 알파 {click_info['alpha']:+.2f}%p · "
+                           f"내 {click_info['my_r']:+.2f}% / S&P500 {click_info['spy_r']:+.2f}%")
+            my_p = gdf["내 수익금"].iloc[-1]
+            spy_p = gdf["S&P500 수익금"].iloc[-1]
+            label = "전체 자산" if is_all else combined_name_map.get(sel_growth, sel_growth)
+            st.caption(f"{label} 현재 순수익금 {pyfmt(my_p)} vs 동일 현금흐름 S&P500 {pyfmt(spy_p)} → 차이 {pyfmt(my_p - spy_p)}"
+                       + (" · 달러 기준(환율 제외)" if use_native else ""))
 
-    # 대화 초기화 버튼
-    if st.session_state.chat_messages:
-        if st.button("🗑️ 대화 내용 지우기"):
+            # 베타의 변화 (롤링 베타)
+            st.markdown("#### 베타의 변화 (60일 롤링 베타)")
+            with st.spinner("롤링 베타를 계산하는 중입니다..."):
+                rbeta = fetch_rolling_beta(combined_orders, fx_rate, None if is_all else sel_growth)
+            if rbeta is not None and not rbeta.empty:
+                fig_b = go.Figure()
+                fig_b.add_trace(go.Scatter(x=rbeta.index, y=rbeta.values, name="롤링 베타",
+                                           mode="lines", line=dict(color="#8B5CF6", width=2),
+                                           hovertemplate="%{x|%Y-%m-%d}<br>베타 %{y:.2f}<extra></extra>"))
+                fig_b.add_hline(y=1.0, line_dash="dot", line_color="gray", annotation_text="시장 = 1.0")
+                fig_b.update_layout(height=240, yaxis_title="베타", xaxis_title="날짜", showlegend=False,
+                                    margin=dict(t=10, b=10))
+                st.plotly_chart(fig_b, use_container_width=True)
+                st.caption(f"현재 베타 **{rbeta.iloc[-1]:.2f}** · 기간 범위 {rbeta.min():.2f} ~ {rbeta.max():.2f}. "
+                           "1보다 크면 시장보다 민감(공격적), 작으면 방어적입니다. (60거래일 이동 회귀)")
+            else:
+                st.caption("롤링 베타를 계산하기엔 데이터가 부족합니다. (최소 60거래일 필요)")
+        else:
+            st.info("성장 추이 데이터를 계산하지 못했습니다.")
+
+        st.divider()
+        st.markdown("#### 벤치마크 대비 위험·수익 지표 (XIRR 기준)")
+        if ab:
+            a1, a2, a3 = st.columns(3)
+            a1.metric("내 포트폴리오 XIRR", f"{ab['port_xirr_pct']} %" if ab["port_xirr_pct"] is not None else "N/A")
+            a2.metric("S&P500 XIRR (동일 현금흐름)", f"{ab['spy_xirr_pct']} %" if ab["spy_xirr_pct"] is not None else "N/A")
+            _alpha = ab["alpha_pct"]
+            a3.metric("알파 (초과 XIRR)", f"{_alpha:+.2f} %p" if _alpha is not None else "N/A",
+                      delta="벤치마크 상회" if (_alpha or 0) >= 0 else "벤치마크 하회",
+                      delta_color="normal" if (_alpha or 0) >= 0 else "inverse")
+            b1, b2 = st.columns(2)
+            b1.metric("베타 (시장 민감도)", f"{ab['beta']}" if ab["beta"] is not None else "N/A")
+            b2.metric("상관계수", f"{ab['corr']}" if ab["corr"] is not None else "N/A")
+            if ab["beta"] is not None:
+                bdesc = ("시장보다 변동이 큼(공격적)" if ab["beta"] > 1.1 else
+                         "시장과 유사한 변동" if abs(ab["beta"] - 1) <= 0.1 else "시장보다 방어적")
+                st.caption(f"알파는 동일 현금흐름을 S&P500에 투자했을 때 대비 연환산 초과수익입니다. 베타 {ab['beta']} — {bdesc}. "
+                           f"측정 {ab['n_days']}거래일.")
+        else:
+            st.info("지표를 계산할 거래 이력이 없습니다.")
+
+    # ─────────────────────────── 환율 ───────────────────────────
+    elif view == "환율":
+        st.subheader("달러 평단가 및 환율 분석")
+        st.caption("미국 주식 매수 시점의 환율을 매수금액으로 가중평균한 '달러 평단가'를 최근 10년 환율과 비교합니다.")
+        with st.spinner("환율 데이터를 계산하는 중입니다..."):
+            usd_cost = fetch_usd_avg_cost(combined_orders, fx_rate)
+            fx_10y = fetch_fx_10y()
+        if usd_cost:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("달러 평단가", f"{usd_cost['avg_fx']:,.1f} 원/$")
+            c2.metric("현재 환율", f"{usd_cost['current_fx']:,.1f} 원/$")
+            gap = usd_cost["current_fx"] - usd_cost["avg_fx"]
+            c3.metric("현재 − 평단 차이", f"{gap:+,.1f} 원", delta=f"{gap / usd_cost['avg_fx'] * 100:+.2f}%")
+            c4.metric("누적 환차손익", f"{usd_cost['fx_pnl_krw']:,.0f} ₩",
+                      delta="환율 이익" if usd_cost["fx_pnl_krw"] >= 0 else "환율 손실",
+                      delta_color="normal" if usd_cost["fx_pnl_krw"] >= 0 else "inverse")
+            if fx_10y is not None and not fx_10y.empty:
+                fxp = fx_10y.reset_index()
+                xcol = fxp.columns[0]
+                fig_fx = px.line(fxp, x=xcol, y="원/달러", labels={xcol: "날짜", "원/달러": "USD/KRW 환율"},
+                                 title="최근 10년 USD/KRW 환율과 달러 평단가")
+                fig_fx.add_hline(y=usd_cost["avg_fx"], line_dash="dash", line_color="#EF553B",
+                                 annotation_text=f"달러 평단가 {usd_cost['avg_fx']:,.1f}원", annotation_position="top left")
+                st.plotly_chart(fig_fx, use_container_width=True)
+                st.caption(f"현재 환율이 평단가보다 위면 환차익, 아래면 환차손입니다. (총 매수원금 ${usd_cost['total_usd']:,.0f})")
+            else:
+                st.info("환율 데이터를 불러오지 못했습니다.")
+        else:
+            st.info("미국 주식 매수 내역이 없어 달러 평단가를 계산할 수 없습니다.")
+
+
+# ── 우측 AI 패널 ──────────────────────────────────────────────
+def _ai_context():
+    lines = [f"[현재 화면] {st.session_state.view}"]
+    lines.append(f"총자산 {summary.get('total_asset_krw', 0):,.0f}원, 주식평가액 {summary.get('stock_eval_krw', 0):,.0f}원, "
+                 f"예수금 {float(summary.get('cash_krw_native', 0) or 0):,.0f}원 + ${float(summary.get('cash_usd_native', 0) or 0):,.0f}")
+    if ab:
+        lines.append(f"포트폴리오 XIRR {ab.get('port_xirr_pct')}%, S&P500 XIRR {ab.get('spy_xirr_pct')}%, "
+                     f"알파 {ab.get('alpha_pct')}%p, 베타 {ab.get('beta')}, 상관계수 {ab.get('corr')}")
+    if perf:
+        lines.append(f"누적총손익 {perf.get('all_inclusive_krw'):,.0f}원(순수주가 {perf.get('pure_price_krw'):,.0f}, "
+                     f"실현 {perf.get('realized_total_krw'):,.0f}, 배당 {perf.get('div_krw'):,.0f}, 환차 {perf.get('fx_total_krw'):,.0f})")
+    top = ", ".join(f"{h.get('name')}({h.get('weight_pct')}%, {h.get('return_pct')}%)" for h in holdings[:10])
+    if top:
+        lines.append(f"보유: {top}")
+    return "\n".join(lines)
+
+with ai_col:
+    with st.container(border=True):
+        st.markdown("#### 🤖 AI 코파일럿")
+        st.caption("현재 화면의 데이터를 참고해 답변합니다.")
+        if "chat_messages" not in st.session_state:
+            st.session_state.chat_messages = []
+        # 빠른 질문
+        quick = {
+            "개요": "지금 내 포트폴리오의 강점과 위험은?",
+            "보유 종목": "성과가 부진한 종목과 개선 방향은?",
+            "거래 내역": "최근 매매 패턴에서 보이는 특징은?",
+            "성과 분석": "S&P500 대비 알파와 베타를 해석해줘",
+            "환율": "지금 환율 수준에서 달러 매수는 유리해?",
+        }.get(st.session_state.view)
+        prefill = ""
+        if quick and st.button(f"💡 {quick}", use_container_width=True, key="ai_quick"):
+            prefill = quick
+        with st.container(height=460):
+            for msg in st.session_state.chat_messages[-12:]:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+        with st.form("ai_form", clear_on_submit=True):
+            q = st.text_area("질문 또는 조언 요청", value=prefill, height=80,
+                             label_visibility="collapsed", placeholder="예: 비중이 쏠린 종목이 있어?")
+            sent = st.form_submit_button("전송", type="primary", use_container_width=True)
+        cc1, cc2 = st.columns(2)
+        if cc2.button("대화 지우기", use_container_width=True, key="ai_clear"):
             st.session_state.chat_messages = []
             st.rerun()
-
-    # 사용자 입력 처리
-    if user_input := st.chat_input("포트폴리오에 대해 무엇이든 물어보세요..."):
-        st.session_state.chat_messages.append({"role": "user", "content": user_input})
-        with st.chat_message("user"):
-            st.markdown(user_input)
-
-        with st.chat_message("assistant"):
-            with st.spinner("AI가 답변을 작성하고 있습니다..."):
-                answer = chat_with_portfolio(
-                    user_input,
-                    st.session_state.chat_messages[:-1],  # 직전까지의 이력
-                    portfolio_json,
-                    trades_summary_text
-                )
-            st.markdown(answer)
-        st.session_state.chat_messages.append({"role": "assistant", "content": answer})
+        if sent and q and q.strip():
+            st.session_state.chat_messages.append({"role": "user", "content": q.strip()})
+            with st.spinner("AI가 답변을 작성 중입니다..."):
+                answer = chat_with_portfolio(q.strip(), st.session_state.chat_messages[:-1],
+                                             portfolio_json, _ai_context())
+            st.session_state.chat_messages.append({"role": "assistant", "content": answer})
+            st.rerun()
