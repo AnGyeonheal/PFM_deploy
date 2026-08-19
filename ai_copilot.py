@@ -9,18 +9,18 @@ from pm import (
     get_candles, get_current_price, get_exchange_rate,
 )
 
-# Gemini API 키 기본값: 사용자가 따로 입력하지 않아도 AI 기능이 동작하도록 내장 기본 키를 사용합니다.
-# 사용자가 .env 또는 앱(API 키 설정)에서 키를 지정하면 그 값이 우선합니다.
-DEFAULT_GEMINI_API_KEY = "AQ.Ab8RN6I_3eNIkboA1khaALLhSTpFiwVBypkMWXxriNQcghu89w"
+# Gemini API 키는 코드에 하드코딩하지 않습니다(공개 저장소 노출 방지).
+# 로컬은 .env, Streamlit Cloud는 Secrets(app.py에서 os.environ으로 브리지)에서 읽습니다.
 load_dotenv()
-if not os.getenv("GEMINI_API_KEY"):
-    os.environ["GEMINI_API_KEY"] = DEFAULT_GEMINI_API_KEY
 
-# 무료 한도 초과(429) 대비: 여러 모델을 순서대로 시도 (각 모델은 별도 무료 한도)
+# 무료 한도(429/RPM) 대비: 여러 모델을 순서대로 폴백 (각 모델은 별도 한도 버킷).
+# '-latest' 별칭은 최신 안정 모델을 자동 추종하며, lite 계열이 무료 한도가 넉넉합니다.
 MODEL_CHAIN = [
-    "gemini-3.5-flash-lite",
-    "gemini-3.5-flash",
     "gemini-flash-lite-latest",
+    "gemini-2.5-flash-lite",
+    "gemini-flash-latest",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
 ]
 
 

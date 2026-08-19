@@ -2,10 +2,14 @@
 .env
 .env.*
 !.env.example
+.streamlit/secrets.toml
 
 # 사용자 개인정보/데이터
 user_data/
+admin_data/
 *.csv
+*.xlsx
+*.xls
 
 # 가상환경
 envPM/
