@@ -9,6 +9,13 @@ from pm import (
     get_candles, get_current_price, get_exchange_rate,
 )
 
+# Gemini API 키 기본값: 사용자가 따로 입력하지 않아도 AI 기능이 동작하도록 내장 기본 키를 사용합니다.
+# 사용자가 .env 또는 앱(API 키 설정)에서 키를 지정하면 그 값이 우선합니다.
+DEFAULT_GEMINI_API_KEY = "AQ.Ab8RN6I_3eNIkboA1khaALLhSTpFiwVBypkMWXxriNQcghu89w"
+load_dotenv()
+if not os.getenv("GEMINI_API_KEY"):
+    os.environ["GEMINI_API_KEY"] = DEFAULT_GEMINI_API_KEY
+
 # 무료 한도 초과(429) 대비: 여러 모델을 순서대로 시도 (각 모델은 별도 무료 한도)
 MODEL_CHAIN = [
     "gemini-3.5-flash-lite",
@@ -74,6 +81,78 @@ def generate_portfolio_report(portfolio_json):
     if _is_quota_error(err):
         return "⚠️ Gemini 무료 사용량(하루 한도)을 초과했습니다. 잠시 후 다시 시도하거나 API 한도를 확인해 주세요."
     return f"AI 분석 중 에러가 발생했습니다: {err}"
+
+
+def generate_rebalancing_report(portfolio_json, metrics=None, perf=None, extra_context=None):
+    """알파(초과수익)와 베타(시장 민감도) 관점에서 포트폴리오를 진단하고
+    구체적인 리밸런싱 방향을 제안하는 마크다운 리포트를 생성합니다.
+
+    portfolio_json: 보유/요약 데이터
+    metrics: compute_alpha_beta 결과 dict (port_xirr_pct, spy_xirr_pct, alpha_pct, beta, corr, n_days)
+    perf: compute_performance_summary 결과 dict (선택)
+    extra_context: 추가 컨텍스트 문자열(선택)
+    """
+    load_dotenv()
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요":
+        return "[오류] .env 파일 또는 API 키 설정에 유효한 GEMINI_API_KEY가 없습니다. 설정 후 다시 시도해주세요."
+
+    genai.configure(api_key=gemini_key, transport="rest")
+
+    metrics = metrics or {}
+    metrics_txt = json.dumps(metrics, ensure_ascii=False, indent=2)
+    perf_txt = json.dumps(perf, ensure_ascii=False, indent=2) if perf else "제공되지 않음"
+
+    prompt = f"""
+당신은 퀀트 포트폴리오 매니저이자 리스크 분석가입니다.
+아래 사용자의 포트폴리오 데이터와 정량 지표를 바탕으로, **알파(초과수익)와 베타(시장 민감도) 관점**에서
+포트폴리오를 진단하고 리밸런싱 방향을 제안하는 리포트를 한국어 마크다운으로 작성하세요.
+
+반드시 아래 구조(제목 그대로)로 작성하세요:
+
+## 1. 종합 진단
+- 현재 알파(S&P500 대비 초과 XIRR)와 베타를 해석하세요. 알파가 양수/음수인지, 베타가 1보다 큰지 작은지에 따라
+  이 포트폴리오가 "시장을 이기고 있는지", "시장보다 공격적/방어적인지"를 명확히 판정하세요.
+- 상관계수(corr)로 시장 동조화 수준도 함께 언급하세요.
+
+## 2. 알파 관점 (초과수익 개선)
+- 어떤 종목/섹터가 알파에 기여하거나 갉아먹는지 추론하고, 알파를 높이기 위한 조정(비중 확대/축소, 교체)을 제안하세요.
+- 비중이 과도하게 쏠린 종목의 리스크와, 벤치마크 대비 부진 종목의 처리 방향을 제시하세요.
+
+## 3. 베타 관점 (리스크·시장 민감도 조절)
+- 목표 베타를 어느 수준으로 가져갈지(예: 공격적 1.1~1.3, 중립 0.9~1.1, 방어적 0.7~0.9) 시나리오로 제안하세요.
+- 베타를 낮추려면/높이려면 어떤 유형의 자산(저베타 배당주·현금·채권형 vs 고베타 성장주)을 늘리고 줄여야 하는지 구체적으로 쓰세요.
+
+## 4. 실행 제안 (리밸런싱 액션)
+- "종목 A 비중 X% → Y%" 형태의 **구체적이고 실행 가능한** 조정안을 3~6개 제시하세요(대략치라도 방향과 크기를 명시).
+- 각 액션이 알파와 베타에 미치는 예상 효과를 한 줄로 덧붙이세요.
+
+## 5. 유의사항
+- 데이터 추정의 한계와, 투자 자문이 아닌 참고용임을 간단히 명시하세요.
+
+작성 규칙:
+- 전문적이되 이해하기 쉽게. 숫자는 데이터에 근거해 인용하세요(임의 창작 금지).
+- 표는 사용하지 말고, 제목과 불릿(-)만 사용하세요.
+
+[정량 지표 (알파/베타/XIRR/상관계수)]
+{metrics_txt}
+
+[손익 요약]
+{perf_txt}
+
+[포트폴리오 보유/요약 데이터]
+{json.dumps(portfolio_json, ensure_ascii=False, indent=2)}
+"""
+    if extra_context:
+        prompt += f"\n[추가 컨텍스트]\n{extra_context}\n"
+
+    print("🤖 Gemini AI가 알파/베타 리밸런싱 리포트를 작성 중입니다...")
+    response, err = _generate_with_fallback(prompt)
+    if response is not None:
+        return response.text
+    if _is_quota_error(err):
+        return "⚠️ Gemini 무료 사용량(하루 한도)을 초과했습니다. 잠시 후 다시 시도해 주세요."
+    return f"AI 리밸런싱 분석 중 에러가 발생했습니다: {err}"
 
 
 def parse_brokerage_transactions(raw_text, broker_name="증권사"):

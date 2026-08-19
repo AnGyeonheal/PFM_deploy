@@ -8,3 +8,4 @@ yfinance
 google-generativeai
 matplotlib
 openpyxl
+reportlab

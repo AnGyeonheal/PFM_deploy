@@ -81,3 +81,48 @@ def verify_user(username, password):
     if hmac.compare_digest(_hash_pw(password, salt), rec["hash"]):
         return True, "로그인 성공"
     return False, "비밀번호가 올바르지 않습니다."
+
+
+# ───────────────────────── 사용자별 API 자격 증명 ─────────────────────────
+# 토스/Gemini API 키를 사용자 폴더(user_data/<user>/credentials.json)에 로컬 저장합니다.
+# user_data/ 는 .gitignore 로 제외되어 커밋되지 않습니다.
+CRED_KEYS = ("TOSS_CLIENT_ID", "TOSS_CLIENT_SECRET", "TOSS_ACCOUNT_NO", "GEMINI_API_KEY")
+
+
+def _cred_path(username):
+    return os.path.join(user_dir(username), "credentials.json")
+
+
+def load_credentials(username):
+    """사용자별 저장된 API 자격 증명 dict를 반환합니다(없으면 빈 dict)."""
+    path = _cred_path(username)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_credentials(username, creds):
+    """전달된 자격 증명을 저장합니다. 값이 비어 있는 키는 기존 값을 유지(갱신하지 않음)합니다.
+    반환: 저장된(비어있지 않은) 키 개수."""
+    data = load_credentials(username)
+    saved = 0
+    for k in CRED_KEYS:
+        v = creds.get(k)
+        v = v.strip() if isinstance(v, str) else v
+        if v:
+            data[k] = str(v)
+            saved += 1
+    with open(_cred_path(username), "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return saved
+
+
+def has_toss_credentials(username):
+    """토스 API 키(CLIENT_ID·SECRET)가 저장되어 있는지 여부."""
+    c = load_credentials(username)
+    return bool(c.get("TOSS_CLIENT_ID") and c.get("TOSS_CLIENT_SECRET"))

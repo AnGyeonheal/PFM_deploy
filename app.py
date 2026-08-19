@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 from plotly.subplots import make_subplots
 import os
+from datetime import datetime
 from dotenv import load_dotenv
 
 from pm import get_access_token, get_holdings, get_buying_power, get_exchange_rate, get_order_history, get_stock_info
@@ -27,7 +28,12 @@ from pme import (
 from performance import compute_performance_summary, build_holdings_breakdown
 from advanced_analytics import compute_dividends
 from ai_copilot import parse_brokerage_transactions, parse_brokerage_full_transactions, parse_brokerage_dividends
-from auth import register_user, verify_user, user_dir
+from ai_copilot import generate_rebalancing_report
+from auth import (
+    register_user, verify_user, user_dir,
+    load_credentials, save_credentials, has_toss_credentials, CRED_KEYS,
+)
+from report import build_portfolio_pdf
 
 # 1. 페이지 설정 (반드시 최상단에 위치)
 st.set_page_config(page_title="자산관리 대시보드", layout="wide", page_icon="📈")
@@ -72,14 +78,24 @@ p, span, label, li { color: var(--toss-ink); }
 [data-testid="stMetric"]:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(49,130,246,0.10); }
 [data-testid="stMetricLabel"] p { color: var(--toss-sub) !important; font-size: 0.86rem; font-weight: 600; }
 [data-testid="stMetricValue"] { color: var(--toss-ink); font-weight: 700; font-size: 1.5rem; }
-.stButton > button, .stDownloadButton > button, [data-testid="stFormSubmitButton"] > button { border-radius: 14px; border: 1px solid var(--toss-border); background: #FFFFFF; color: var(--toss-ink); font-weight: 600; padding: 0.5rem 1.1rem; transition: all .12s ease; }
-.stButton > button:hover { border-color: var(--toss-blue); color: var(--toss-blue); }
-.stButton > button[kind="primary"], [data-testid="stFormSubmitButton"] > button { background: var(--toss-blue); color: #fff; border: none; }
-.stButton > button[kind="primary"]:hover { background: var(--toss-blue-dark); }
+/* ── 버튼: 토스 스타일 (라운드 · 그라데이션 · 호버 리프트) ── */
+.stButton > button, .stDownloadButton > button, [data-testid="stFormSubmitButton"] > button { border-radius: 14px; border: 1.5px solid var(--toss-border); background: #FFFFFF; color: var(--toss-ink); font-weight: 700; font-size: 0.92rem; padding: 0.58rem 1.15rem; transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease, background .12s ease, color .12s ease; box-shadow: 0 1px 2px rgba(0,0,0,0.04); letter-spacing: -0.01em; }
+.stButton > button:hover, .stDownloadButton > button:hover { border-color: var(--toss-blue); color: var(--toss-blue); background: #F4F8FF; transform: translateY(-1px); box-shadow: 0 6px 16px rgba(49,130,246,0.14); }
+.stButton > button:active, .stDownloadButton > button:active, [data-testid="stFormSubmitButton"] > button:active { transform: translateY(0); box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+.stButton > button:focus-visible, .stDownloadButton > button:focus-visible, [data-testid="stFormSubmitButton"] > button:focus-visible { outline: 3px solid rgba(49,130,246,0.35); outline-offset: 1px; }
+.stButton > button[kind="primary"], [data-testid="stFormSubmitButton"] > button { background: linear-gradient(180deg, #4A93F8 0%, var(--toss-blue) 100%); color: #fff; border: none; box-shadow: 0 4px 12px rgba(49,130,246,0.28); }
+.stButton > button[kind="primary"]:hover, [data-testid="stFormSubmitButton"] > button:hover { background: linear-gradient(180deg, var(--toss-blue) 0%, var(--toss-blue-dark) 100%); color: #fff; transform: translateY(-1px); box-shadow: 0 8px 20px rgba(27,100,218,0.34); }
+.stButton > button[kind="primary"]:active, [data-testid="stFormSubmitButton"] > button:active { background: var(--toss-blue-dark); box-shadow: 0 2px 8px rgba(27,100,218,0.30); }
+.stDownloadButton > button { background: linear-gradient(180deg, #12B981 0%, var(--toss-green, #00A676) 100%); color: #fff; border: none; box-shadow: 0 4px 12px rgba(0,166,118,0.26); }
+.stDownloadButton > button:hover { background: linear-gradient(180deg, #00A676 0%, #018A61 100%); color: #fff; transform: translateY(-1px); box-shadow: 0 8px 20px rgba(0,138,97,0.32); }
+.stButton > button:disabled, .stDownloadButton > button:disabled, [data-testid="stFormSubmitButton"] > button:disabled { background: #EEF1F4; color: #B0B8C1; border: 1.5px solid var(--toss-border); box-shadow: none; transform: none; cursor: not-allowed; opacity: 1; }
 .stTabs [data-baseweb="tab-list"] { gap: 6px; }
 .stTabs [data-baseweb="tab"] { border-radius: 12px; padding: 6px 16px; background: #EEF1F4; color: var(--toss-sub); }
 .stTabs [aria-selected="true"] { background: var(--toss-blue) !important; color: #fff !important; }
-[data-baseweb="input"], [data-baseweb="select"] > div, .stTextInput input, .stNumberInput input, .stTextArea textarea { border-radius: 12px !important; }
+[data-baseweb="input"], [data-baseweb="base-input"], [data-baseweb="textarea"] { border: 1.6px solid var(--toss-border) !important; border-radius: 12px !important; background: #FFFFFF !important; transition: border-color .12s ease, box-shadow .12s ease; }
+[data-baseweb="input"]:focus-within, [data-baseweb="textarea"]:focus-within { border-color: var(--toss-blue) !important; box-shadow: 0 0 0 3px rgba(49,130,246,0.18) !important; }
+.stTextInput input, .stNumberInput input, .stTextArea textarea, [data-baseweb="input"] input { border-radius: 12px !important; }
+.stTextInput label, .stNumberInput label, .stTextArea label, .stSelectbox label, .stRadio label { font-weight: 600 !important; color: var(--toss-ink) !important; }
 div[data-baseweb="select"] > div { border: 1.6px solid var(--toss-blue) !important; background: #F4F8FF !important; }
 div[data-baseweb="select"] svg { color: var(--toss-blue) !important; fill: var(--toss-blue) !important; }
 [data-testid="stDataFrame"], [data-testid="stTable"] { border-radius: 16px; overflow: hidden; border: 1px solid var(--toss-border); }
@@ -152,6 +168,32 @@ def _migrate_legacy_imports():
 if not st.session_state.get("_migrated"):
     _migrate_legacy_imports()
     st.session_state["_migrated"] = True
+
+
+# ── 사용자별 API 키 주입 & 최초 설정 게이트 ──────────────────────
+def _apply_user_credentials():
+    """저장된 사용자 API 키를 os.environ에 주입해 기존 os.getenv 기반 코드가 그대로 동작하게 함."""
+    creds = load_credentials(_USER)
+    for k in CRED_KEYS:
+        v = creds.get(k)
+        if v:
+            os.environ[k] = str(v)
+
+_apply_user_credentials()
+
+def _credentials_form(context="setup"):
+    """토스 API 키 입력 폼을 그리고 입력값 dict를 반환합니다. context는 위젯 key 접두사.
+    (Gemini 키는 기본값이 내장되어 있어 입력받지 않습니다.)"""
+    saved = load_credentials(_USER)
+    cid = st.text_input("토스 CLIENT_ID", value=saved.get("TOSS_CLIENT_ID", ""),
+                        key=f"{context}_cid", help="토스증권 Open API 앱의 Client ID")
+    csec = st.text_input("토스 CLIENT_SECRET", value=saved.get("TOSS_CLIENT_SECRET", ""),
+                         type="password", key=f"{context}_csec")
+    acc = st.text_input("토스 ACCOUNT_NO (계좌 seq)", value=saved.get("TOSS_ACCOUNT_NO", "1") or "1",
+                        key=f"{context}_acc")
+    return {"TOSS_CLIENT_ID": cid, "TOSS_CLIENT_SECRET": csec, "TOSS_ACCOUNT_NO": acc}
+
+# API 키 입력은 데이터 소스 선택(토스/둘다) 이후 단계에서 처리합니다.
 
 
 # ── 데이터 로딩 (캐싱) ─────────────────────────────────────────
@@ -462,7 +504,30 @@ if st.session_state.data_source is None:
 # ════════════════════════════════════════════════════════════════
 # 2) 데이터 로딩 (선택한 소스에 따라)
 # ════════════════════════════════════════════════════════════════
+# 선택한 소스가 토스 API를 사용하는데 저장된 키가 없으면 → 토스 API 키 입력 게이트
 source = st.session_state.data_source
+if source in ("toss", "both") and not has_toss_credentials(_USER):
+    st.title("🔑 토스증권 API 키 입력")
+    st.caption("선택하신 데이터 소스는 토스증권 실시간 연동이 필요합니다. 아래에 토스 Open API 키를 입력하세요. "
+               "키는 이 컴퓨터의 사용자 폴더(user_data)에만 저장되며 외부로 공유되지 않습니다.")
+    with st.container(border=True):
+        _setup_creds = _credentials_form("setup")
+        cA, cB = st.columns(2)
+        if cA.button("저장하고 계속", type="primary", use_container_width=True):
+            if _setup_creds.get("TOSS_CLIENT_ID") and _setup_creds.get("TOSS_CLIENT_SECRET"):
+                save_credentials(_USER, _setup_creds)
+                _apply_user_credentials()
+                st.cache_data.clear()
+                st.success("토스 API 키를 저장했습니다.")
+                st.rerun()
+            else:
+                st.error("CLIENT_ID와 CLIENT_SECRET을 모두 입력하세요.")
+        if cB.button("← 데이터 소스 다시 선택", use_container_width=True):
+            st.session_state.data_source = None
+            st.rerun()
+    st.info("💡 토스 키 없이 이용하려면 '데이터 소스 다시 선택'에서 **거래내역 임포트**를 선택하세요.")
+    st.stop()
+
 use_toss = source in ("toss", "both")
 use_tx = source in ("tx", "both")
 
@@ -642,6 +707,17 @@ with st.sidebar:
     if st.button("🔄 데이터 소스 변경", use_container_width=True):
         st.session_state.data_source = None
         st.rerun()
+    with st.expander("🔑 API 키 설정", expanded=False):
+        _side_creds = _credentials_form("side")
+        if st.button("💾 API 키 저장", type="primary", use_container_width=True, key="save_creds_side"):
+            n = save_credentials(_USER, _side_creds)
+            _apply_user_credentials()
+            st.cache_data.clear()
+            st.success(f"API 키 {n}개를 저장했습니다.")
+            st.rerun()
+        _c = load_credentials(_USER)
+        _toss_ok = "✅ 설정됨" if (_c.get("TOSS_CLIENT_ID") and _c.get("TOSS_CLIENT_SECRET")) else "⚠️ 미설정"
+        st.caption(f"토스 API {_toss_ok} · Gemini ✅ 기본 키 내장")
     st.divider()
     if use_tx:
         with st.expander("📥 거래내역 임포트/추가", expanded=not has_data):
@@ -679,7 +755,7 @@ with main_col:
         st.stop()
 
     # ── 중앙 네비게이션 (버튼) ──
-    NAV = ["개요", "보유 종목", "거래 내역", "성과 분석", "환율"]
+    NAV = ["개요", "보유 종목", "거래 내역", "성과 분석", "환율", "AI 진단"]
     ncols = st.columns(len(NAV))
     for i, name in enumerate(NAV):
         active = st.session_state.view == name
@@ -1140,6 +1216,62 @@ with main_col:
                 st.info("환율 데이터를 불러오지 못했습니다.")
         else:
             st.info("미국 주식 매수 내역이 없어 달러 평단가를 계산할 수 없습니다.")
+
+    # ─────────────────────────── AI 진단 ───────────────────────────
+    elif view == "AI 진단":
+        st.subheader("AI 포트폴리오 진단 · 리밸런싱 (알파·베타 관점)")
+        st.caption("현재 포트폴리오의 알파(초과수익)와 베타(시장 민감도)를 근거로 AI가 리밸런싱 방향을 제안하고, "
+                   "검진 결과를 PDF로 내려받을 수 있습니다.")
+
+        if ab:
+            q1, q2, q3, q4 = st.columns(4)
+            _px = ab.get("port_xirr_pct")
+            q1.metric("연환산 수익률 (XIRR)", f"{_px:+.2f} %" if _px is not None else "N/A")
+            _al = ab.get("alpha_pct")
+            q2.metric("알파 (초과수익)", f"{_al:+.2f} %p" if _al is not None else "N/A",
+                      delta="벤치마크 상회" if (_al or 0) >= 0 else "벤치마크 하회",
+                      delta_color="normal" if (_al or 0) >= 0 else "inverse")
+            _bt = ab.get("beta")
+            q3.metric("베타 (시장 민감도)", f"{_bt}" if _bt is not None else "N/A",
+                      delta=("공격적" if (_bt or 0) > 1.1 else "방어적" if (_bt or 1) < 0.9 else "시장과 유사"),
+                      delta_color="off")
+            q4.metric("상관계수", f"{ab.get('corr')}" if ab.get("corr") is not None else "N/A")
+        else:
+            st.info("알파/베타를 계산할 거래 이력이 없습니다. 자산 요약과 보유 종목은 PDF로 저장할 수 있습니다.")
+
+        st.divider()
+        if st.button("🤖 AI 진단 리포트 생성", type="primary", key="gen_rebal",
+                     disabled=not has_data, use_container_width=True):
+            with st.spinner("AI가 알파·베타 관점에서 포트폴리오를 진단하는 중입니다..."):
+                st.session_state["rebal_report"] = generate_rebalancing_report(portfolio_json, ab, perf)
+                st.session_state["rebal_report_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        rebal = st.session_state.get("rebal_report")
+        if rebal:
+            st.caption(f"생성 시각 · {st.session_state.get('rebal_report_at', '')}")
+            with st.container(border=True):
+                st.markdown(rebal)
+            if st.button("🗑️ 진단 리포트 지우기", key="clear_rebal"):
+                st.session_state.pop("rebal_report", None)
+                st.session_state.pop("rebal_report_at", None)
+                st.rerun()
+        else:
+            st.info("아직 생성된 진단 리포트가 없습니다. 위 버튼을 눌러 AI 진단을 생성하세요.")
+
+        st.divider()
+        st.markdown("#### 📄 검진 결과 PDF 내보내기")
+        st.caption("자산 요약 · 알파/베타 지표 · 보유 종목" + (" · AI 진단 리포트" if rebal else "") + "을 PDF로 저장합니다.")
+        try:
+            pdf_bytes = build_portfolio_pdf(
+                _USER, SOURCE_LABELS.get(source, source),
+                summary=summary, perf=perf, ab=ab, holdings=holdings,
+                ai_report=rebal, fx_rate=fx_rate,
+            )
+            fname = f"portfolio_report_{_USER}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+            st.download_button("📥 PDF 다운로드", data=pdf_bytes, file_name=fname,
+                               mime="application/pdf", use_container_width=True, key="dl_pdf")
+        except Exception as e:
+            st.error(f"PDF 생성 중 오류가 발생했습니다: {e}")
 
 
 # ── 우측 AI 패널 ──────────────────────────────────────────────
