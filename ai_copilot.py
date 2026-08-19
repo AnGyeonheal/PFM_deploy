@@ -11,8 +11,7 @@ from pm import (
 
 # 무료 한도 초과(429) 대비: 여러 모델을 순서대로 시도 (각 모델은 별도 무료 한도)
 MODEL_CHAIN = [
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash",
+    "gemini-3.5-flash-lite",
     "gemini-3.5-flash",
     "gemini-flash-lite-latest",
 ]
@@ -52,7 +51,7 @@ def generate_portfolio_report(portfolio_json):
     if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요":
         return "[오류] .env 파일에 유효한 GEMINI_API_KEY가 없습니다. 설정 후 다시 시도해주세요."
         
-    genai.configure(api_key=gemini_key)
+    genai.configure(api_key=gemini_key, transport="rest")
 
     prompt = f"""
     당신은 퀀트 분석가이자 인공지능 자산 관리(Copilot) 시스템입니다. 
@@ -87,7 +86,7 @@ def parse_brokerage_transactions(raw_text, broker_name="증권사"):
     if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요":
         return None, "[오류] .env 파일에 유효한 GEMINI_API_KEY가 없습니다."
 
-    genai.configure(api_key=gemini_key)
+    genai.configure(api_key=gemini_key, transport="rest")
 
     prompt = f"""
 당신은 증권사 거래내역/잔고 파일을 표준 포맷으로 변환하는 데이터 파서입니다.
@@ -149,7 +148,7 @@ def parse_brokerage_full_transactions(raw_text, broker_name="증권사"):
     if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요":
         return None, "[오류] .env 파일에 유효한 GEMINI_API_KEY가 없습니다."
 
-    genai.configure(api_key=gemini_key)
+    genai.configure(api_key=gemini_key, transport="rest")
 
     prompt = f"""
 당신은 증권사 '거래내역(체결내역)' 파일을 개별 매매 트랜잭션으로 변환하는 데이터 파서입니다.
@@ -206,7 +205,7 @@ def parse_brokerage_dividends(raw_text, broker_name="증권사"):
     if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요":
         return None, "[오류] .env 파일에 유효한 GEMINI_API_KEY가 없습니다."
 
-    genai.configure(api_key=gemini_key)
+    genai.configure(api_key=gemini_key, transport="rest")
 
     prompt = f"""
 당신은 증권사 거래내역/입출금 파일에서 '배당금·분배금 수령' 기록만 뽑아내는 데이터 파서입니다.
@@ -344,7 +343,7 @@ def chat_with_portfolio(user_message, chat_history, portfolio_json, trades_summa
     if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요":
         return "[오류] .env 파일에 유효한 GEMINI_API_KEY가 없습니다. 설정 후 다시 시도해주세요."
 
-    genai.configure(api_key=gemini_key)
+    genai.configure(api_key=gemini_key, transport="rest")
 
     # 토스 API 도구 준비 (토큰 발급)
     tools = None

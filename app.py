@@ -32,6 +32,14 @@ from auth import register_user, verify_user, user_dir
 # 1. 페이지 설정 (반드시 최상단에 위치)
 st.set_page_config(page_title="자산관리 대시보드", layout="wide", page_icon="📈")
 
+# Streamlit Cloud 배포 시: st.secrets에 등록한 값을 os.getenv()로도 읽도록 환경변수에 반영
+try:
+    for _k, _v in st.secrets.items():
+        if isinstance(_v, str):
+            os.environ.setdefault(_k, _v)
+except Exception:
+    pass
+
 # ── 토스 스타일 테마 (Pretendard 폰트 · 카드형 UI · 토스 블루) ──────────────
 # 주의: 마크다운이 코드블록으로 오인하지 않도록 각 줄을 들여쓰지 말 것
 st.markdown(
@@ -123,10 +131,8 @@ def _do_login_page():
             (st.success if ok else st.error)(msg)
 
 if not st.session_state.username:
-    # ── 임시: 로그인 비활성화(테스트용 admin 자동 로그인). 원복 시 아래 한 줄을 지우고 아래 두 줄 주석 해제 ──
-    st.session_state.username = "admin"
-    # _do_login_page()
-    # st.stop()
+    _do_login_page()
+    st.stop()
 
 _USER = st.session_state.username
 set_data_dir(user_dir(_USER))
