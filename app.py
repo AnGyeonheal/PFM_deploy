@@ -595,29 +595,23 @@ if st.session_state.data_source is None:
             st.session_state.wiz_use_tx = None
             st.rerun()
     else:
-        if has_toss_credentials(_USER):
-            st.success("저장된 토스 API 키를 사용합니다.")
+        _has_saved = has_toss_credentials(_USER)
+        st.markdown("토스 Open API 키를 **직접 입력**하세요.")
+        st.caption("키는 이 컴퓨터의 user_data 폴더에만 저장됩니다."
+                   + (" · 저장된 키가 채워져 있으니 그대로 두거나 새 키로 바꿔 입력할 수 있어요." if _has_saved else ""))
+        with st.container(border=True):
+            _wiz_creds = _credentials_form("wiz")
             c1, c2 = st.columns(2)
-            if c1.button("◀ 뒤로", use_container_width=True, key="wiz_toss_back1"):
+            if c1.button("◀ 뒤로", use_container_width=True, key="wiz_toss_back2"):
                 st.session_state.wiz_use_toss = None
                 st.rerun()
-            if c2.button("설정 완료 →", type="primary", use_container_width=True, key="wiz_toss_done1"):
-                _finalize_setup()
-        else:
-            st.caption("토스 Open API 키를 입력하세요. 키는 이 컴퓨터의 user_data 폴더에만 저장됩니다.")
-            with st.container(border=True):
-                _wiz_creds = _credentials_form("wiz")
-                c1, c2 = st.columns(2)
-                if c1.button("◀ 뒤로", use_container_width=True, key="wiz_toss_back2"):
-                    st.session_state.wiz_use_toss = None
-                    st.rerun()
-                if c2.button("저장하고 완료 →", type="primary", use_container_width=True, key="wiz_toss_save"):
-                    if _wiz_creds.get("TOSS_CLIENT_ID") and _wiz_creds.get("TOSS_CLIENT_SECRET"):
-                        save_credentials(_USER, _wiz_creds)
-                        _apply_user_credentials()
-                        _finalize_setup()
-                    else:
-                        st.error("CLIENT_ID와 CLIENT_SECRET을 모두 입력하세요.")
+            if c2.button("이 키로 저장하고 완료 →", type="primary", use_container_width=True, key="wiz_toss_save"):
+                if _wiz_creds.get("TOSS_CLIENT_ID") and _wiz_creds.get("TOSS_CLIENT_SECRET"):
+                    save_credentials(_USER, _wiz_creds)
+                    _apply_user_credentials()
+                    _finalize_setup()
+                else:
+                    st.error("CLIENT_ID와 CLIENT_SECRET을 모두 입력하세요.")
     st.stop()
 
 
