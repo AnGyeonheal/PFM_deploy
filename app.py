@@ -27,7 +27,7 @@ from pme import (
     build_trade_bars,
 )
 from performance import compute_performance_summary, build_holdings_breakdown
-from advanced_analytics import compute_dividends
+from advanced_analytics import compute_dividends, compute_fx_pnl
 from ai_copilot import parse_brokerage_transactions, parse_brokerage_full_transactions, parse_brokerage_dividends
 from ai_copilot import generate_rebalancing_report
 from auth import (
@@ -36,6 +36,7 @@ from auth import (
     create_session, resolve_session, destroy_session, get_user_info,
 )
 from report import build_portfolio_pdf
+from exporter import build_full_excel
 
 # 1. 페이지 설정 (반드시 최상단에 위치)
 st.set_page_config(page_title="자산관리 대시보드", layout="wide", page_icon="📈")
@@ -851,6 +852,34 @@ with st.sidebar:
     st.divider()
     st.checkbox("yfinance 배당 추정 포함", key="include_div_est",
                 help="직접 입력·임포트한 배당이 없는 종목만 '보유수량 타임라인 × yfinance 주당배당'으로 추정합니다. 검증값(임포트/직접입력)이 있으면 그 종목은 검증값이 우선입니다. (MSTY 등 부정확 종목은 직접 입력 권장)")
+    st.divider()
+    with st.expander("📊 전체 데이터 엑셀 내보내기", expanded=False):
+        if not has_data:
+            st.caption("내보낼 데이터가 없습니다.")
+        else:
+            st.caption("거래내역·달러매매·배당·보유종목·환율 등 프로젝트의 모든 데이터를 다중 시트 엑셀로 저장합니다.")
+            if st.button("엑셀 파일 생성", type="primary", use_container_width=True, key="mk_xlsx"):
+                with st.spinner("모든 데이터를 취합하는 중입니다..."):
+                    _bd = fetch_holdings_breakdown(combined_orders, fx_rate, combined_name_map, div_items)
+                    _uc = fetch_usd_avg_cost(combined_orders, fx_rate)
+                    try:
+                        _fx_sum, _fx_df = compute_fx_pnl(combined_orders, fx_rate)
+                    except Exception:
+                        _fx_df = pd.DataFrame()
+                    st.session_state["export_xlsx"] = build_full_excel(
+                        summary=summary, perf=perf, ab=ab, holdings=holdings,
+                        detail_df=detail_df, holdings_breakdown=_bd, dividends_df=div_view_df,
+                        usd_cost=_uc, fx_pnl_df=_fx_df,
+                        raw_tx=read_transactions_csv(), raw_holdings=read_manual_csv(),
+                        raw_dividends=read_dividends_csv(), fx_rate=fx_rate,
+                        meta={"사용자": _USER, "데이터 소스": SOURCE_LABELS.get(source, source)},
+                    )
+            if st.session_state.get("export_xlsx"):
+                st.download_button(
+                    "⬇️ 엑셀 다운로드", data=st.session_state["export_xlsx"],
+                    file_name=f"portfolio_data_{_USER}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True, key="dl_xlsx")
     st.divider()
     if st.button("로그아웃", use_container_width=True):
         destroy_session(st.query_params.get("sid"))
