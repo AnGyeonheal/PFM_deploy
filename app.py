@@ -32,6 +32,7 @@ from ai_copilot import generate_rebalancing_report
 from auth import (
     register_user, verify_user, user_dir,
     load_credentials, save_credentials, has_toss_credentials, CRED_KEYS,
+    create_session, resolve_session, destroy_session, get_user_info,
 )
 from report import build_portfolio_pdf
 
@@ -124,6 +125,13 @@ pio.templates.default = "plotly_white"
 if "username" not in st.session_state:
     st.session_state.username = None
 
+# 세션 유지: 새로고침·재시작 시 URL의 세션 토큰으로 자동 로그인 복원
+if not st.session_state.username:
+    _sid = st.query_params.get("sid")
+    _restored = resolve_session(_sid) if _sid else None
+    if _restored:
+        st.session_state.username = _restored
+
 def _do_login_page():
     st.title("🔐 자산관리 대시보드 로그인")
     st.caption("로그인하면 임포트한 증권사 거래내역을 계정별로 저장하고 다시 불러올 수 있습니다.")
@@ -131,10 +139,13 @@ def _do_login_page():
     with tab_login:
         u = st.text_input("아이디", key="login_id")
         p = st.text_input("비밀번호", type="password", key="login_pw")
+        keep = st.checkbox("로그인 상태 유지", value=True, key="login_keep")
         if st.button("로그인", type="primary", key="btn_login"):
             ok, msg = verify_user(u, p)
             if ok:
                 st.session_state.username = u.strip()
+                if keep:
+                    st.query_params["sid"] = create_session(u.strip())
                 st.cache_data.clear()
                 st.rerun()
             else:
@@ -393,6 +404,32 @@ def _current_usdkrw():
 
 
 # ── 임포트 UI (거래내역/잔고 업로드·붙여넣기) ─────────────────────
+def _extract_pdf_text(file_obj):
+    """업로드된 PDF에서 텍스트를 추출합니다. 반환: (텍스트, 오류메시지 또는 None)."""
+    try:
+        from pypdf import PdfReader
+    except Exception:
+        return "", "PDF 처리를 위한 pypdf 라이브러리가 필요합니다. (conda install -c conda-forge pypdf)"
+    try:
+        try:
+            file_obj.seek(0)
+        except Exception:
+            pass
+        reader = PdfReader(file_obj)
+        if reader.is_encrypted:
+            try:
+                reader.decrypt("")  # 빈 암호로 열리는 증권사 PDF 대응
+            except Exception:
+                return "", "암호가 걸린 PDF입니다. 암호를 해제한 뒤 다시 업로드하세요."
+        parts = [p.extract_text() or "" for p in reader.pages]
+        text = "\n".join(t for t in parts if t.strip())
+        if not text.strip():
+            return "", "PDF에서 텍스트를 추출하지 못했습니다(이미지 기반 스캔 PDF일 수 있음)."
+        return text, None
+    except Exception as e:
+        return "", f"PDF 읽기 실패: {e}"
+
+
 def render_import_ui(key_prefix="imp"):
     st.caption("증권사에서 내려받은 거래내역/잔고 파일을 올리면 AI가 표준 형식으로 변환·저장합니다.")
     broker_name = st.text_input("증권사 이름", value="한화투자증권", key=f"{key_prefix}_broker")
@@ -403,8 +440,8 @@ def render_import_ui(key_prefix="imp"):
     )
     is_full_tx = import_mode.startswith("전체")
     ups = st.file_uploader(
-        "파일 업로드 (CSV·TXT·엑셀, 복수 선택 가능)",
-        type=["csv", "txt", "xlsx", "xls"], accept_multiple_files=True, key=f"{key_prefix}_files",
+        "파일 업로드 (CSV·TXT·엑셀·PDF, 복수 선택 가능)",
+        type=["csv", "txt", "xlsx", "xls", "pdf"], accept_multiple_files=True, key=f"{key_prefix}_files",
     )
     pasted = st.text_area("또는 직접 붙여넣기", height=120, key=f"{key_prefix}_paste",
                           placeholder="매수/매도 일자·종목·수량·단가가 포함된 거래내역")
@@ -412,7 +449,13 @@ def render_import_ui(key_prefix="imp"):
     if ups:
         for up in ups:
             try:
-                if up.name.lower().endswith((".xlsx", ".xls")):
+                if up.name.lower().endswith(".pdf"):
+                    ptext, perr = _extract_pdf_text(up)
+                    if perr:
+                        st.warning(f"'{up.name}': {perr}")
+                    if ptext:
+                        raw_texts.append(ptext)
+                elif up.name.lower().endswith((".xlsx", ".xls")):
                     raw_texts.append(pd.read_excel(up).to_csv(index=False))
                 else:
                     raw_texts.append(up.getvalue().decode("utf-8", errors="ignore"))
@@ -703,6 +746,9 @@ ab = fetch_alpha_beta(combined_orders, fx_rate) if has_data else None
 # ════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown(f"### 👤 {_USER}")
+    _uinfo = get_user_info(_USER)
+    if _uinfo.get("created_at"):
+        st.caption(f"가입일 · {_uinfo['created_at'][:10]}")
     st.caption(f"데이터 소스 · **{SOURCE_LABELS.get(source, source)}**")
     if st.button("🔄 데이터 소스 변경", use_container_width=True):
         st.session_state.data_source = None
@@ -735,6 +781,8 @@ with st.sidebar:
                 help="직접 입력·임포트한 배당이 없는 종목만 '보유수량 타임라인 × yfinance 주당배당'으로 추정합니다. 검증값(임포트/직접입력)이 있으면 그 종목은 검증값이 우선입니다. (MSTY 등 부정확 종목은 직접 입력 권장)")
     st.divider()
     if st.button("로그아웃", use_container_width=True):
+        destroy_session(st.query_params.get("sid"))
+        st.query_params.clear()
         for k in ("username", "data_source", "chat_messages"):
             st.session_state.pop(k, None)
         st.cache_data.clear()

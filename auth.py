@@ -3,10 +3,13 @@
 """
 import os
 import json
+import time
 import hashlib
 import hmac
 import base64
 import re
+import secrets
+from datetime import datetime, timezone
 
 BASE_DIR = os.path.join(os.path.dirname(__file__), "user_data")
 USERS_FILE = os.path.join(BASE_DIR, "users.json")
@@ -38,6 +41,10 @@ def _hash_pw(password, salt):
     return base64.b64encode(dk).decode("ascii")
 
 
+def _now_iso():
+    return datetime.now(timezone.utc).astimezone().replace(microsecond=0).isoformat()
+
+
 def _safe_username(username):
     """폴더명으로 안전한 사용자 ID (영숫자/._- 만 허용)."""
     return re.sub(r"[^A-Za-z0-9._-]", "_", username.strip())
@@ -64,6 +71,8 @@ def register_user(username, password):
     users[username] = {
         "salt": base64.b64encode(salt).decode("ascii"),
         "hash": _hash_pw(password, salt),
+        "created_at": _now_iso(),
+        "last_login": None,
     }
     _save_users(users)
     user_dir(username)  # 폴더 생성
@@ -79,6 +88,10 @@ def verify_user(username, password):
         return False, "존재하지 않는 아이디입니다."
     salt = base64.b64decode(rec["salt"])
     if hmac.compare_digest(_hash_pw(password, salt), rec["hash"]):
+        rec["last_login"] = _now_iso()
+        rec.setdefault("created_at", rec["last_login"])
+        users[username] = rec
+        _save_users(users)
         return True, "로그인 성공"
     return False, "비밀번호가 올바르지 않습니다."
 
@@ -126,3 +139,95 @@ def has_toss_credentials(username):
     """토스 API 키(CLIENT_ID·SECRET)가 저장되어 있는지 여부."""
     c = load_credentials(username)
     return bool(c.get("TOSS_CLIENT_ID") and c.get("TOSS_CLIENT_SECRET"))
+
+
+# ───────────────────────── 사용자 프로필 조회 ─────────────────────────
+def get_user_info(username):
+    """사용자 메타데이터(가입일·마지막 로그인)를 반환합니다. 비밀번호/해시는 제외."""
+    username = (username or "").strip()
+    rec = _load_users().get(username)
+    if not rec:
+        return {}
+    return {
+        "username": username,
+        "created_at": rec.get("created_at"),
+        "last_login": rec.get("last_login"),
+    }
+
+
+# ───────────────────────── 세션 유지(자동 로그인) ─────────────────────────
+# 새로고침·앱 재시작에도 로그인을 유지하기 위한 서버측 세션 토큰 저장소입니다.
+# URL 쿼리에는 임의 토큰만 노출되고(아이디/비밀번호 아님), 만료 시 자동 폐기됩니다.
+SESSIONS_FILE = os.path.join(BASE_DIR, "sessions.json")
+SESSION_TTL_DAYS = 30
+
+
+def _load_sessions():
+    _ensure_base()
+    if not os.path.exists(SESSIONS_FILE):
+        return {}
+    try:
+        with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_sessions(sessions):
+    _ensure_base()
+    with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(sessions, f, ensure_ascii=False, indent=2)
+
+
+def _prune_sessions(sessions):
+    """만료된 세션 토큰을 제거합니다. 제거 여부를 반환."""
+    now = time.time()
+    expired = [t for t, r in sessions.items() if r.get("expires_at", 0) < now]
+    for t in expired:
+        sessions.pop(t, None)
+    return bool(expired)
+
+
+def create_session(username):
+    """로그인 성공 시 호출. 임의 세션 토큰을 발급·저장하고 토큰 문자열을 반환합니다."""
+    username = (username or "").strip()
+    if not username:
+        return None
+    token = secrets.token_urlsafe(32)
+    sessions = _load_sessions()
+    _prune_sessions(sessions)
+    sessions[token] = {
+        "username": username,
+        "expires_at": time.time() + SESSION_TTL_DAYS * 86400,
+    }
+    _save_sessions(sessions)
+    return token
+
+
+def resolve_session(token):
+    """유효한 세션 토큰이면 username을, 아니면 None을 반환합니다(만료·삭제된 사용자 토큰은 폐기)."""
+    if not token:
+        return None
+    sessions = _load_sessions()
+    rec = sessions.get(token)
+    if not rec:
+        return None
+    if rec.get("expires_at", 0) < time.time() or (rec.get("username") or "") not in _load_users():
+        sessions.pop(token, None)
+        _save_sessions(sessions)
+        return None
+    return rec.get("username")
+
+
+def destroy_session(token):
+    """로그아웃 시 세션 토큰을 폐기합니다."""
+    if not token:
+        return
+    sessions = _load_sessions()
+    changed = _prune_sessions(sessions)
+    if token in sessions:
+        sessions.pop(token, None)
+        changed = True
+    if changed:
+        _save_sessions(sessions)

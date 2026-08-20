@@ -1,10 +1,29 @@
 """yfinance 기반 장기 시세·벤치마크 분석 모듈.
 토스 캔들 API(최근 200일 제한)를 넘어서는 과거 데이터와 S&P500 비교를 제공합니다.
 """
+import time
+
 import pandas as pd
 import yfinance as yf
 
 BENCHMARK_TICKER = "SPY"  # S&P 500 추종 ETF
+
+# 동일 렌더링 중 반복되는 yfinance 호출(KRW=X·SPY 등)를 줄이기 위한 프로세스 내 TTL 캐시.
+_HTTP_CACHE = {}
+_HTTP_CACHE_TTL = 900  # 15분
+
+
+def _memo(key, producer):
+    """key별로 producer() 결과를 TTL 동안 재사용합니다. pandas 객체는 복사본을 반환해
+    호출측의 in-place 변경(name/index 재설정)이 캐시를 오염시키지 않게 합니다."""
+    now = time.time()
+    cached = _HTTP_CACHE.get(key)
+    if cached is not None and (now - cached[0]) < _HTTP_CACHE_TTL:
+        val = cached[1]
+        return val.copy() if hasattr(val, "copy") else val
+    val = producer()
+    _HTTP_CACHE[key] = (now, val)
+    return val.copy() if hasattr(val, "copy") else val
 
 
 def to_yf_ticker(symbol, market_country="US", market=None):
@@ -27,6 +46,11 @@ def to_yf_ticker(symbol, market_country="US", market=None):
 
 def get_history(yf_ticker, start=None, period="2y"):
     """일봉 종가 시계열(pandas Series, 날짜 인덱스)을 반환합니다."""
+    return _memo(("hist", yf_ticker, start, period),
+                 lambda: _get_history_uncached(yf_ticker, start, period))
+
+
+def _get_history_uncached(yf_ticker, start=None, period="2y"):
     try:
         tk = yf.Ticker(yf_ticker)
         df = tk.history(start=start, period=None if start else period, interval="1d")
@@ -44,6 +68,10 @@ def get_history(yf_ticker, start=None, period="2y"):
 
 def get_dividends(yf_ticker):
     """종목의 주당 배당금 이력(pandas Series, 배당락일 인덱스)을 반환합니다. (tz 제거)"""
+    return _memo(("div", yf_ticker), lambda: _get_dividends_uncached(yf_ticker))
+
+
+def _get_dividends_uncached(yf_ticker):
     try:
         div = yf.Ticker(yf_ticker).dividends
         if div is None or div.empty:

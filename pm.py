@@ -7,8 +7,11 @@ from dotenv import load_dotenv
 # .env 파일 로드
 load_dotenv()
 
-def get_access_token(client_id, client_secret):
-    """1) 토큰 발급"""
+# 토큰 발급 타임아웃: (연결 5s, 응답 15s). Akamai CDN 경유로 응답이 느릴 수 있어 read를 넉넉히 둠.
+TOKEN_TIMEOUT = (5, 15)
+
+def get_access_token(client_id, client_secret, retries=1):
+    """1) 토큰 발급. 일시적 타임아웃/연결 오류는 retries 회 재시도."""
     url = 'https://openapi.tossinvest.com/oauth2/token'
     headers = {
         'Content-Type': 'application/x-www-form-urlencoded'
@@ -18,22 +21,32 @@ def get_access_token(client_id, client_secret):
         'client_id': client_id,
         'client_secret': client_secret
     }
-    
-    try:
-        response = requests.post(url, headers=headers, data=data, timeout=5)
-        response.raise_for_status()  # 200번대가 아니면 에러 발생
-        return response.json().get('access_token')
-    except requests.exceptions.HTTPError as e:
-        status = e.response.status_code
-        if status == 401:
-            print("[에러] 인증 실패 (401): Client ID 또는 Secret Key를 확인하세요.")
-        elif status == 429:
-            print("[에러] 요청 초과 (429): API 호출 한도를 초과했습니다.")
-        else:
-            print(f"[에러] HTTP 에러 발생: {status}")
-        print(f"상세 메시지: {e.response.text}")
-    except requests.exceptions.RequestException as e:
-        print(f"[에러] 네트워크 예외 발생: {e}")
+
+    for attempt in range(retries + 1):
+        try:
+            response = requests.post(url, headers=headers, data=data, timeout=TOKEN_TIMEOUT)
+            response.raise_for_status()  # 200번대가 아니면 에러 발생
+            return response.json().get('access_token')
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code
+            if status == 401:
+                print("[에러] 인증 실패 (401): Client ID 또는 Secret Key를 확인하세요.")
+            elif status == 429:
+                print("[에러] 요청 초과 (429): API 호출 한도를 초과했습니다.")
+            else:
+                print(f"[에러] HTTP 에러 발생: {status}")
+            print(f"상세 메시지: {e.response.text}")
+            return None  # 인증/요청 오류는 재시도해도 동일하므로 즉시 종료
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            if attempt < retries:
+                time.sleep(1.0)
+                continue
+            print("[에러] 토큰 서버 연결 실패(타임아웃): openapi.tossinvest.com 접속이 "
+                  "사내 방화벽/네트워크에 의해 차단되었거나, 토스에 등록된 허용 IP가 아닐 수 있습니다.")
+            print(f"상세: {type(e).__name__}")
+        except requests.exceptions.RequestException as e:
+            print(f"[에러] 네트워크 예외 발생: {e}")
+            return None
     return None
 
 def get_stock_info(access_token, symbol="005930"):
