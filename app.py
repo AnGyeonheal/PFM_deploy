@@ -182,11 +182,19 @@ if not st.session_state.get("_migrated"):
 
 
 # ── 사용자별 API 키 주입 & 최초 설정 게이트 ──────────────────────
+def _secret(key):
+    """Streamlit secrets에서 값을 안전하게 읽습니다(secrets 파일이 없어도 예외 없이 None)."""
+    try:
+        return st.secrets.get(key)
+    except Exception:
+        return None
+
 def _apply_user_credentials():
-    """저장된 사용자 API 키를 os.environ에 주입해 기존 os.getenv 기반 코드가 그대로 동작하게 함."""
+    """저장된 사용자 API 키를 os.environ에 주입해 기존 os.getenv 기반 코드가 그대로 동작하게 함.
+    사용자 저장값이 없으면 Streamlit secrets(앱 공용)로 폴백합니다."""
     creds = load_credentials(_USER)
     for k in CRED_KEYS:
-        v = creds.get(k)
+        v = creds.get(k) or _secret(k)
         if v:
             os.environ[k] = str(v)
 
