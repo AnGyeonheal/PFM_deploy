@@ -521,34 +521,103 @@ SOURCE_LABELS = {
 }
 
 if st.session_state.data_source is None:
-    st.title("📈 자산관리 대시보드")
-    st.markdown("분석에 사용할 **데이터 소스**를 선택하세요. 언제든 왼쪽 사이드바에서 변경할 수 있습니다.")
-    _saved_tx = read_transactions_csv()
-    _saved_hold = read_manual_csv()
-    if len(_saved_tx) or len(_saved_hold):
-        st.info(f"저장된 임포트 데이터: 거래내역 {len(_saved_tx)}건 · 잔고 {len(_saved_hold)}종목")
-    s1, s2, s3 = st.columns(3)
-    with s1:
-        with st.container(border=True):
-            st.markdown("#### 📥 거래내역 임포트")
-            st.caption("증권사 거래내역/잔고 파일을 올려 분석합니다. 토스 API 없이도 사용할 수 있습니다.")
-            if st.button("이 방식으로 시작", key="src_tx", use_container_width=True):
-                st.session_state.data_source = "tx"
+    # 단계식 설정 마법사: 1) 거래내역 임포트 여부 → 2) 토스증권 API 사용 여부
+    st.session_state.setdefault("wiz_stage", "import")
+    st.session_state.setdefault("wiz_use_tx", None)
+    st.session_state.setdefault("wiz_use_toss", None)
+
+    def _finalize_setup():
+        ut, uo = st.session_state.wiz_use_tx, st.session_state.wiz_use_toss
+        src = "both" if (ut and uo) else "tx" if ut else "toss" if uo else None
+        if not src:  # 둘 다 건너뛴 경우 → 1단계부터 다시
+            st.session_state.wiz_stage = "import"
+            st.session_state.wiz_use_tx = None
+            st.session_state.wiz_use_toss = None
+            st.rerun()
+        st.session_state.data_source = src
+        for _k in ("wiz_stage", "wiz_use_tx", "wiz_use_toss"):
+            st.session_state.pop(_k, None)
+        st.cache_data.clear()
+        st.rerun()
+
+    _step = 1 if st.session_state.wiz_stage == "import" else 2
+    st.title("📈 자산관리 대시보드 설정")
+    st.caption(f"{_step}/2 단계 · 데이터 소스를 순서대로 설정합니다. 설정 후 왼쪽 사이드바에서 언제든 변경할 수 있습니다.")
+    st.progress(_step / 2)
+
+    # ── 1단계: 거래내역 임포트 여부 ──
+    if st.session_state.wiz_stage == "import":
+        st.markdown("### 1단계 · 거래내역 임포트")
+        if st.session_state.wiz_use_tx is None:
+            st.markdown("다른 증권사(한국투자·키움 등)의 **거래내역/잔고 파일을 임포트**해서 분석에 포함할까요?")
+            _saved_tx = read_transactions_csv()
+            _saved_hold = read_manual_csv()
+            if len(_saved_tx) or len(_saved_hold):
+                st.info(f"이미 저장된 임포트 데이터: 거래내역 {len(_saved_tx)}건 · 잔고 {len(_saved_hold)}종목")
+            c1, c2 = st.columns(2)
+            if c1.button("📥 네, 임포트할게요", type="primary", use_container_width=True, key="wiz_tx_yes"):
+                st.session_state.wiz_use_tx = True
                 st.rerun()
-    with s2:
-        with st.container(border=True):
-            st.markdown("#### 🔗 토스증권 API")
-            st.caption("토스증권 계좌를 실시간 연동합니다. API 키(.env)와 등록 IP가 필요합니다.")
-            if st.button("이 방식으로 시작", key="src_toss", use_container_width=True):
-                st.session_state.data_source = "toss"
+            if c2.button("건너뛰기 (임포트 안 함)", use_container_width=True, key="wiz_tx_no"):
+                st.session_state.wiz_use_tx = False
+                st.session_state.wiz_stage = "toss"
                 st.rerun()
-    with s3:
-        with st.container(border=True):
-            st.markdown("#### 🧩 거래내역 + 토스 API")
-            st.caption("토스증권 계좌와 타 증권사 거래내역을 통합해 분석합니다. (권장)")
-            if st.button("이 방식으로 시작", type="primary", key="src_both", use_container_width=True):
-                st.session_state.data_source = "both"
+        else:
+            st.success("거래내역 임포트를 사용합니다. 지금 파일을 올리거나, 나중에 사이드바에서 추가할 수 있습니다.")
+            with st.container(border=True):
+                render_import_ui("wiz")
+            c1, c2 = st.columns(2)
+            if c1.button("◀ 뒤로", use_container_width=True, key="wiz_tx_back"):
+                st.session_state.wiz_use_tx = None
                 st.rerun()
+            if c2.button("다음 단계 (토스 API) →", type="primary", use_container_width=True, key="wiz_tx_next"):
+                st.session_state.wiz_stage = "toss"
+                st.rerun()
+        st.stop()
+
+    # ── 2단계: 토스증권 API 사용 여부 ──
+    st.markdown("### 2단계 · 토스증권 API 연동")
+    if st.session_state.wiz_use_toss is None:
+        st.markdown("**토스증권 계좌를 실시간 연동**해서 보유·거래·예수금을 자동으로 불러올까요?")
+        st.caption("토스 Open API 키가 필요하며, 호출 IP가 토스 개발자 콘솔에 등록되어 있어야 합니다.")
+        c1, c2 = st.columns(2)
+        if c1.button("🔗 네, 연동할게요", type="primary", use_container_width=True, key="wiz_toss_yes"):
+            st.session_state.wiz_use_toss = True
+            st.rerun()
+        if c2.button("건너뛰기 (토스 미사용)", use_container_width=True, key="wiz_toss_no"):
+            if st.session_state.wiz_use_tx:
+                st.session_state.wiz_use_toss = False
+                _finalize_setup()
+            else:
+                st.error("거래내역 임포트도 건너뛰어서 사용할 데이터가 없습니다. 토스 API를 연동하거나 '◀ 이전 단계'에서 임포트를 선택하세요.")
+        if st.button("◀ 이전 단계", key="wiz_toss_prev"):
+            st.session_state.wiz_stage = "import"
+            st.session_state.wiz_use_tx = None
+            st.rerun()
+    else:
+        if has_toss_credentials(_USER):
+            st.success("저장된 토스 API 키를 사용합니다.")
+            c1, c2 = st.columns(2)
+            if c1.button("◀ 뒤로", use_container_width=True, key="wiz_toss_back1"):
+                st.session_state.wiz_use_toss = None
+                st.rerun()
+            if c2.button("설정 완료 →", type="primary", use_container_width=True, key="wiz_toss_done1"):
+                _finalize_setup()
+        else:
+            st.caption("토스 Open API 키를 입력하세요. 키는 이 컴퓨터의 user_data 폴더에만 저장됩니다.")
+            with st.container(border=True):
+                _wiz_creds = _credentials_form("wiz")
+                c1, c2 = st.columns(2)
+                if c1.button("◀ 뒤로", use_container_width=True, key="wiz_toss_back2"):
+                    st.session_state.wiz_use_toss = None
+                    st.rerun()
+                if c2.button("저장하고 완료 →", type="primary", use_container_width=True, key="wiz_toss_save"):
+                    if _wiz_creds.get("TOSS_CLIENT_ID") and _wiz_creds.get("TOSS_CLIENT_SECRET"):
+                        save_credentials(_USER, _wiz_creds)
+                        _apply_user_credentials()
+                        _finalize_setup()
+                    else:
+                        st.error("CLIENT_ID와 CLIENT_SECRET을 모두 입력하세요.")
     st.stop()
 
 
