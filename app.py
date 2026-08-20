@@ -24,6 +24,7 @@ from manual_holdings import (
 from pme import (
     build_ticker_profit_growth, compute_usd_avg_cost, build_usdkrw_history_frame,
     compute_alpha_beta, build_total_profit_growth, build_ticker_price_trades, compute_rolling_beta,
+    build_trade_bars,
 )
 from performance import compute_performance_summary, build_holdings_breakdown
 from advanced_analytics import compute_dividends
@@ -1141,7 +1142,8 @@ with main_col:
     elif view == "성과 분석":
         st.subheader("수익금 성장 추이 및 벤치마크 비교")
         st.caption("투자원금을 제외한 순수 수익금의 성장을 S&P500(SPY)에 동일 현금흐름으로 투자했을 때와 비교합니다. "
-                   "미국 주식은 환율 효과를 제거해 **달러 기준**으로 표시합니다. 그래프의 점을 클릭하면 해당일 알파(초과 %p)가 표시됩니다.")
+                   "미국 주식은 환율 효과를 제거해 **달러 기준**으로 표시합니다. 그래프의 점을 클릭하면 해당일 알파(초과 %p)가 표시되고, "
+                   "**하단 막대는 매수(초록)·매도(빨강) 수량**입니다.")
         ALL_LABEL = "전체 자산 (합산)"
         brk_tbl = fetch_holdings_breakdown(combined_orders, fx_rate, combined_name_map, div_items)
         tickers_opt = sorted(brk_tbl["티커"].unique()) if (brk_tbl is not None and not brk_tbl.empty) else []
@@ -1191,17 +1193,27 @@ with main_col:
                 except Exception:
                     click_info = None
 
-            fig_g = make_subplots(specs=[[{"secondary_y": True}]])
+            # 개별 종목이면 주가·체결 데이터 확보 (마커 + 매수량 막대에 재사용)
+            price_hist = buys_df = sells_df = None
+            punit = "₩"
+            if not is_all:
+                price_hist, buys_df, sells_df, ccy = fetch_ticker_price_trades(combined_orders, sel_growth, gidx.min())
+                punit = "$" if ccy == "USD" else "₩"
+
+            fig_g = make_subplots(
+                rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28],
+                vertical_spacing=0.06, specs=[[{"secondary_y": True}], [{"secondary_y": False}]],
+            )
             fig_g.add_trace(go.Scatter(x=gidx, y=gdf["내 수익금"], name="내 수익금",
                                        mode="lines+markers", marker=dict(size=5, color="#EF553B"),
                                        line=dict(color="#EF553B", width=2.4),
                                        hovertemplate="%{x|%Y-%m-%d}<br>내 수익금 " + mfmt + unit + "<extra></extra>"),
-                            secondary_y=False)
+                            row=1, col=1, secondary_y=False)
             fig_g.add_trace(go.Scatter(x=gidx, y=gdf["S&P500 수익금"], name="S&P500 수익금",
                                        mode="lines", line=dict(color="#636EFA", dash="dash", width=2),
                                        hovertemplate="%{x|%Y-%m-%d}<br>S&P500 " + mfmt + unit + "<extra></extra>"),
-                            secondary_y=False)
-            fig_g.add_hline(y=0, line_dash="dot", line_color="gray")
+                            row=1, col=1, secondary_y=False)
+            fig_g.add_hline(y=0, line_dash="dot", line_color="gray", row=1, col=1)
 
             # 최대 알파 지점 표시
             _invs = gdf["투자원금"].where(gdf["투자원금"] > 0)
@@ -1212,49 +1224,72 @@ with main_col:
                 fig_g.add_trace(go.Scatter(
                     x=[_amax_date], y=[float(gdf.loc[_amax_date, "내 수익금"])], name="최대 알파",
                     mode="markers", marker=dict(symbol="star", size=16, color="#F59E0B", line=dict(width=1, color="#7C4A03")),
-                    hovertemplate=f"최대 알파 {_amax_val:+.2f}%p<br>%{{x|%Y-%m-%d}}<extra></extra>"), secondary_y=False)
+                    hovertemplate=f"최대 알파 {_amax_val:+.2f}%p<br>%{{x|%Y-%m-%d}}<extra></extra>"),
+                    row=1, col=1, secondary_y=False)
                 fig_g.add_annotation(x=_amax_date, y=float(gdf.loc[_amax_date, "내 수익금"]),
                                      text=f"⭐ 최대 알파 {_amax_val:+.1f}%p", showarrow=True, arrowhead=2,
                                      arrowcolor="#F59E0B", bgcolor="rgba(255,251,235,0.95)",
                                      bordercolor="#F59E0B", borderwidth=1, font=dict(size=11, color="#7C4A03"),
-                                     yshift=18)
+                                     yshift=18, row=1, col=1)
 
-            # 개별 종목: 주가(중립색 얇은 선) + 매수/매도(굵은 마커)로 명확히 구분
+            # 개별 종목: 주가(얇은 선) + 매수/매도(마커)
             if not is_all:
-                price_hist, buys_df, sells_df, ccy = fetch_ticker_price_trades(combined_orders, sel_growth, gidx.min())
-                punit = "$" if ccy == "USD" else "₩"
                 if price_hist is not None and not price_hist.empty:
                     fig_g.add_trace(go.Scatter(x=price_hist.index, y=price_hist.values, name=f"주가({punit})",
                                                mode="lines", line=dict(color="#94A3B8", width=1, dash="solid"),
                                                opacity=0.7,
                                                hovertemplate="%{x|%Y-%m-%d}<br>주가 %{y:,.2f}" + punit + "<extra></extra>"),
-                                    secondary_y=True)
+                                    row=1, col=1, secondary_y=True)
                 if buys_df is not None and not buys_df.empty:
                     fig_g.add_trace(go.Scatter(x=buys_df["date"], y=buys_df["price"], name="🔺 매수", mode="markers",
                                                marker=dict(symbol="triangle-up", size=15, color="#16A34A",
                                                            line=dict(width=2, color="#052E16")),
                                                hovertemplate="매수 %{x|%Y-%m-%d}<br>단가 %{y:,.2f}" + punit + "<extra></extra>"),
-                                    secondary_y=True)
+                                    row=1, col=1, secondary_y=True)
                 if sells_df is not None and not sells_df.empty:
                     fig_g.add_trace(go.Scatter(x=sells_df["date"], y=sells_df["price"], name="🔻 매도", mode="markers",
                                                marker=dict(symbol="triangle-down", size=15, color="#DC2626",
                                                            line=dict(width=2, color="#450A0A")),
                                                hovertemplate="매도 %{x|%Y-%m-%d}<br>단가 %{y:,.2f}" + punit + "<extra></extra>"),
-                                    secondary_y=True)
-                fig_g.update_yaxes(title_text=f"주가 ({punit})", secondary_y=True, showgrid=False)
+                                    row=1, col=1, secondary_y=True)
+                fig_g.update_yaxes(title_text=f"주가 ({punit})", secondary_y=True, showgrid=False, row=1, col=1)
 
-            fig_g.update_yaxes(title_text=f"누적 수익금 ({unit})", secondary_y=False)
-            fig_g.update_xaxes(title_text="날짜")
-            fig_g.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+            # ── 하단(row2): 매수/매도 수량 막대 (볼륨 스타일) ──
+            if is_all:
+                _bar_buys, _bar_sells = build_trade_bars(combined_orders, None)
+                _bhover = "매수 %{x|%Y-%m-%d}<br>%{customdata} · 수량 %{y:g}<extra></extra>"
+                _shover = "매도 %{x|%Y-%m-%d}<br>%{customdata} · 수량 %{y:g}<extra></extra>"
+            else:
+                _bar_buys, _bar_sells = buys_df, sells_df
+                _bhover = "매수 %{x|%Y-%m-%d}<br>수량 %{y:g}<extra></extra>"
+                _shover = "매도 %{x|%Y-%m-%d}<br>수량 %{y:g}<extra></extra>"
+            _span_days = max((pd.Timestamp(gidx.max()) - pd.Timestamp(gidx.min())).days, 1)
+            _bar_w = max(_span_days / 130.0, 1.0) * 86400000  # 막대 폭(ms): 기간의 약 1/130
+            if _bar_buys is not None and not _bar_buys.empty and "qty" in _bar_buys.columns:
+                fig_g.add_trace(go.Bar(x=_bar_buys["date"], y=_bar_buys["qty"], name="매수 수량",
+                                       marker_color="#16A34A", opacity=0.85, width=_bar_w,
+                                       customdata=(_bar_buys["symbol"] if "symbol" in _bar_buys.columns else None),
+                                       hovertemplate=_bhover), row=2, col=1)
+            if _bar_sells is not None and not _bar_sells.empty and "qty" in _bar_sells.columns:
+                fig_g.add_trace(go.Bar(x=_bar_sells["date"], y=_bar_sells["qty"], name="매도 수량",
+                                       marker_color="#DC2626", opacity=0.6, width=_bar_w,
+                                       customdata=(_bar_sells["symbol"] if "symbol" in _bar_sells.columns else None),
+                                       hovertemplate=_shover), row=2, col=1)
+            fig_g.update_yaxes(title_text="수량(주)", showgrid=False, rangemode="tozero", row=2, col=1)
+
+            fig_g.update_yaxes(title_text=f"누적 수익금 ({unit})", secondary_y=False, row=1, col=1)
+            fig_g.update_xaxes(title_text="날짜", row=2, col=1)
+            fig_g.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                                barmode="overlay")
             if click_info:
                 d = click_info["date"]
-                fig_g.add_vline(x=d, line_dash="dot", line_color="#888888")
-                fig_g.add_annotation(x=d, y=click_info["myp"], yref="y",
+                fig_g.add_vline(x=d, line_dash="dot", line_color="#888888", row=1, col=1)
+                fig_g.add_annotation(x=d, y=click_info["myp"],
                                      text=(f"<b>{d.strftime('%Y-%m-%d')}</b><br>알파 {click_info['alpha']:+.2f}%p<br>"
                                            f"내 {click_info['my_r']:+.2f}% / S&P {click_info['spy_r']:+.2f}%"),
                                      showarrow=True, arrowhead=2, arrowcolor="#888888",
                                      bgcolor="rgba(255,255,255,0.9)", bordercolor="#888888", borderwidth=1,
-                                     font=dict(size=12, color="#111111"), align="left")
+                                     font=dict(size=12, color="#111111"), align="left", row=1, col=1)
             st.plotly_chart(fig_g, use_container_width=True, on_select="rerun", key=growth_key)
             if click_info:
                 st.success(f"🗓️ {click_info['date'].strftime('%Y-%m-%d')} · 알파 {click_info['alpha']:+.2f}%p · "

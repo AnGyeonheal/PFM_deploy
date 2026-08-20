@@ -428,22 +428,38 @@ def build_total_profit_growth(orders, fx_now=1400.0):
 
 
 def build_ticker_price_trades(orders, ticker, start=None):
-    """개별 종목의 주가 시계열과 내 매수/매도 시점(체결단가, native)을 반환합니다.
-    반환: (price(Series, native), buys(DataFrame[date,price]), sells(DataFrame[date,price]), currency)
+    """개별 종목의 주가 시계열과 내 매수/매도 시점(체결단가·수량, native)을 반환합니다.
+    반환: (price(Series, native), buys(DataFrame[date,price,qty]), sells(DataFrame[date,price,qty]), currency)
     """
     recs = [r for r in _trade_records(orders) if r["symbol"] == ticker]
     if not recs:
-        empty = pd.DataFrame(columns=["date", "price"])
+        empty = pd.DataFrame(columns=["date", "price", "qty"])
         return pd.Series(dtype=float), empty, empty, "KRW"
     cur = recs[0]["currency"]
     yft = to_yf_ticker(ticker, "KR" if cur == "KRW" else "US")
     start_str = pd.to_datetime(start).strftime("%Y-%m-%d") if start is not None else None
     hist = get_history(yft, start=start_str, period="10y")
-    buys = [{"date": r["date"], "price": r["amount"] / r["qty"]}
+    buys = [{"date": r["date"], "price": r["amount"] / r["qty"], "qty": r["qty"]}
             for r in recs if r["side"] == "BUY" and r["qty"]]
-    sells = [{"date": r["date"], "price": r["amount"] / r["qty"]}
+    sells = [{"date": r["date"], "price": r["amount"] / r["qty"], "qty": r["qty"]}
              for r in recs if r["side"] == "SELL" and r["qty"]]
-    return hist, pd.DataFrame(buys), pd.DataFrame(sells), cur
+    cols = ["date", "price", "qty"]
+    return hist, pd.DataFrame(buys, columns=cols), pd.DataFrame(sells, columns=cols), cur
+
+
+def build_trade_bars(orders, ticker=None):
+    """매수/매도 이벤트를 막대 그래프용 DataFrame으로 반환합니다.
+    반환: (buys[date,qty,amount,symbol], sells[date,qty,amount,symbol]). ticker=None이면 전체(합산).
+    """
+    recs = _trade_records(orders)
+    if ticker:
+        recs = [r for r in recs if r["symbol"] == ticker]
+    cols = ["date", "qty", "amount", "symbol"]
+    buys = [{"date": r["date"], "qty": r["qty"], "amount": r["amount"], "symbol": r["symbol"]}
+            for r in recs if r["side"] == "BUY" and r["qty"]]
+    sells = [{"date": r["date"], "qty": r["qty"], "amount": r["amount"], "symbol": r["symbol"]}
+             for r in recs if r["side"] == "SELL" and r["qty"]]
+    return pd.DataFrame(buys, columns=cols), pd.DataFrame(sells, columns=cols)
 
 
 # ───────────── 달러 평단가 · 10년 환율 · S&P500 알파/베타 (방법 A: 현금흐름 PME) ─────────────
