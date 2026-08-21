@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}거래내역 임포트{% endblock %}
+{% block content %}
+<h2 class="mb-3">📥 거래내역 임포트</h2>
+{% if msg %}<div class="alert alert-success py-2">{{ msg }}</div>{% endif %}
+<div class="section" style="max-width:720px">
+  <p class="text-secondary">증권사에서 내려받은 거래내역/잔고 파일(CSV·엑셀)을 올리거나 붙여넣으면
+    AI가 표준 형식으로 변환·저장합니다. 매수·매도·배당이 함께 추출됩니다.</p>
+  <form method="post" action="/import" enctype="multipart/form-data">
+    <div class="mb-3"><label class="form-label">증권사 이름</label>
+      <input class="form-control" name="broker" value="한화투자증권"></div>
+    <div class="mb-3"><label class="form-label">파일 업로드 (CSV·TXT·엑셀, 복수 가능)</label>
+      <input class="form-control" type="file" name="files" multiple accept=".csv,.txt,.xlsx,.xls"></div>
+    <div class="mb-3"><label class="form-label">또는 직접 붙여넣기</label>
+      <textarea class="form-control" name="pasted" rows="6" placeholder="매수/매도 일자·종목·수량·단가가 포함된 거래내역"></textarea></div>
+    <button class="btn btn-primary" type="submit">AI로 변환 후 저장</button>
+    <a class="btn btn-outline-secondary" href="/">대시보드로</a>
+  </form>
+  <p class="text-secondary small mt-3 mb-0">변환에는 Gemini API 키가 필요합니다(서버 환경변수 <code>GEMINI_API_KEY</code>).</p>
+</div>
+{% endblock %}

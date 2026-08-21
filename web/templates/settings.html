@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}API 키 설정{% endblock %}
+{% block content %}
+<h2 class="mb-3">🔑 토스증권 API 키 설정</h2>
+{% if msg %}<div class="alert alert-success py-2">{{ msg }}</div>{% endif %}
+<div class="section" style="max-width:640px">
+  <p class="text-secondary">토스 Open API 키를 입력하면 계좌를 실시간으로 연동합니다.
+    키는 서버의 사용자 폴더에만 저장됩니다. 현재 상태:
+    {% if toss_ok %}<span class="badge text-bg-success">설정됨</span>{% else %}<span class="badge text-bg-warning">미설정</span>{% endif %}
+  </p>
+  <form method="post" action="/settings">
+    <div class="mb-3"><label class="form-label">CLIENT_ID</label>
+      <input class="form-control" name="client_id" value="{{ toss_id }}" placeholder="tsck_live_..."></div>
+    <div class="mb-3"><label class="form-label">CLIENT_SECRET</label>
+      <input class="form-control" type="password" name="client_secret" placeholder="{% if toss_ok %}변경할 때만 입력{% else %}tssk_live_...{% endif %}"></div>
+    <div class="mb-3"><label class="form-label">ACCOUNT_NO (계좌 seq)</label>
+      <input class="form-control" name="account_no" value="{{ toss_acc }}"></div>
+    <button class="btn btn-primary" type="submit">저장</button>
+    <a class="btn btn-outline-secondary" href="/">대시보드로</a>
+  </form>
+  <hr>
+  <p class="text-secondary small mb-0">⚠️ 토스 API는 <b>호출 서버의 IP를 토스 콘솔에 등록</b>해야 합니다.
+    이 서버의 공인 IP를 등록하세요. (배포 시 고정 IP 필요)</p>
+</div>
+{% endblock %}

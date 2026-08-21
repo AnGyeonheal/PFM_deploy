@@ -1,0 +1,25 @@
+# 시크릿/개인 데이터 (이미지에 포함 금지)
+.env
+.env.*
+user_data/
+admin_data/
+*.xlsx
+*.csv
+.streamlit/secrets.toml
+
+# 파이썬/가상환경/캐시
+__pycache__/
+*.py[cod]
+envPM/
+env/
+venv/
+.venv/
+.pytest_cache/
+
+# git/에디터/문서
+.git/
+.github/
+.vscode/
+.idea/
+*.log
+*.pdf

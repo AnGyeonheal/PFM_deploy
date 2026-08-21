@@ -1,0 +1,31 @@
+:root {
+  --toss-blue: #3182F6; --toss-blue-dark: #1B64DA; --toss-bg: #F2F4F6;
+  --toss-card: #FFFFFF; --toss-ink: #191F28; --toss-sub: #6B7684;
+  --toss-border: #E5E8EB; --toss-red: #F04452; --toss-green: #00A676;
+}
+html, body { background: var(--toss-bg); color: var(--toss-ink);
+  font-family: 'Pretendard Variable', Pretendard, -apple-system, BlinkMacSystemFont, system-ui, 'Segoe UI', 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif; }
+.tossnav { background: #fff; border-bottom: 1px solid var(--toss-border); }
+.tossnav .nav-link { color: var(--toss-sub); font-weight: 600; }
+.tossnav .nav-link:hover { color: var(--toss-blue); }
+.card { border: 1px solid var(--toss-border); border-radius: 18px; box-shadow: 0 2px 8px rgba(0,0,0,.04); }
+.metric { background: #fff; border: 1px solid var(--toss-border); border-radius: 18px; padding: 16px 18px; height: 100%; }
+.metric .label { color: var(--toss-sub); font-size: .82rem; font-weight: 600; }
+.metric .value { font-size: 1.4rem; font-weight: 700; letter-spacing: -.02em; }
+.metric .sub { font-size: .78rem; color: var(--toss-sub); }
+.pos { color: var(--toss-green); } .neg { color: var(--toss-red); }
+h1,h2,h3,h4 { font-weight: 700; letter-spacing: -.02em; }
+.btn-primary { background: var(--toss-blue); border: none; }
+.btn-primary:hover { background: var(--toss-blue-dark); }
+.btn-toss-green { background: linear-gradient(180deg,#12B981,#00A676); color:#fff; border:none; }
+.section { background:#fff; border:1px solid var(--toss-border); border-radius:18px; padding:20px; margin-bottom:18px; }
+.table { font-size: .88rem; }
+.table thead th { color: var(--toss-sub); font-weight: 600; border-bottom: 2px solid var(--toss-border); }
+.nav-pills .nav-link.active { background: var(--toss-blue); }
+.nav-pills .nav-link { color: var(--toss-ink); }
+.form-control:focus, .form-select:focus { border-color: var(--toss-blue); box-shadow: 0 0 0 .2rem rgba(49,130,246,.18); }
+.login-wrap { max-width: 420px; margin: 6vh auto; }
+#ai-report { white-space: normal; }
+#ai-report h2 { font-size: 1.15rem; margin-top: 1rem; }
+#ai-report h3 { font-size: 1rem; }
+.table-scroll { max-height: 460px; overflow: auto; }

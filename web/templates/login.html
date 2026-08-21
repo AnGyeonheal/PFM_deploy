@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="login-wrap">
+  <div class="text-center mb-4">
+    <h1 class="mb-1">📈 자산관리 대시보드</h1>
+    <p class="text-secondary">로그인하고 포트폴리오를 분석하세요.</p>
+  </div>
+  {% if err %}<div class="alert alert-danger py-2">{{ err }}</div>{% endif %}
+  {% if msg %}<div class="alert alert-success py-2">{{ msg }}</div>{% endif %}
+  <div class="section">
+    <ul class="nav nav-pills mb-3" role="tablist">
+      <li class="nav-item"><button class="nav-link active" data-bs-toggle="pill" data-bs-target="#tab-login">로그인</button></li>
+      <li class="nav-item"><button class="nav-link" data-bs-toggle="pill" data-bs-target="#tab-signup">회원가입</button></li>
+    </ul>
+    <div class="tab-content">
+      <div class="tab-pane fade show active" id="tab-login">
+        <form method="post" action="/login">
+          <div class="mb-3"><label class="form-label">아이디</label><input class="form-control" name="username" required></div>
+          <div class="mb-3"><label class="form-label">비밀번호</label><input class="form-control" type="password" name="password" required></div>
+          <button class="btn btn-primary w-100" type="submit">로그인</button>
+        </form>
+      </div>
+      <div class="tab-pane fade" id="tab-signup">
+        <form method="post" action="/register">
+          <div class="mb-3"><label class="form-label">새 아이디</label><input class="form-control" name="username" required></div>
+          <div class="mb-3"><label class="form-label">새 비밀번호 (4자 이상)</label><input class="form-control" type="password" name="password" required></div>
+          <button class="btn btn-outline-primary w-100" type="submit">회원가입</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

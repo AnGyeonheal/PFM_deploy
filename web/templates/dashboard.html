@@ -1,0 +1,192 @@
+{% extends "base.html" %}
+{% block title %}대시보드{% endblock %}
+{% macro won(v) %}{{ "{:,.0f}".format(v or 0) }} 원{% endmacro %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <h2 class="mb-0">📈 자산관리 대시보드</h2>
+  <div class="d-flex gap-2">
+    <a class="btn btn-sm btn-outline-secondary" href="/?refresh=1">🔄 새로고침</a>
+    <a class="btn btn-sm btn-toss-green" href="/export.xlsx">⬇️ 엑셀</a>
+    <a class="btn btn-sm btn-outline-primary" href="/report.pdf">📄 PDF</a>
+  </div>
+</div>
+
+{% if not toss_ok %}
+<div class="alert alert-warning py-2">토스 API 키가 없어 <b>임포트 데이터만</b> 분석합니다.
+  <a href="/settings">API 키 설정</a>에서 등록하세요.</div>
+{% elif toss_error %}
+<div class="alert alert-danger py-2">토스 연동 실패: {{ toss_error }} — <a href="/settings">키·IP 확인</a></div>
+{% endif %}
+
+{% if not has_data %}
+<div class="section text-center text-secondary">
+  표시할 데이터가 없습니다. <a href="/import">거래내역 임포트</a> 또는 <a href="/settings">토스 API 연동</a>을 진행하세요.
+</div>
+{% else %}
+
+<!-- 지표 -->
+<div class="row g-3 mb-2">
+  <div class="col-6 col-md-3"><div class="metric"><div class="label">총자산</div><div class="value">{{ won(summary.get('total_asset_krw')) }}</div></div></div>
+  <div class="col-6 col-md-3"><div class="metric"><div class="label">주식 평가액</div><div class="value">{{ won(summary.get('stock_eval_krw')) }}</div></div></div>
+  <div class="col-6 col-md-3"><div class="metric"><div class="label">예수금(원화)</div><div class="value">{{ won(summary.get('cash_krw_native')) }}</div></div></div>
+  <div class="col-6 col-md-3"><div class="metric"><div class="label">예수금(달러)</div><div class="value">$ {{ "{:,.2f}".format(summary.get('cash_usd_native') or 0) }}</div></div></div>
+</div>
+{% if ab %}
+<div class="row g-3 mb-2">
+  <div class="col-6 col-md-3"><div class="metric"><div class="label">연환산 수익률(XIRR)</div><div class="value">{{ "%+.2f"|format(ab.port_xirr_pct or 0) }} %</div></div></div>
+  <div class="col-6 col-md-3"><div class="metric"><div class="label">알파(초과수익)</div><div class="value {{ 'pos' if (ab.alpha_pct or 0)>=0 else 'neg' }}">{{ "%+.2f"|format(ab.alpha_pct or 0) }} %p</div></div></div>
+  <div class="col-6 col-md-3"><div class="metric"><div class="label">베타(시장 민감도)</div><div class="value">{{ ab.beta if ab.beta is not none else 'N/A' }}</div></div></div>
+  <div class="col-6 col-md-3"><div class="metric"><div class="label">상관계수</div><div class="value">{{ ab.corr if ab.corr is not none else 'N/A' }}</div></div></div>
+</div>
+{% endif %}
+
+<!-- 손익 구성 -->
+{% if perf %}
+<div class="section">
+  <h5 class="mb-3">손익 구성</h5>
+  <div class="row g-3">
+    <div class="col-6 col-md-3"><div class="metric"><div class="label">누적 총손익</div>
+      <div class="value {{ 'pos' if (perf.all_inclusive_krw or 0)>=0 else 'neg' }}">{{ won(perf.all_inclusive_krw) }}</div>
+      <div class="sub">{{ "%+.2f"|format(perf.all_inclusive_pct or 0) }}% (원금대비)</div></div></div>
+    <div class="col-6 col-md-3"><div class="metric"><div class="label">보유 평가손익</div>
+      <div class="value {{ 'pos' if (perf.unreal_total_krw or 0)>=0 else 'neg' }}">{{ won(perf.unreal_total_krw) }}</div></div></div>
+    <div class="col-6 col-md-3"><div class="metric"><div class="label">실현손익</div>
+      <div class="value {{ 'pos' if (perf.realized_total_krw or 0)>=0 else 'neg' }}">{{ won(perf.realized_total_krw) }}</div></div></div>
+    <div class="col-6 col-md-3"><div class="metric"><div class="label">배당 · 환차</div>
+      <div class="value">{{ won(perf.div_krw) }}</div>
+      <div class="sub">환차 {{ won(perf.fx_total_krw) }}</div></div></div>
+  </div>
+</div>
+{% endif %}
+
+<!-- 성장 추이 차트 -->
+<div class="section">
+  <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+    <h5 class="mb-0">수익금 성장 추이 · 벤치마크 · 매수/매도 수량</h5>
+    <select id="growth-ticker" class="form-select form-select-sm" style="width:auto">
+      <option value="">전체 자산(합산)</option>
+      {% for t in tickers %}<option value="{{ t }}">{{ name_map.get(t, t) }} ({{ t }})</option>{% endfor %}
+    </select>
+  </div>
+  <div id="growth" style="height:460px">불러오는 중…</div>
+</div>
+
+<!-- 탭: 보유/거래/배당 -->
+<div class="section">
+  <ul class="nav nav-pills mb-3">
+    <li class="nav-item"><button class="nav-link active" data-bs-toggle="pill" data-bs-target="#t-hold">보유 종목</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="pill" data-bs-target="#t-tx">거래 내역</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="pill" data-bs-target="#t-div">배당 내역</button></li>
+  </ul>
+  <div class="tab-content">
+    <div class="tab-pane fade show active" id="t-hold">
+      <div class="table-scroll"><table class="table table-hover align-middle">
+        <thead><tr><th>종목</th><th>티커</th><th>상태</th><th class="text-end">보유수량</th><th class="text-end">투자원금(원)</th><th class="text-end">실현손익</th><th class="text-end">평가손익</th><th class="text-end">수익률(%)</th></tr></thead>
+        <tbody>{% for r in breakdown %}<tr>
+          <td>{{ r['종목'] }}</td><td>{{ r['티커'] }}</td><td>{{ r['상태'] }}</td>
+          <td class="text-end">{{ "{:g}".format(r['보유수량']) }}</td>
+          <td class="text-end">{{ "{:,.0f}".format(r['투자원금(원)']) }}</td>
+          <td class="text-end {{ 'pos' if r['실현손익(원)']>=0 else 'neg' }}">{{ "{:,.0f}".format(r['실현손익(원)']) }}</td>
+          <td class="text-end {{ 'pos' if r['평가손익(원)']>=0 else 'neg' }}">{{ "{:,.0f}".format(r['평가손익(원)']) }}</td>
+          <td class="text-end {{ 'pos' if r['수익률(%)']>=0 else 'neg' }}">{{ "%+.2f"|format(r['수익률(%)']) }}</td>
+        </tr>{% endfor %}</tbody>
+      </table></div>
+    </div>
+    <div class="tab-pane fade" id="t-tx">
+      <div class="table-scroll"><table class="table table-sm table-hover align-middle">
+        <thead><tr><th>날짜</th><th>증권사</th><th>종목명</th><th>구분</th><th class="text-end">수량</th><th class="text-end">체결단가</th><th>통화</th><th class="text-end">체결금액(원)</th></tr></thead>
+        <tbody>{% for r in tx_records %}<tr>
+          <td>{{ r['날짜'] }}</td><td>{{ r['증권사'] }}</td><td>{{ r['종목명'] }}</td>
+          <td>{{ r['구분'] }}</td><td class="text-end">{{ "{:g}".format(r['수량']) }}</td>
+          <td class="text-end">{{ "{:,.2f}".format(r['체결단가']) }}</td><td>{{ r['통화'] }}</td>
+          <td class="text-end">{{ "{:,.0f}".format(r['체결금액(원)']) }}</td>
+        </tr>{% endfor %}</tbody>
+      </table></div>
+    </div>
+    <div class="tab-pane fade" id="t-div">
+      <div class="table-scroll"><table class="table table-sm table-hover align-middle">
+        <thead><tr><th>일자</th><th>구분</th><th>종목</th><th>티커</th><th>통화</th><th class="text-end">배당금</th><th class="text-end">원화환산</th></tr></thead>
+        <tbody>{% for r in dividends %}<tr>
+          <td>{{ r['일자'] }}</td><td>{{ r['구분'] }}</td><td>{{ r['종목'] }}</td><td>{{ r['티커'] }}</td>
+          <td>{{ r['통화'] }}</td><td class="text-end">{{ "{:,.2f}".format(r['배당금']) }}</td>
+          <td class="text-end">{{ "{:,.0f}".format(r['원화환산']) }}</td>
+        </tr>{% endfor %}</tbody>
+      </table>
+      <p class="text-secondary small mt-2">원화 배당 {{ won(div_krw_native) }} · 달러 배당 $ {{ "{:,.2f}".format(div_usd_native or 0) }}</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- AI 진단 -->
+<div class="section">
+  <h5 class="mb-2">🤖 AI 진단 · 리밸런싱 (알파·베타 관점)</h5>
+  <button id="gen-rebal" class="btn btn-primary btn-sm mb-3">AI 진단 생성</button>
+  <div id="ai-report" class="text-secondary">버튼을 눌러 알파·베타 기반 리밸런싱 제안을 생성하세요.</div>
+  <hr>
+  <div id="chat-log" class="mb-2"></div>
+  <div class="input-group">
+    <input id="chat-input" class="form-control" placeholder="포트폴리오에 대해 질문하세요">
+    <button id="chat-send" class="btn btn-outline-primary">전송</button>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+const gEl = document.getElementById('growth');
+async function loadGrowth(ticker) {
+  if (!gEl) return;
+  gEl.innerHTML = '불러오는 중…';
+  try {
+    const r = await fetch('/api/growth?ticker=' + encodeURIComponent(ticker || ''));
+    if (!r.ok) { gEl.innerHTML = '<span class="text-secondary">성장 추이 데이터가 없습니다.</span>'; return; }
+    const fig = await r.json();
+    Plotly.newPlot('growth', fig.data, fig.layout, {responsive:true, displayModeBar:false});
+  } catch(e) { gEl.innerHTML = '차트를 불러오지 못했습니다.'; }
+}
+const sel = document.getElementById('growth-ticker');
+if (sel) { sel.addEventListener('change', e => loadGrowth(e.target.value)); loadGrowth(''); }
+
+const genBtn = document.getElementById('gen-rebal');
+if (genBtn) genBtn.addEventListener('click', async () => {
+  const box = document.getElementById('ai-report');
+  genBtn.disabled = true; box.innerHTML = 'AI가 분석 중입니다…';
+  try {
+    const r = await fetch('/api/rebalance', {method:'POST'});
+    const j = await r.json();
+    box.innerHTML = marked.parse(j.report || j.error || '실패');
+  } catch(e) { box.textContent = '생성 실패'; }
+  genBtn.disabled = false;
+});
+
+let history = [];
+const chatSend = document.getElementById('chat-send');
+if (chatSend) {
+  const log = document.getElementById('chat-log');
+  const input = document.getElementById('chat-input');
+  const push = (role, text) => {
+    const d = document.createElement('div');
+    d.className = 'mb-2';
+    d.innerHTML = '<b>' + (role==='user'?'나':'AI') + ':</b> ' + (role==='user'? text : marked.parseInline(text));
+    log.appendChild(d);
+  };
+  const send = async () => {
+    const q = input.value.trim(); if (!q) return;
+    push('user', q); input.value=''; chatSend.disabled = true;
+    try {
+      const r = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({message:q, history})});
+      const j = await r.json();
+      const ans = j.answer || j.error || '실패';
+      push('assistant', ans);
+      history.push({role:'user', content:q}); history.push({role:'assistant', content:ans});
+    } catch(e) { push('assistant', '오류가 발생했습니다.'); }
+    chatSend.disabled = false;
+  };
+  chatSend.addEventListener('click', send);
+  input.addEventListener('keydown', e => { if (e.key==='Enter') send(); });
+}
+</script>
+{% endblock %}

@@ -10,3 +10,8 @@ matplotlib
 openpyxl
 reportlab
 pypdf
+fastapi
+uvicorn[standard]
+jinja2
+python-multipart
+itsdangerous
