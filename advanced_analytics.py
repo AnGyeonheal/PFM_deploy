@@ -77,6 +77,39 @@ def compute_dividends(orders, current_fx=1400.0):
     return pd.DataFrame(rows).sort_values("배당수령(원)", ascending=False).reset_index(drop=True) if rows else pd.DataFrame()
 
 
+def compute_dividend_events(orders, current_fx=1400.0, ticker=None):
+    """배당 지급 이력을 (배당락일, 원화금액, 종목) 이벤트 리스트로 반환합니다.
+    각 배당락일의 보유수량 × 주당배당(yfinance)으로 추정. ticker 지정 시 해당 종목만.
+    """
+    by_symbol = _symbol_events(orders)
+    events = []
+    for sym, info in by_symbol.items():
+        if ticker and sym != ticker:
+            continue
+        evs = sorted(info["events"], key=lambda x: x[0])
+        if not evs:
+            continue
+        currency = info["currency"]
+        yft = to_yf_ticker(sym, "KR" if currency == "KRW" else "US")
+        divs = get_dividends(yft)
+        if divs is None or divs.empty:
+            continue
+        first_buy = evs[0][0]
+        for ex_date, dps in divs.items():
+            try:
+                ed = pd.to_datetime(ex_date).tz_localize(None).normalize()
+            except Exception:
+                continue
+            if ed < first_buy:
+                continue
+            shares = _shares_held_on(evs, ed)
+            if shares > 0:
+                native = shares * float(dps)
+                krw = native * current_fx if currency == "USD" else native
+                events.append((ed, krw, sym))
+    return sorted(events, key=lambda x: x[0])
+
+
 def compute_fx_pnl(orders, current_fx=1400.0):
     """USD 매수 원금에 대한 환차손익을 계산합니다.
     각 USD 매수 체결의 '그 날 환율' 대비 현재 환율 차이를 매수금액(USD)에 적용.

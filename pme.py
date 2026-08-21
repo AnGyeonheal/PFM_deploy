@@ -427,6 +427,89 @@ def build_total_profit_growth(orders, fx_now=1400.0):
     })
 
 
+def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None):
+    """보유 자산가치(원금+수익금) 성장 추이.
+    내 자산가치 = 주식평가액(일별 환율 반영) + 누적 매도대금(차익실현) + 누적 배당(지급일 반영).
+    같은 현금흐름을 S&P500(SPY)에 투자했을 때의 자산가치와 비교합니다.
+    div_events: [(date, krw, symbol), ...]. ticker=None이면 전체(합산).
+    반환 DataFrame(index=날짜): [내 자산가치, S&P500 자산가치, 누적 투자원금, (개별시)주가]
+    """
+    recs = _trade_records(orders)
+    if ticker:
+        recs = [r for r in recs if r["symbol"] == ticker]
+    if not recs:
+        return pd.DataFrame()
+    symbols = sorted(set(r["symbol"] for r in recs))
+    spy_hist = get_history(BENCHMARK_TICKER, period="10y")
+    fx_hist = get_usdkrw_history("10y")
+    if spy_hist.empty:
+        return pd.DataFrame()
+    start = min(r["date"] for r in recs)
+    idx = pd.date_range(start=start, end=spy_hist.index.max(), freq="D")
+
+    def align(s):
+        return s.reindex(idx.union(s.index)).ffill().reindex(idx).bfill()
+
+    fx_daily = align(fx_hist) if not fx_hist.empty else pd.Series(fx_now, index=idx)
+    spy_daily = align(spy_hist)
+    sym_cur = {s: next(r["currency"] for r in recs if r["symbol"] == s) for s in symbols}
+    sym_hist = {}
+    for s in symbols:
+        yft = to_yf_ticker(s, "KR" if sym_cur[s] == "KRW" else "US")
+        h = get_history(yft, period="10y")
+        if not h.empty:
+            sym_hist[s] = align(h)
+
+    recs_sorted = sorted(recs, key=lambda r: r["date"])
+    my_val = pd.Series(0.0, index=idx)
+    for s in symbols:
+        if s not in sym_hist:
+            continue
+        qty = pd.Series(0.0, index=idx)
+        for r in [x for x in recs_sorted if x["symbol"] == s]:
+            sign = 1 if r["side"] == "BUY" else -1
+            qty.loc[qty.index >= r["date"]] += sign * r["qty"]
+        my_val = my_val.add(qty * sym_hist[s] * (fx_daily if sym_cur[s] == "USD" else 1.0), fill_value=0)
+
+    spy_shares = pd.Series(0.0, index=idx)
+    gross_buy = pd.Series(0.0, index=idx)
+    sell_cash = pd.Series(0.0, index=idx)
+    for r in recs_sorted:
+        sign = 1 if r["side"] == "BUY" else -1
+        spy_px = _safe_asof(spy_hist, r["date"], float(spy_hist.iloc[-1]))
+        fx_d = _safe_asof(fx_hist, r["date"], fx_now)
+        if r["currency"] == "USD":
+            delta = r["amount"] / spy_px
+            cf = r["amount"] * fx_d
+        else:
+            delta = r["amount"] / (spy_px * fx_d)
+            cf = r["amount"]
+        spy_shares.loc[spy_shares.index >= r["date"]] += sign * delta
+        if sign > 0:
+            gross_buy.loc[gross_buy.index >= r["date"]] += cf
+        else:
+            sell_cash.loc[sell_cash.index >= r["date"]] += cf
+    spy_val = spy_shares * spy_daily * fx_daily
+
+    div_cum = pd.Series(0.0, index=idx)
+    for ev in (div_events or []):
+        try:
+            d = pd.to_datetime(ev[0]).tz_localize(None).normalize()
+            amt = float(ev[1])
+        except Exception:
+            continue
+        div_cum.loc[div_cum.index >= d] += amt
+
+    out = pd.DataFrame({
+        "내 자산가치": my_val + sell_cash + div_cum,
+        "S&P500 자산가치": spy_val + sell_cash,
+        "누적 투자원금": gross_buy,
+    })
+    if ticker and ticker in sym_hist:
+        out["주가"] = sym_hist[ticker]
+    return out
+
+
 def build_ticker_price_trades(orders, ticker, start=None):
     """개별 종목의 주가 시계열과 내 매수/매도 시점(체결단가·수량, native)을 반환합니다.
     반환: (price(Series, native), buys(DataFrame[date,price,qty]), sells(DataFrame[date,price,qty]), currency)

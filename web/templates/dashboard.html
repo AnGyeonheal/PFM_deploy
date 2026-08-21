@@ -68,7 +68,7 @@
 <!-- 성장 추이 차트 -->
 <div class="section">
   <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
-    <h5 class="mb-0">수익금 성장 추이 · 벤치마크 · 매수/매도 수량</h5>
+    <h5 class="mb-0">보유 자산 성장(원금+수익금) · S&P500 비교 · 매수/매도 수량</h5>
     <select id="growth-ticker" class="form-select form-select-sm" style="width:auto">
       <option value="">전체 자산(합산)</option>
       {% for t in tickers %}<option value="{{ t }}">{{ name_map.get(t, t) }} ({{ t }})</option>{% endfor %}

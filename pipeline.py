@@ -19,8 +19,11 @@ from manual_holdings import (
     transactions_to_orders, derive_holdings_from_tx,
 )
 from performance import compute_performance_summary, build_holdings_breakdown
-from advanced_analytics import compute_dividends
-from pme import compute_alpha_beta, build_total_profit_growth, build_ticker_profit_growth, build_trade_bars
+from advanced_analytics import compute_dividends, compute_dividend_events
+from pme import (
+    compute_alpha_beta, build_total_profit_growth, build_ticker_profit_growth,
+    build_trade_bars, build_asset_value_growth,
+)
 import auth
 
 
@@ -280,12 +283,38 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True):
     }
 
 
+def _dated_div_events(orders, fx, ticker=None):
+    """배당 지급 이벤트 [(date, krw, symbol)] — 검증(임포트) 날짜 우선, 없는 종목은 yfinance 추정."""
+    events = []
+    verified = set()
+    recs = read_dividends_csv()
+    if recs is not None and not recs.empty:
+        for _, r in recs.iterrows():
+            tk = str(r.get("티커"))
+            if ticker and tk != ticker:
+                continue
+            amt = float(r.get("배당금", 0) or 0)
+            if amt <= 0:
+                continue
+            try:
+                d = pd.to_datetime(r.get("일자")).tz_localize(None).normalize()
+            except Exception:
+                continue
+            is_usd = str(r.get("통화", "KRW")).upper() == "USD"
+            events.append((d, amt * fx if is_usd else amt, tk))
+            verified.add(tk)
+    for ed, krw, sym in compute_dividend_events(orders, fx, ticker):
+        if sym in verified:
+            continue
+        events.append((ed, krw, sym))
+    return sorted(events, key=lambda x: x[0])
+
+
 def growth_frame(combined_orders, fx_rate, ticker=None):
-    """수익금 성장 추이 프레임(전체 또는 개별 종목)을 반환합니다."""
-    if ticker:
-        native = False
-        return build_ticker_profit_growth(combined_orders, fx_rate, ticker, native)
-    return build_total_profit_growth(combined_orders, fx_rate)
+    """보유 자산가치(원금+수익금) 성장 추이 프레임(전체 또는 개별 종목). 환율·배당·차익실현 반영."""
+    tk = ticker or None
+    div_events = _dated_div_events(combined_orders, fx_rate, tk)
+    return build_asset_value_growth(combined_orders, fx_rate, div_events, tk)
 
 
 def trade_bars(combined_orders, ticker=None):

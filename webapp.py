@@ -147,13 +147,21 @@ def api_growth(request: Request, ticker: str = ""):
         return JSONResponse({"error": "no_growth"}, status_code=404)
     bars_buys, bars_sells = pipeline.trade_bars(orders, tk)
 
+    is_ind = bool(tk)
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28],
-                        vertical_spacing=0.06, specs=[[{"secondary_y": False}], [{"secondary_y": False}]])
+                        vertical_spacing=0.06, specs=[[{"secondary_y": True}], [{"secondary_y": False}]])
     gidx = gdf.index
-    fig.add_trace(go.Scatter(x=gidx, y=gdf["내 수익금"], name="내 수익금", mode="lines",
-                             line=dict(color="#EF553B", width=2.4)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=gidx, y=gdf["S&P500 수익금"], name="S&P500 수익금", mode="lines",
-                             line=dict(color="#636EFA", dash="dash", width=2)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=gidx, y=gdf["내 자산가치"], name="내 자산가치", mode="lines",
+                             line=dict(color="#EF553B", width=2.4)), row=1, col=1, secondary_y=False)
+    fig.add_trace(go.Scatter(x=gidx, y=gdf["S&P500 자산가치"], name="S&P500 동일투자", mode="lines",
+                             line=dict(color="#636EFA", dash="dash", width=2)), row=1, col=1, secondary_y=False)
+    fig.add_trace(go.Scatter(x=gidx, y=gdf["누적 투자원금"], name="누적 투자원금", mode="lines",
+                             line=dict(color="#9AA4AE", width=1.4, dash="dot")), row=1, col=1, secondary_y=False)
+    if is_ind and "주가" in gdf.columns:
+        fig.add_trace(go.Scatter(x=gidx, y=gdf["주가"], name="주가", mode="lines",
+                                 line=dict(color="#F9A825", width=1.2), opacity=0.75),
+                      row=1, col=1, secondary_y=True)
+        fig.update_yaxes(title_text="주가", secondary_y=True, showgrid=False, row=1, col=1)
     span = max((pd.Timestamp(gidx.max()) - pd.Timestamp(gidx.min())).days, 1)
     bw = max(span / 130.0, 1.0) * 86400000
     if bars_buys is not None and not bars_buys.empty:
@@ -162,7 +170,7 @@ def api_growth(request: Request, ticker: str = ""):
     if bars_sells is not None and not bars_sells.empty:
         fig.add_trace(go.Bar(x=bars_sells["date"], y=bars_sells["qty"], name="매도 수량",
                              marker_color="#DC2626", opacity=0.6, width=bw), row=2, col=1)
-    fig.update_yaxes(title_text="누적 수익금(원)", row=1, col=1)
+    fig.update_yaxes(title_text="자산가치(원)", secondary_y=False, row=1, col=1)
     fig.update_yaxes(title_text="수량(주)", rangemode="tozero", row=2, col=1)
     fig.update_layout(margin=dict(t=10, r=10, l=10, b=10), legend=dict(orientation="h", y=1.05),
                       height=460, barmode="overlay")
