@@ -59,6 +59,12 @@
 </div>
 {% endif %}
 
+<!-- 보유 비중 -->
+<div class="section">
+  <h5 class="mb-2">보유 비중</h5>
+  <div id="allocation" style="height:380px" class="text-secondary">불러오는 중…</div>
+</div>
+
 <!-- 성장 추이 차트 -->
 <div class="section">
   <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
@@ -77,6 +83,7 @@
     <li class="nav-item"><button class="nav-link active" data-bs-toggle="pill" data-bs-target="#t-hold">보유 종목</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="pill" data-bs-target="#t-tx">거래 내역</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="pill" data-bs-target="#t-div">배당 내역</button></li>
+    <li class="nav-item"><button id="tab-fx-btn" class="nav-link" data-bs-toggle="pill" data-bs-target="#t-fx">환율</button></li>
   </ul>
   <div class="tab-content">
     <div class="tab-pane fade show active" id="t-hold">
@@ -115,6 +122,10 @@
       <p class="text-secondary small mt-2">원화 배당 {{ won(div_krw_native) }} · 달러 배당 $ {{ "{:,.2f}".format(div_usd_native or 0) }}</p>
       </div>
     </div>
+    <div class="tab-pane fade" id="t-fx">
+      <div id="fx-metrics" class="row g-3 mb-3"></div>
+      <div id="fx-chart" style="height:380px" class="text-secondary">환율 탭을 선택하면 최근 10년 USD/KRW 환율과 달러 평단가를 불러옵니다…</div>
+    </div>
   </div>
 </div>
 
@@ -148,6 +159,36 @@ async function loadGrowth(ticker) {
 }
 const sel = document.getElementById('growth-ticker');
 if (sel) { sel.addEventListener('change', e => loadGrowth(e.target.value)); loadGrowth(''); }
+
+(async () => {
+  const el = document.getElementById('allocation'); if (!el) return;
+  try {
+    const r = await fetch('/api/allocation');
+    if (!r.ok) { el.innerHTML = '<span class="text-secondary">보유 종목이 없습니다.</span>'; return; }
+    const fig = await r.json();
+    Plotly.newPlot('allocation', fig.data, fig.layout, {responsive:true, displayModeBar:false});
+  } catch(e) { el.innerHTML = '차트를 불러오지 못했습니다.'; }
+})();
+
+let fxLoaded = false;
+const fxBtn = document.getElementById('tab-fx-btn');
+if (fxBtn) fxBtn.addEventListener('shown.bs.tab', async () => {
+  if (fxLoaded) return; fxLoaded = true;
+  const chart = document.getElementById('fx-chart');
+  const met = document.getElementById('fx-metrics');
+  try {
+    const r = await fetch('/api/fx');
+    const j = await r.json();
+    if (j.summary) {
+      const s = j.summary;
+      const card = (label, val) => `<div class="col-6 col-md-3"><div class="metric"><div class="label">${label}</div><div class="value">${val}</div></div></div>`;
+      met.innerHTML = card('달러 평단가', s.avg_fx.toFixed(1)+' 원/$') + card('현재 환율', s.current_fx.toFixed(1)+' 원/$')
+        + card('총 매수원금', '$'+Math.round(s.total_usd).toLocaleString()) + card('누적 환차손익', Math.round(s.fx_pnl_krw).toLocaleString()+' 원');
+    }
+    if (j.fig) { chart.innerHTML=''; Plotly.newPlot('fx-chart', j.fig.data, j.fig.layout, {responsive:true, displayModeBar:false}); }
+    else { chart.innerHTML = '<span class="text-secondary">환율/달러 매수 데이터가 없습니다.</span>'; }
+  } catch(e) { chart.innerHTML = '환율 데이터를 불러오지 못했습니다.'; }
+});
 
 const genBtn = document.getElementById('gen-rebal');
 if (genBtn) genBtn.addEventListener('click', async () => {

@@ -24,7 +24,7 @@ from exporter import build_full_excel
 from report import build_portfolio_pdf
 from ai_copilot import generate_rebalancing_report, chat_with_portfolio
 from advanced_analytics import compute_fx_pnl
-from pme import compute_usd_avg_cost
+from pme import compute_usd_avg_cost, build_usdkrw_history_frame
 
 load_dotenv()
 
@@ -59,6 +59,12 @@ def _df_records(df, limit=None):
         return []
     d = df.head(limit) if limit else df
     return d.to_dict(orient="records")
+
+
+def _fig_json(fig):
+    import plotly.utils
+    import json as _json
+    return _json.loads(_json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder))
 
 
 # ─────────────────────────── 인증 ───────────────────────────
@@ -162,6 +168,51 @@ def api_growth(request: Request, ticker: str = ""):
                       height=460, barmode="overlay")
     return JSONResponse(_json.loads(_json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)))
 
+@app.get("/api/allocation")
+def api_allocation(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    data = get_portfolio(user)
+    hs = [h for h in data["holdings"] if float(h.get("weight_pct") or 0) > 0]
+    if not hs:
+        return JSONResponse({"error": "no_data"}, status_code=404)
+    import plotly.graph_objects as go
+    labels = [h.get("name") or h.get("ticker") for h in hs]
+    values = [float(h.get("weight_pct") or 0) for h in hs]
+    fig = go.Figure(go.Pie(labels=labels, values=values, hole=0.5,
+                           textinfo="percent+label", textposition="inside"))
+    fig.update_layout(margin=dict(t=10, r=10, l=10, b=10), height=380, showlegend=False,
+                      colorway=["#3182F6", "#F04452", "#00A676", "#F9A825", "#8B5CF6", "#6B7684",
+                                "#EF553B", "#636EFA", "#12B981", "#FF9F40"])
+    return JSONResponse(_fig_json(fig))
+
+
+@app.get("/api/fx")
+def api_fx(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    data = get_portfolio(user)
+    orders = data["combined_orders"]
+    fx = data["fx_rate"]
+    usd = compute_usd_avg_cost(orders, fx) if orders else None
+    figj = None
+    frame = build_usdkrw_history_frame("10y")
+    if frame is not None and not frame.empty:
+        import plotly.graph_objects as go
+        fpx = frame.reset_index()
+        xcol = fpx.columns[0]
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=fpx[xcol], y=fpx["원/달러"], name="USD/KRW",
+                                 line=dict(color="#3182F6", width=1.6)))
+        if usd:
+            fig.add_hline(y=usd["avg_fx"], line_dash="dash", line_color="#EF553B",
+                          annotation_text=f"달러 평단가 {usd['avg_fx']:,.1f}원")
+        fig.update_layout(margin=dict(t=10, r=10, l=10, b=10), height=380,
+                          legend=dict(orientation="h", y=1.05))
+        figj = _fig_json(fig)
+    return JSONResponse({"fig": figj, "summary": usd})
 
 # ─────────────────────────── 설정(토스/API 키) ───────────────────────────
 @app.get("/settings", response_class=HTMLResponse)
