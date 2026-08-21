@@ -1,0 +1,7 @@
+# Caddy 설정 — SITE_ADDRESS 로 도메인/포트 지정
+#  · 도메인(예: pfm.example.com): Let's Encrypt HTTPS 자동 발급 + HTTP→HTTPS 리다이렉트
+#  · :80 : HTTP 만 (도메인 없이 공인 IP 로 접속할 때)
+{$SITE_ADDRESS} {
+	encode gzip zstd
+	reverse_proxy web:8000
+}
