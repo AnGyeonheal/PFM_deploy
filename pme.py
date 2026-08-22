@@ -432,10 +432,10 @@ def build_total_profit_growth(orders, fx_now=1400.0):
 
 def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None):
     """보유 자산가치(원금+수익금) 성장 추이.
-    내 자산가치 = 주식평가액(일별 환율 반영) + 누적 매도대금(차익실현) + 누적 배당(지급일 반영).
-    같은 현금흐름을 S&P500(SPY)에 투자했을 때의 자산가치와 비교합니다.
+    내 자산가치 = 주식평가액(일별 환율 반영) + 누적 배당(지급일 반영).
+    S&P500 자산가치 = 매수 금액을 SPY에 투입하고 매도 없이 계속 보유했다고 가정한 가치.
     div_events: [(date, krw, symbol), ...]. ticker=None이면 전체(합산).
-    반환 DataFrame(index=날짜): [내 자산가치, S&P500 자산가치, 누적 투자원금, (개별시)주가]
+    반환 DataFrame(index=날짜): [내 자산가치, S&P500 자산가치, 순투자원금, 내 누적손익, (개별시)주가]
     """
     recs = _trade_records(orders)
     if ticker:
@@ -478,19 +478,20 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
     gross_buy = pd.Series(0.0, index=idx)
     sell_cash = pd.Series(0.0, index=idx)
     for r in recs_sorted:
-        sign = 1 if r["side"] == "BUY" else -1
-        spy_px = _safe_asof(spy_hist, r["date"], float(spy_hist.iloc[-1]))
         fx_d = _safe_asof(fx_hist, r["date"], fx_now)
-        if r["currency"] == "USD":
-            delta = r["amount"] / spy_px
-            cf = r["amount"] * fx_d
-        else:
-            delta = r["amount"] / (spy_px * fx_d)
-            cf = r["amount"]
-        spy_shares.loc[spy_shares.index >= r["date"]] += sign * delta
-        if sign > 0:
+        if r["side"] == "BUY":
+            spy_px = _safe_asof(spy_hist, r["date"], float(spy_hist.iloc[-1]))
+            if r["currency"] == "USD":
+                delta = r["amount"] / spy_px
+                cf = r["amount"] * fx_d
+            else:
+                delta = r["amount"] / (spy_px * fx_d)
+                cf = r["amount"]
+            # S&P500 비교: 매수 금액만 SPY에 투입하고 매도 없이 계속 보유했다고 가정
+            spy_shares.loc[spy_shares.index >= r["date"]] += delta
             gross_buy.loc[gross_buy.index >= r["date"]] += cf
         else:
+            cf = r["amount"] * fx_d if r["currency"] == "USD" else r["amount"]
             sell_cash.loc[sell_cash.index >= r["date"]] += cf
     spy_val = spy_shares * spy_daily * fx_daily
 
