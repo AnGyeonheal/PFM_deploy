@@ -4,6 +4,7 @@
 import os
 import json
 import time
+import shutil
 import hashlib
 import hmac
 import base64
@@ -34,6 +35,37 @@ def _save_users(users):
     _ensure_base()
     with open(USERS_FILE, "w", encoding="utf-8") as f:
         json.dump(users, f, ensure_ascii=False, indent=2)
+
+
+def delete_user(username, wipe_data=True):
+    """단일 계정 삭제 + (옵션) 사용자 데이터 폴더 제거. 반환: 존재했는지 여부."""
+    users = _load_users()
+    existed = username in users
+    if existed:
+        users.pop(username, None)
+        _save_users(users)
+    if wipe_data:
+        d = os.path.join(BASE_DIR, _safe_username(username))
+        if os.path.isdir(d):
+            shutil.rmtree(d, ignore_errors=True)
+    return existed
+
+
+def delete_all_users(wipe_data=True):
+    """모든 계정을 삭제(users.json 비움)하고 모든 로그인 세션을 무효화합니다.
+    wipe_data=True면 각 사용자 데이터 폴더도 제거합니다. 반환: (삭제 계정 수, 삭제 폴더 수)."""
+    users = _load_users()
+    n_users = len(users)
+    n_dirs = 0
+    if wipe_data and os.path.isdir(BASE_DIR):
+        for name in os.listdir(BASE_DIR):
+            p = os.path.join(BASE_DIR, name)
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+                n_dirs += 1
+    _save_users({})
+    _save_sessions({})  # 모든 로그인 세션 토큰 무효화
+    return n_users, n_dirs
 
 
 def _hash_pw(password, salt):
