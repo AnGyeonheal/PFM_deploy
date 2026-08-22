@@ -560,14 +560,49 @@ def export_xlsx(request: Request):
 
 
 @app.get("/report.pdf")
-def report_pdf(request: Request):
+def report_pdf(request: Request, ai: int = 1):
     user = _current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
     data = get_portfolio(user)
-    ai = request.session.pop("rebal_report", None)
+    pipeline.apply_credentials(user)
+
+    # 종목별 분석 병합 + 한글 종목명(대시보드 표와 동일)
+    breakdown_records = _df_records(data["breakdown"])
+    sa = data.get("stock_analytics")
+    sa_map = {str(r["티커"]): r for r in sa.to_dict("records")} if (sa is not None and not sa.empty) else {}
+    name_map = data.get("name_map", {})
+    for rec in breakdown_records:
+        tkey = str(rec.get("티커"))
+        if name_map.get(tkey):
+            rec["종목"] = name_map[tkey]
+        a = sa_map.get(tkey)
+        for c in ("현재주가", "S&P500대비(%p)", "알파(연%)", "베타", "알파기여(%)", "베타기여(%)"):
+            rec[c] = (a.get(c) if a else None)
+
+    # 차트 이미지(matplotlib)
+    charts = []
+    try:
+        import report_charts
+        gdf = pipeline.growth_frame(data["combined_orders"], data["fx_rate"], None) if data["combined_orders"] else None
+        charts = [("자산 성장 추이 · S&P500(매도 반영) 비교", report_charts.growth_png(gdf)),
+                  ("보유 비중", report_charts.allocation_png(data["holdings"]))]
+    except Exception:
+        charts = []
+    charts = [(t, p) for t, p in charts if p]
+
+    # AI 진단: 대시보드에서 생성했으면 재사용, 없으면 생성(키 없으면 건너뜀)
+    ai_text = request.session.pop("rebal_report", None)
+    if not ai_text and ai:
+        try:
+            pj = {"user_profile": {"user_id": user}, "asset_summary": data["summary"], "holdings": data["holdings"]}
+            ai_text = generate_rebalancing_report(pj, data["ab"], data["perf"])
+        except Exception:
+            ai_text = None
+
     pdf = build_portfolio_pdf(user, SOURCE_LABELS.get("both"), summary=data["summary"], perf=data["perf"],
-                              ab=data["ab"], holdings=data["holdings"], ai_report=ai, fx_rate=data["fx_rate"])
+                              ab=data["ab"], holdings=data["holdings"], ai_report=ai_text, fx_rate=data["fx_rate"],
+                              charts=charts, breakdown=breakdown_records)
     fname = f"portfolio_report_{user}_{time.strftime('%Y%m%d_%H%M')}.pdf"
     return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
                              headers={"Content-Disposition": f"attachment; filename={fname}"})

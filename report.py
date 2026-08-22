@@ -16,7 +16,7 @@ from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.platypus import (
-    HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+    HRFlowable, Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
 FONT_NAME = "HYSMyeongJo-Medium"  # reportlab 내장 한글(명조) CID 폰트
@@ -150,7 +150,8 @@ def _md_to_flowables(text, styles):
 
 
 def build_portfolio_pdf(username, source_label, summary=None, perf=None, ab=None,
-                        holdings=None, ai_report=None, fx_rate=None):
+                        holdings=None, ai_report=None, fx_rate=None,
+                        charts=None, breakdown=None):
     """포트폴리오 검진 PDF를 생성해 bytes로 반환합니다.
 
     username: 사용자 이름
@@ -161,6 +162,8 @@ def build_portfolio_pdf(username, source_label, summary=None, perf=None, ab=None
     holdings: 보유 종목 dict 리스트
     ai_report: AI 진단(리밸런싱) 마크다운 텍스트(선택)
     fx_rate: 적용 환율(선택)
+    charts: [(제목, PNG bytes), ...] 차트 이미지(선택)
+    breakdown: 종목별 분석 record 리스트(선택, 있으면 상세 표로 표시)
     """
     styles = _styles()
     summary = summary or {}
@@ -230,9 +233,71 @@ def build_portfolio_pdf(username, source_label, summary=None, perf=None, ab=None
         ]
         story.append(_metric_cards(perf_cards, styles, col_count=3))
 
-    # ── 3. 보유 종목 ──
-    if holdings:
-        story.append(Paragraph("3. 보유 종목", styles["h2"]))
+    # ── 3. 차트 ──
+    if charts:
+        story.append(Paragraph("3. 차트", styles["h2"]))
+        for title, png in charts:
+            if not png:
+                continue
+            try:
+                img = Image(io.BytesIO(png))
+                w = min(170 * mm, img.imageWidth)
+                img.drawHeight = img.imageHeight * (w / img.imageWidth)
+                img.drawWidth = w
+            except Exception:
+                continue
+            if title:
+                story.append(Paragraph(title, styles["h3"]))
+            story.append(img)
+            story.append(Spacer(1, 8))
+
+    _tstyle = TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), BG),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.8, BORDER),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FAFBFC")]),
+        ("GRID", (0, 0), (-1, -1), 0.4, BORDER),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ])
+
+    # ── 4. 보유 종목 ──
+    def _fnum(v, signed=False, dec=False):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return "-"
+        return (f"{f:+,.2f}" if (signed and dec) else
+                f"{f:+.2f}" if signed else
+                f"{f:.2f}" if dec else f"{f:,.0f}")
+
+    if breakdown:
+        story.append(Paragraph("4. 보유 종목 (상세 분석)", styles["h2"]))
+        header = ["종목", "티커", "투자원금(원)", "평가손익", "실현손익", "수익률%", "알파(연%)", "베타"]
+        data = [[Paragraph(f"<b>{h}</b>", styles["cell"]) for h in header]]
+        for r in breakdown[:30]:
+            ev = float(r.get("평가손익(원)", 0) or 0)
+            rz = float(r.get("실현손익(원)", 0) or 0)
+            ret = float(r.get("수익률(%)", 0) or 0)
+            alpha = r.get("알파(연%)")
+            beta = r.get("베타")
+            data.append([
+                Paragraph(str(r.get("종목", "")), styles["cell"]),
+                Paragraph(str(r.get("티커", "")), styles["cell"]),
+                Paragraph(_fnum(r.get("투자원금(원)")), styles["cellR"]),
+                Paragraph(f'<font color="{"#00A676" if ev >= 0 else "#F04452"}">{_fnum(ev)}</font>', styles["cellR"]),
+                Paragraph(f'<font color="{"#00A676" if rz >= 0 else "#F04452"}">{_fnum(rz)}</font>', styles["cellR"]),
+                Paragraph(f'<font color="{"#00A676" if ret >= 0 else "#F04452"}">{_fnum(ret, signed=True)}</font>', styles["cellR"]),
+                Paragraph(_fnum(alpha, signed=True) if alpha is not None else "-", styles["cellR"]),
+                Paragraph(_fnum(beta, dec=True) if beta is not None else "-", styles["cellR"]),
+            ])
+        tbl = Table(data, colWidths=[34 * mm, 16 * mm, 28 * mm, 24 * mm, 24 * mm, 18 * mm, 14 * mm, 12 * mm], repeatRows=1)
+        tbl.setStyle(_tstyle)
+        story.append(tbl)
+    elif holdings:
+        story.append(Paragraph("4. 보유 종목", styles["h2"]))
         header = ["종목명", "티커", "비중(%)", "평가액(원)", "수익률(%)"]
         data = [[Paragraph(f"<b>{h}</b>", styles["cell"]) for h in header]]
         for h in holdings[:25]:
@@ -246,22 +311,12 @@ def build_portfolio_pdf(username, source_label, summary=None, perf=None, ab=None
                 Paragraph(f'<font color="{ret_color}">{float(ret or 0):+.2f}</font>', styles["cellR"]),
             ])
         tbl = Table(data, colWidths=[52 * mm, 24 * mm, 26 * mm, 40 * mm, 28 * mm], repeatRows=1)
-        tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), BG),
-            ("LINEBELOW", (0, 0), (-1, 0), 0.8, BORDER),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FAFBFC")]),
-            ("GRID", (0, 0), (-1, -1), 0.4, BORDER),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 7),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
-            ("TOPPADDING", (0, 0), (-1, -1), 5),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-        ]))
+        tbl.setStyle(_tstyle)
         story.append(tbl)
 
-    # ── 4. AI 진단 · 리밸런싱 제안 ──
+    # ── 5. AI 진단 · 리밸런싱 제안 ──
     if ai_report:
-        story.append(Paragraph("4. AI 진단 · 리밸런싱 제안 (알파·베타 관점)", styles["h2"]))
+        story.append(Paragraph("5. AI 진단 · 리밸런싱 제안 (알파·베타 관점)", styles["h2"]))
         story.extend(_md_to_flowables(ai_report, styles))
 
     story.append(Spacer(1, 10))
