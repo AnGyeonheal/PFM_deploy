@@ -23,6 +23,7 @@ from manual_holdings import (
     read_transactions_csv, read_manual_csv, read_dividends_csv,
     write_transactions_csv, write_dividends_csv, TX_COLUMNS, DIV_COLUMNS,
     clear_all_imports, delete_broker_imports, imported_brokers,
+    snapshot_imports, list_snapshots, restore_snapshot,
 )
 from exporter import build_full_excel
 from report import build_portfolio_pdf
@@ -337,7 +338,8 @@ def import_page(request: Request, msg: str = ""):
         return RedirectResponse("/login", status_code=302)
     pipeline.apply_credentials(user)
     return templates.TemplateResponse(request, "import.html",
-                                      {"user": user, "msg": msg, "brokers": imported_brokers()})
+                                      {"user": user, "msg": msg,
+                                       "brokers": imported_brokers(), "snapshots": list_snapshots()})
 
 
 @app.post("/import")
@@ -383,9 +385,10 @@ def import_clear(request: Request):
     if not user:
         return RedirectResponse("/login", status_code=302)
     pipeline.apply_credentials(user)
+    snapshot_imports("전체 초기화 전")
     n = clear_all_imports()
     _CACHE.pop(user, None)
-    return RedirectResponse(f"/import?msg=임포트 데이터를 초기화했습니다({n}개 파일 삭제).", status_code=302)
+    return RedirectResponse(f"/import?msg=임포트 데이터를 초기화했습니다({n}개 파일 삭제). 아래 '삭제 내역 복구'에서 되돌릴 수 있습니다.", status_code=302)
 
 
 @app.post("/import/clear-broker")
@@ -394,9 +397,23 @@ def import_clear_broker(request: Request, broker: str = Form(...)):
     if not user:
         return RedirectResponse("/login", status_code=302)
     pipeline.apply_credentials(user)
+    snapshot_imports(f"{broker} 삭제 전")
     n = delete_broker_imports(broker)
     _CACHE.pop(user, None)
-    return RedirectResponse(f"/import?msg={broker} 임포트 {n}건을 삭제했습니다.", status_code=302)
+    return RedirectResponse(f"/import?msg={broker} 임포트 {n}건을 삭제했습니다. 아래 '삭제 내역 복구'에서 되돌릴 수 있습니다.", status_code=302)
+
+
+@app.post("/import/restore")
+def import_restore(request: Request, snap_id: str = Form(...)):
+    user = _current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    pipeline.apply_credentials(user)
+    n = restore_snapshot(snap_id)
+    _CACHE.pop(user, None)
+    if n:
+        return RedirectResponse("/import?msg=선택한 시점으로 복구했습니다. (복구 직전 상태도 자동 백업됨)", status_code=302)
+    return RedirectResponse("/import?msg=복구할 백업을 찾지 못했습니다.", status_code=302)
 
 
 # ─────────────────────────── 데이터 편집(거래/배당 직접 수정) ───────────────────────────
@@ -474,6 +491,7 @@ async def edit_data_tx(request: Request):
     toss_rows = [r for r in rows if r.get("_src") == "토스"]
 
     # 임포트(CSV) 거래 저장
+    snapshot_imports("거래 편집 전")
     df = pd.DataFrame([{c: r.get(c, "") for c in TX_COLUMNS} for r in manual_rows], columns=TX_COLUMNS)
     n = write_transactions_csv(df)
 
@@ -507,6 +525,7 @@ async def edit_data_div(request: Request):
     pipeline.apply_credentials(user)
     payload = await request.json()
     rows = payload.get("rows", [])
+    snapshot_imports("배당 편집 전")
     df = pd.DataFrame([{c: r.get(c, "") for c in DIV_COLUMNS} for r in rows], columns=DIV_COLUMNS) if rows else pd.DataFrame(columns=DIV_COLUMNS)
     n = write_dividends_csv(df)
     _CACHE.pop(user, None)

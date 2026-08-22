@@ -36,8 +36,37 @@
   <p class="text-secondary small mb-3">현재 임포트된 데이터가 없습니다.</p>
   {% endif %}
   <form method="post" action="/import/clear"
-        onsubmit="return confirm('임포트한 거래·배당·잔고 데이터를 모두 삭제합니다. 되돌릴 수 없습니다. 계속할까요?');">
+        onsubmit="return confirm('임포트한 거래·배당·잔고 데이터를 모두 삭제합니다. (아래 복구에서 되돌릴 수 있어요) 계속할까요?');">
     <button class="btn btn-danger" type="submit" {{ '' if brokers else 'disabled' }}>전체 임포트 초기화</button>
   </form>
+</div>
+
+<div class="section" style="max-width:720px">
+  <h5 class="mb-2">삭제 내역 복구</h5>
+  <p class="text-secondary small">삭제·초기화·편집 <b>직전 상태</b>로 되돌립니다. 복구할 때 현재 상태도 자동 백업되어 다시 되돌릴 수 있습니다.
+    (토스 수정·삭제도 함께 복구됩니다.)</p>
+  {% if snapshots %}
+  <div class="table-scroll"><table class="table table-sm align-middle">
+    <thead><tr><th>시각</th><th>상황</th><th class="text-end">거래</th><th class="text-end">배당</th><th></th></tr></thead>
+    <tbody>
+    {% for s in snapshots %}<tr>
+      <td class="small text-nowrap">{{ s.time }}</td>
+      <td class="small">{{ s.label or '자동 백업' }}</td>
+      <td class="text-end">{{ s.counts.get('manual_transactions.csv', 0) }}</td>
+      <td class="text-end">{{ s.counts.get('manual_dividends.csv', 0) }}</td>
+      <td class="text-end">
+        <form method="post" action="/import/restore" class="d-inline"
+              onsubmit="return confirm('이 시점으로 복구할까요? 현재 상태는 자동 백업됩니다.');">
+          <input type="hidden" name="snap_id" value="{{ s.id }}">
+          <button class="btn btn-sm btn-outline-success" type="submit">복구</button>
+        </form>
+      </td>
+    </tr>{% endfor %}
+    </tbody>
+  </table></div>
+  <p class="text-secondary small mb-0">최근 40개 지점까지 보관됩니다.</p>
+  {% else %}
+  <p class="text-secondary small mb-0">복구 지점이 없습니다. 이후 삭제·편집 시 자동으로 백업이 생성됩니다.</p>
+  {% endif %}
 </div>
 {% endblock %}

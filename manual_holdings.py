@@ -3,6 +3,8 @@ manual_holdings.csv 를 편집하면 대시보드에 자동 반영됩니다.
 CSV 컬럼: 증권사, 티커, 종목명, 시장(KOSPI/KOSDAQ/US), 수량, 평균매수가, 통화(KRW/USD), 매수일(YYYY-MM-DD)
 """
 import os
+import json
+import shutil
 from datetime import datetime
 
 import pandas as pd
@@ -13,6 +15,7 @@ MANUAL_CSV = os.path.join(os.path.dirname(__file__), "manual_holdings.csv")
 TX_CSV = os.path.join(os.path.dirname(__file__), "manual_transactions.csv")
 DIV_CSV = os.path.join(os.path.dirname(__file__), "manual_dividends.csv")
 TOSS_OVR_JSON = os.path.join(os.path.dirname(__file__), "toss_overrides.json")
+TRASH_DIR = os.path.join(os.path.dirname(__file__), "trash")
 
 COLUMNS = ["증권사", "티커", "종목명", "시장", "수량", "평균매수가", "통화", "매수일"]
 TX_COLUMNS = ["증권사", "일자", "티커", "종목명", "시장", "구분", "수량", "단가", "통화"]
@@ -21,11 +24,12 @@ DIV_COLUMNS = ["증권사", "일자", "티커", "종목명", "통화", "배당�
 
 def set_data_dir(directory):
     """사용자별 데이터 폴더로 CSV 저장 경로를 변경합니다(로그인 시 호출)."""
-    global MANUAL_CSV, TX_CSV, DIV_CSV, TOSS_OVR_JSON
+    global MANUAL_CSV, TX_CSV, DIV_CSV, TOSS_OVR_JSON, TRASH_DIR
     MANUAL_CSV = os.path.join(directory, "manual_holdings.csv")
     TX_CSV = os.path.join(directory, "manual_transactions.csv")
     DIV_CSV = os.path.join(directory, "manual_dividends.csv")
     TOSS_OVR_JSON = os.path.join(directory, "toss_overrides.json")
+    TRASH_DIR = os.path.join(directory, "trash")
 
 
 def read_toss_overrides():
@@ -103,6 +107,102 @@ def delete_broker_imports(broker):
             kept.to_csv(path, index=False, encoding="utf-8-sig")
             removed += before - len(kept)
     return removed
+
+
+def _import_files():
+    """백업/복원 대상 파일 (실경로, 스냅샷 내 파일명) 목록."""
+    return [(TX_CSV, "manual_transactions.csv"), (DIV_CSV, "manual_dividends.csv"),
+            (MANUAL_CSV, "manual_holdings.csv"), (TOSS_OVR_JSON, "toss_overrides.json")]
+
+
+def _csv_rows(path):
+    try:
+        return int(len(pd.read_csv(path, encoding="utf-8-sig")))
+    except Exception:
+        return 0
+
+
+def _prune_snapshots(keep=40):
+    try:
+        snaps = sorted(d for d in os.listdir(TRASH_DIR)
+                       if os.path.isdir(os.path.join(TRASH_DIR, d)))
+    except Exception:
+        return
+    for old in (snaps[:-keep] if keep and len(snaps) > keep else []):
+        shutil.rmtree(os.path.join(TRASH_DIR, old), ignore_errors=True)
+
+
+def snapshot_imports(label="", keep=40):
+    """현재 임포트 데이터(거래·배당·잔고·토스수정)를 trash/에 타임스탬프 백업합니다.
+    변경(삭제·편집) 직전에 호출. 백업할 게 없으면 None."""
+    files = _import_files()
+    if not any(os.path.exists(p) for p, _ in files):
+        return None
+    snap_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    dest = os.path.join(TRASH_DIR, snap_id)
+    os.makedirs(dest, exist_ok=True)
+    counts = {}
+    for p, name in files:
+        if os.path.exists(p):
+            try:
+                shutil.copy2(p, os.path.join(dest, name))
+                if name.endswith(".csv"):
+                    counts[name] = _csv_rows(p)
+            except Exception:
+                pass
+    meta = {"id": snap_id, "label": label,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "counts": counts}
+    try:
+        with open(os.path.join(dest, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False)
+    except Exception:
+        pass
+    _prune_snapshots(keep)
+    return snap_id
+
+
+def list_snapshots():
+    """복구 가능한 스냅샷 목록(최신순)."""
+    out = []
+    if not os.path.isdir(TRASH_DIR):
+        return out
+    for d in sorted(os.listdir(TRASH_DIR), reverse=True):
+        dpath = os.path.join(TRASH_DIR, d)
+        if not os.path.isdir(dpath):
+            continue
+        meta = {"id": d, "label": "", "time": d, "counts": {}}
+        mp = os.path.join(dpath, "meta.json")
+        if os.path.exists(mp):
+            try:
+                with open(mp, encoding="utf-8") as f:
+                    meta.update(json.load(f))
+            except Exception:
+                pass
+        out.append(meta)
+    return out
+
+
+def restore_snapshot(snap_id):
+    """스냅샷 시점 상태로 임포트 데이터를 복원합니다(스냅샷에 없던 파일은 제거).
+    복원 전 현재 상태도 자동 백업합니다. 반환: 복원된 파일 수."""
+    snap_id = str(snap_id or "").strip()
+    dpath = os.path.join(TRASH_DIR, snap_id)
+    if not snap_id or ".." in snap_id or not os.path.isdir(dpath):
+        return 0
+    snapshot_imports(label="복원 전 자동 백업")  # 되돌리기 대비
+    restored = 0
+    for target, name in _import_files():
+        src = os.path.join(dpath, name)
+        try:
+            if os.path.exists(src):
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                shutil.copy2(src, target)
+                restored += 1
+            elif os.path.exists(target):
+                os.remove(target)  # 스냅샷에 없던 파일은 그 시점처럼 제거
+        except Exception:
+            pass
+    return restored
 
 # 티커 변경/별칭 정규화 (과거 티커 → 현재 티커)
 TICKER_ALIASES = {
