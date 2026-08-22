@@ -5,3 +5,7 @@
 *.sh text eol=lf
 Dockerfile text eol=lf
 Caddyfile text eol=lf
+
+# 윈도우 배치 파일은 CRLF (더블클릭 실행)
+*.bat text eol=crlf
+*.cmd text eol=crlf
