@@ -114,11 +114,8 @@ def dashboard(request: Request, refresh: int = 0):
 
     # 종목별 분석(현재주가·알파·베타·기여도) 병합 + 한글 종목명 보강
     name_map = data["name_map"]
-    try:
-        sa = pipeline.stock_analytics(data["combined_orders"], data["fx_rate"], name_map, data["holdings"])
-        sa_map = {str(r["티커"]): r for r in sa.to_dict("records")} if (sa is not None and not sa.empty) else {}
-    except Exception:
-        sa_map = {}
+    sa = data.get("stock_analytics")
+    sa_map = {str(r["티커"]): r for r in sa.to_dict("records")} if (sa is not None and not sa.empty) else {}
     _ana_cols = ["현재주가", "S&P500대비(%p)", "알파(연%)", "베타", "알파기여(%)", "베타기여(%)"]
     for rec in breakdown_records:
         tkey = str(rec.get("티커"))

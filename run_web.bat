@@ -20,10 +20,10 @@ REM 3초 뒤 기본 브라우저로 자동 접속
 start "" /b powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 3; Start-Process 'http://localhost:8000'"
 
 if exist "%PM_PY%" (
-  "%PM_PY%" -m uvicorn webapp:app --host 127.0.0.1 --port 8000
+  "%PM_PY%" -m uvicorn webapp:app --host 127.0.0.1 --port 8000 --reload
 ) else (
   echo [알림] envPM 파이썬을 찾지 못해 conda 로 실행합니다.
-  call conda run -n envPM python -m uvicorn webapp:app --host 127.0.0.1 --port 8000
+  call conda run -n envPM python -m uvicorn webapp:app --host 127.0.0.1 --port 8000 --reload
 )
 
 echo.

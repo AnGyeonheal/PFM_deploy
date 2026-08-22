@@ -270,6 +270,11 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True):
     ab = compute_alpha_beta(combined_orders, fx_rate) if has_data else None
     breakdown = (build_holdings_breakdown(combined_orders, fx_rate, name_map, dict(div_by_ticker))
                  if has_data else pd.DataFrame())
+    try:
+        stock_ana = (build_stock_analytics(combined_orders, fx_rate, name_map, holdings)
+                     if has_data else pd.DataFrame())
+    except Exception:
+        stock_ana = pd.DataFrame()
 
     return {
         "user": user,
@@ -288,6 +293,7 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True):
         "perf": perf,
         "ab": ab,
         "breakdown": breakdown,
+        "stock_analytics": stock_ana,
     }
 
 
