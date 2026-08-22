@@ -15,6 +15,9 @@ def _trade_records(orders):
         ex = o.get("execution") or {}
         qty = float(ex.get("filledQuantity") or 0)
         amt = float(ex.get("filledAmount") or 0)
+        avg_px = float(ex.get("averageFilledPrice") or 0)
+        if qty and avg_px:
+            amt = qty * avg_px  # 당시 체결단가 기준(평가액 오염 방지)
         if qty == 0 or amt == 0:
             continue
         raw = ex.get("filledAt") or o.get("orderedAt")
@@ -505,6 +508,7 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
         "S&P500 자산가치": spy_val,
         "순투자원금": gross_buy - sell_cash,
     })
+    out["내 누적손익"] = out["내 자산가치"] - out["순투자원금"]
     if ticker and ticker in sym_hist:
         out["주가"] = sym_hist[ticker]
     return out
@@ -531,24 +535,25 @@ def build_ticker_price_trades(orders, ticker, start=None):
 
 
 def build_trade_bars(orders, ticker=None, fx_now=1400.0):
-    """매수/매도 이벤트를 막대 그래프용 DataFrame으로 반환합니다. amount_krw(원화 환산) 포함.
-    반환: (buys[date,qty,amount,amount_krw,symbol], sells[...]). ticker=None이면 전체(합산).
+    """매수/매도 이벤트를 막대 그래프용 DataFrame으로 반환합니다.
+    amount_krw = 당시 체결단가 × 수량 × 당시 환율(원화 환산), price = 당시 체결단가(native).
+    반환: (buys[date,qty,amount,amount_krw,price,currency,symbol], sells[...]). ticker=None이면 전체.
     """
     recs = _trade_records(orders)
     if ticker:
         recs = [r for r in recs if r["symbol"] == ticker]
     fx_hist = get_usdkrw_history("10y")
 
-    def _krw(r):
-        if r["currency"] == "USD":
-            return r["amount"] * _safe_asof(fx_hist, r["date"], fx_now)
-        return r["amount"]
+    def _row(r):
+        native_px = r["amount"] / r["qty"] if r["qty"] else 0.0  # 당시 체결단가
+        fx = _safe_asof(fx_hist, r["date"], fx_now) if r["currency"] == "USD" else 1.0
+        return {"date": r["date"], "qty": r["qty"], "amount": r["amount"],
+                "amount_krw": r["amount"] * fx, "price": native_px,
+                "currency": r["currency"], "symbol": r["symbol"]}
 
-    cols = ["date", "qty", "amount", "amount_krw", "symbol"]
-    buys = [{"date": r["date"], "qty": r["qty"], "amount": r["amount"], "amount_krw": _krw(r), "symbol": r["symbol"]}
-            for r in recs if r["side"] == "BUY" and r["qty"]]
-    sells = [{"date": r["date"], "qty": r["qty"], "amount": r["amount"], "amount_krw": _krw(r), "symbol": r["symbol"]}
-             for r in recs if r["side"] == "SELL" and r["qty"]]
+    cols = ["date", "qty", "amount", "amount_krw", "price", "currency", "symbol"]
+    buys = [_row(r) for r in recs if r["side"] == "BUY" and r["qty"]]
+    sells = [_row(r) for r in recs if r["side"] == "SELL" and r["qty"]]
     return pd.DataFrame(buys, columns=cols), pd.DataFrame(sells, columns=cols)
 
 

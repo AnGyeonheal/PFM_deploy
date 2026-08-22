@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}데이터 편집{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <h2 class="mb-0">✏️ 거래·배당 내역 편집</h2>
+  <a class="btn btn-sm btn-outline-secondary" href="/">← 대시보드</a>
+</div>
+<div class="alert alert-info py-2 small">
+  임포트(수기 입력)한 데이터만 편집됩니다. 토스 API로 불러온 내역은 여기서 수정되지 않습니다.
+  잘못된 값을 고친 뒤 <b>저장</b>을 누르면 대시보드에 즉시 반영됩니다. 행 전체를 비우거나 ✕로 삭제할 수 있습니다.
+</div>
+
+<div class="section">
+  <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+    <h5 class="mb-0">거래 내역</h5>
+    <div class="d-flex gap-2 align-items-center">
+      <span id="tx-msg" class="text-success small"></span>
+      <button class="btn btn-sm btn-outline-primary" onclick="addRow('tx')">+ 행 추가</button>
+      <button class="btn btn-sm btn-toss-green" onclick="save('tx')">💾 저장</button>
+    </div>
+  </div>
+  <div class="table-scroll"><table class="table table-sm align-middle">
+    <thead><tr id="tx-head"></tr></thead>
+    <tbody id="tx-body"></tbody>
+  </table></div>
+</div>
+
+<div class="section">
+  <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+    <h5 class="mb-0">배당 내역</h5>
+    <div class="d-flex gap-2 align-items-center">
+      <span id="div-msg" class="text-success small"></span>
+      <button class="btn btn-sm btn-outline-primary" onclick="addRow('div')">+ 행 추가</button>
+      <button class="btn btn-sm btn-toss-green" onclick="save('div')">💾 저장</button>
+    </div>
+  </div>
+  <div class="table-scroll"><table class="table table-sm align-middle">
+    <thead><tr id="div-head"></tr></thead>
+    <tbody id="div-body"></tbody>
+  </table></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const TX_COLS = {{ tx_cols|tojson }};
+const DIV_COLS = {{ div_cols|tojson }};
+const txData = {{ tx_rows|tojson }};
+const divData = {{ div_rows|tojson }};
+const SELECTS = {"구분": ["매수", "매도"], "통화": ["KRW", "USD"]};
+const NUMS = ["수량", "단가", "배당금"];
+
+function cell(col, val) {
+  val = (val === null || val === undefined) ? "" : val;
+  if (SELECTS[col]) {
+    const opts = SELECTS[col].map(o => `<option ${String(val) === o ? 'selected' : ''}>${o}</option>`).join('');
+    return `<td><select class="form-select form-select-sm" data-col="${col}">${opts}</select></td>`;
+  }
+  const type = NUMS.includes(col) ? 'number' : 'text';
+  const step = NUMS.includes(col) ? ' step="any"' : '';
+  const w = col === '종목명' ? '150' : (NUMS.includes(col) ? '110' : '96');
+  const safe = String(val).replace(/"/g, '&quot;');
+  return `<td><input type="${type}"${step} class="form-control form-control-sm" style="min-width:${w}px" data-col="${col}" value="${safe}"></td>`;
+}
+function rowHtml(cols, data) {
+  return '<tr>' + cols.map(c => cell(c, data[c])).join('') +
+    '<td><button class="btn btn-sm btn-outline-danger" title="행 삭제" onclick="this.closest(\'tr\').remove()">✕</button></td></tr>';
+}
+function build(headId, bodyId, cols, data) {
+  document.getElementById(headId).innerHTML = cols.map(c => `<th>${c}</th>`).join('') + '<th></th>';
+  document.getElementById(bodyId).innerHTML = data.map(d => rowHtml(cols, d)).join('') || '';
+}
+function addRow(kind) {
+  const cols = kind === 'tx' ? TX_COLS : DIV_COLS;
+  document.getElementById(kind + '-body').insertAdjacentHTML('beforeend', rowHtml(cols, {}));
+}
+function collect(bodyId) {
+  const rows = [];
+  document.querySelectorAll('#' + bodyId + ' tr').forEach(tr => {
+    const obj = {};
+    tr.querySelectorAll('[data-col]').forEach(el => obj[el.dataset.col] = el.value.trim());
+    if (obj['티커']) rows.push(obj);
+  });
+  return rows;
+}
+async function save(kind) {
+  const rows = collect(kind + '-body');
+  const msg = document.getElementById(kind + '-msg');
+  msg.className = 'text-secondary small';
+  msg.textContent = '저장 중…';
+  try {
+    const r = await fetch('/edit-data/' + kind, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({rows})
+    });
+    const j = await r.json();
+    msg.className = j.ok ? 'text-success small' : 'text-danger small';
+    msg.textContent = j.ok ? (j.count + '건 저장됨 · 대시보드에 반영됩니다') : '저장 실패';
+  } catch (e) {
+    msg.className = 'text-danger small';
+    msg.textContent = '저장 실패';
+  }
+}
+build('tx-head', 'tx-body', TX_COLS, txData);
+build('div-head', 'div-body', DIV_COLS, divData);
+</script>
+{% endblock %}

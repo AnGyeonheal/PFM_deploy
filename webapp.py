@@ -19,7 +19,10 @@ import pandas as pd
 
 import auth
 import pipeline
-from manual_holdings import read_transactions_csv, read_manual_csv, read_dividends_csv
+from manual_holdings import (
+    read_transactions_csv, read_manual_csv, read_dividends_csv,
+    write_transactions_csv, write_dividends_csv, TX_COLUMNS, DIV_COLUMNS,
+)
 from exporter import build_full_excel
 from report import build_portfolio_pdf
 from ai_copilot import generate_rebalancing_report, chat_with_portfolio
@@ -161,6 +164,8 @@ def api_growth(request: Request, ticker: str = ""):
     bars_buys, bars_sells = pipeline.trade_bars(orders, tk, fx)
     name_map = data["name_map"]
     is_ind = bool(tk)
+    tk_cur = next((o.get("currency", "KRW") for o in orders if o.get("symbol") == tk), "KRW") if tk else "KRW"
+    px_fmt = ",.0f" if tk_cur == "KRW" else ",.2f"
 
     if is_ind:
         rbeta = pipeline.rolling_beta(orders, fx, tk)
@@ -187,10 +192,16 @@ def api_growth(request: Request, ticker: str = ""):
                              line=dict(color="#9AA4AE", width=1.4, dash="dot"),
                              hovertemplate="%{x|%Y-%m-%d}<br>순투자원금 %{y:,.0f}원<extra></extra>"),
                   row=1, col=1, secondary_y=False)
+    if "내 누적손익" in gdf.columns:
+        fig.add_trace(go.Scatter(x=gidx, y=gdf["내 누적손익"], name="내 누적손익", mode="lines",
+                                 line=dict(color="#14B8A6", width=1.8), fill="tozeroy",
+                                 fillcolor="rgba(20,184,166,0.10)",
+                                 hovertemplate="%{x|%Y-%m-%d}<br>누적손익 %{y:,.0f}원<extra></extra>"),
+                      row=1, col=1, secondary_y=False)
     if is_ind and "주가" in gdf.columns:
         fig.add_trace(go.Scatter(x=gidx, y=gdf["주가"], name="주가", mode="lines",
                                  line=dict(color="#F9A825", width=1.2), opacity=0.75,
-                                 hovertemplate="%{x|%Y-%m-%d}<br>주가 %{y:,.2f}<extra></extra>"),
+                                 hovertemplate="%{x|%Y-%m-%d}<br>주가 %{y:" + px_fmt + "}<extra></extra>"),
                       row=1, col=1, secondary_y=True)
         fig.update_yaxes(title_text="주가", secondary_y=True, showgrid=False, row=1, col=1)
         alpha = (gdf["내 자산가치"] - gdf["S&P500 자산가치"]).dropna()
@@ -216,17 +227,26 @@ def api_growth(request: Request, ticker: str = ""):
 
     span = max((pd.Timestamp(gidx.max()) - pd.Timestamp(gidx.min())).days, 1)
     bw = max(span / 130.0, 1.0) * 86400000
+
+    def _bar_custom(bdf):
+        rows = []
+        for _, row in bdf.iterrows():
+            nm = name_map.get(row["symbol"], row["symbol"])
+            ps = (f"{row['price']:,.0f}원" if row["currency"] == "KRW" else f"${row['price']:,.2f}")
+            rows.append([nm, ps, f"{row['qty']:g}"])
+        return rows
+
+    _bar_hover = ("%{customdata[0]}<br>%{x|%Y-%m-%d}<br>"
+                  "%{customdata[2]}주 @ %{customdata[1]}<br>%{y:,.0f}원<extra></extra>")
     if bars_buys is not None and not bars_buys.empty:
-        _nb = [name_map.get(s, s) for s in bars_buys["symbol"]]
         fig.add_trace(go.Bar(x=bars_buys["date"], y=bars_buys["amount_krw"], name="매수 금액",
-                             marker_color="#16A34A", opacity=0.85, width=bw, customdata=_nb,
-                             hovertemplate="매수 %{x|%Y-%m-%d}<br>%{customdata}<br>%{y:,.0f}원<extra></extra>"),
+                             marker_color="#16A34A", opacity=0.85, width=bw, customdata=_bar_custom(bars_buys),
+                             hovertemplate="매수 · " + _bar_hover),
                       row=bar_row, col=1)
     if bars_sells is not None and not bars_sells.empty:
-        _ns = [name_map.get(s, s) for s in bars_sells["symbol"]]
         fig.add_trace(go.Bar(x=bars_sells["date"], y=bars_sells["amount_krw"], name="매도 금액",
-                             marker_color="#DC2626", opacity=0.6, width=bw, customdata=_ns,
-                             hovertemplate="매도 %{x|%Y-%m-%d}<br>%{customdata}<br>%{y:,.0f}원<extra></extra>"),
+                             marker_color="#DC2626", opacity=0.6, width=bw, customdata=_bar_custom(bars_sells),
+                             hovertemplate="매도 · " + _bar_hover),
                       row=bar_row, col=1)
 
     fig.update_yaxes(title_text="자산가치(원)", secondary_y=False, row=1, col=1)
@@ -352,6 +372,52 @@ async def import_save(request: Request, broker: str = Form("한화투자증권")
     dn = save_parsed_dividends(divs, replace_broker=broker) if divs else 0
     _CACHE.pop(user, None)
     return RedirectResponse(f"/import?msg={n}건 거래·{dn}건 배당 저장됨", status_code=302)
+
+
+# ─────────────────────────── 데이터 편집(거래/배당 직접 수정) ───────────────────────────
+@app.get("/edit-data", response_class=HTMLResponse)
+def edit_data_page(request: Request, msg: str = ""):
+    user = _current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    pipeline.apply_credentials(user)
+    tx = read_transactions_csv()
+    dv = read_dividends_csv()
+    ctx = {
+        "request": request, "user": user, "msg": msg,
+        "tx_rows": tx.fillna("").to_dict("records") if (tx is not None and not tx.empty) else [],
+        "div_rows": dv.fillna("").to_dict("records") if (dv is not None and not dv.empty) else [],
+        "tx_cols": TX_COLUMNS, "div_cols": DIV_COLUMNS,
+    }
+    return templates.TemplateResponse(request, "edit_data.html", ctx)
+
+
+@app.post("/edit-data/tx")
+async def edit_data_tx(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    pipeline.apply_credentials(user)
+    payload = await request.json()
+    rows = payload.get("rows", [])
+    df = pd.DataFrame(rows, columns=TX_COLUMNS) if rows else pd.DataFrame(columns=TX_COLUMNS)
+    n = write_transactions_csv(df)
+    _CACHE.pop(user, None)
+    return JSONResponse({"ok": True, "count": n})
+
+
+@app.post("/edit-data/div")
+async def edit_data_div(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    pipeline.apply_credentials(user)
+    payload = await request.json()
+    rows = payload.get("rows", [])
+    df = pd.DataFrame(rows, columns=DIV_COLUMNS) if rows else pd.DataFrame(columns=DIV_COLUMNS)
+    n = write_dividends_csv(df)
+    _CACHE.pop(user, None)
+    return JSONResponse({"ok": True, "count": n})
 
 
 # ─────────────────────────── 내보내기(엑셀/PDF) ───────────────────────────

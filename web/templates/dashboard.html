@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}대시보드{% endblock %}
-{% macro won(v) %}{{ "{:,.0f}".format(v or 0) }} 원{% endmacro %}
+{% macro won(v) %}{{ "{:,.0f}".format(v or 0) }}원{% endmacro %}
+{% macro price(v, cur) %}{% if v is none or v == '' %}–{% elif cur == 'USD' %}{{ "{:,.2f}".format(v) }}{% else %}{{ "{:,.0f}".format(v) }}{% endif %}{% endmacro %}
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
   <h2 class="mb-0">📈 자산관리 대시보드</h2>
@@ -85,6 +86,7 @@
       <div id="growth-help-body" class="accordion-collapse collapse" data-bs-parent="#growth-help">
         <div class="accordion-body small text-secondary">
           <ul class="mb-2">
+            <li><b style="color:#14B8A6">내 누적손익</b> : 지금까지의 총손익(평가손익+실현손익+배당) 추이. 0원 위면 이익, 아래면 손실입니다.</li>
             <li><b class="text-danger">내 자산가치</b> : 내가 보유한 주식의 평가금액 + 누적 배당금(원화 환산).</li>
             <li><b style="color:#636EFA">S&P500 동일투자</b> : 같은 날짜·같은 금액을 S&P500(SPY)에 대신 넣었다면의 가치. 내 성과의 벤치마크.</li>
             <li><b class="text-secondary">순투자원금(매수−매도)</b> : 실제로 투입한 눈 – 회수한 눈. 이 선 위에 자산가치가 있으면 수익.</li>
@@ -115,7 +117,7 @@
         <tbody>{% for r in breakdown %}<tr>
           <td>{{ r['종목'] }}</td><td>{{ r['티커'] }}</td><td>{{ r['상태'] }}</td>
           <td class="text-end">{{ "{:g}".format(r['보유수량']) }}</td>
-          <td class="text-end">{% if r.get('현재주가') is not none %}{{ "{:,.2f}".format(r['현재주가']) }}{% else %}–{% endif %}</td>
+          <td class="text-end">{% if r.get('현재주가') is not none %}{{ price(r['현재주가'], r['통화']) }}{% else %}–{% endif %}</td>
           <td class="text-end">{{ "{:,.0f}".format(r['투자원금(원)']) }}</td>
           <td class="text-end {{ 'pos' if r['실현손익(원)']>=0 else 'neg' }}">{{ "{:,.0f}".format(r['실현손익(원)']) }}</td>
           <td class="text-end {{ 'pos' if r['평가손익(원)']>=0 else 'neg' }}">{{ "{:,.0f}".format(r['평가손익(원)']) }}</td>
@@ -129,22 +131,24 @@
       </table></div>
     </div>
     <div class="tab-pane fade" id="t-tx">
+      <div class="d-flex justify-content-end mb-2"><a class="btn btn-sm btn-outline-primary" href="/edit-data">✏️ 거래·배당 편집</a></div>
       <div class="table-scroll"><table class="table table-sm table-hover align-middle">
         <thead><tr><th>날짜</th><th>증권사</th><th>종목명</th><th>구분</th><th class="text-end">수량</th><th class="text-end">체결단가</th><th>통화</th><th class="text-end">체결금액(원)</th></tr></thead>
         <tbody>{% for r in tx_records %}<tr>
           <td>{{ r['날짜'] }}</td><td>{{ r['증권사'] }}</td><td>{{ r['종목명'] }}</td>
           <td>{{ r['구분'] }}</td><td class="text-end">{{ "{:g}".format(r['수량']) }}</td>
-          <td class="text-end">{{ "{:,.2f}".format(r['체결단가']) }}</td><td>{{ r['통화'] }}</td>
+          <td class="text-end">{{ price(r['체결단가'], r['통화']) }}</td><td>{{ r['통화'] }}</td>
           <td class="text-end">{{ "{:,.0f}".format(r['체결금액(원)']) }}</td>
         </tr>{% endfor %}</tbody>
       </table></div>
     </div>
     <div class="tab-pane fade" id="t-div">
+      <div class="d-flex justify-content-end mb-2"><a class="btn btn-sm btn-outline-primary" href="/edit-data">✏️ 거래·배당 편집</a></div>
       <div class="table-scroll"><table class="table table-sm table-hover align-middle">
         <thead><tr><th>일자</th><th>구분</th><th>종목</th><th>티커</th><th>통화</th><th class="text-end">배당금</th><th class="text-end">원화환산</th></tr></thead>
         <tbody>{% for r in dividends %}<tr>
           <td>{{ r['일자'] }}</td><td>{{ r['구분'] }}</td><td>{{ r['종목'] }}</td><td>{{ r['티커'] }}</td>
-          <td>{{ r['통화'] }}</td><td class="text-end">{{ "{:,.2f}".format(r['배당금']) }}</td>
+          <td>{{ r['통화'] }}</td><td class="text-end">{{ price(r['배당금'], r['통화']) }}</td>
           <td class="text-end">{{ "{:,.0f}".format(r['원화환산']) }}</td>
         </tr>{% endfor %}</tbody>
       </table>
@@ -211,7 +215,7 @@ if (fxBtn) fxBtn.addEventListener('shown.bs.tab', async () => {
     if (j.summary) {
       const s = j.summary;
       const card = (label, val) => `<div class="col-6 col-md-3"><div class="metric"><div class="label">${label}</div><div class="value">${val}</div></div></div>`;
-      met.innerHTML = card('달러 평단가', s.avg_fx.toFixed(1)+' 원/$') + card('현재 환율', s.current_fx.toFixed(1)+' 원/$')
+      met.innerHTML = card('달러 평단가', Math.round(s.avg_fx).toLocaleString()+' 원/$') + card('현재 환율', Math.round(s.current_fx).toLocaleString()+' 원/$')
         + card('총 매수원금', '$'+Math.round(s.total_usd).toLocaleString()) + card('누적 환차손익', Math.round(s.fx_pnl_krw).toLocaleString()+' 원');
     }
     if (j.fig) { chart.innerHTML=''; Plotly.newPlot('fx-chart', j.fig.data, j.fig.layout, {responsive:true, displayModeBar:false}); }
