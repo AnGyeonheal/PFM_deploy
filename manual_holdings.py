@@ -66,6 +66,44 @@ def clear_all_imports():
                 pass
     return removed
 
+
+def imported_brokers():
+    """임포트된 거래·배당·잔고 CSV에 존재하는 증권사 목록을 반환합니다."""
+    brokers = set()
+    for path in (TX_CSV, DIV_CSV, MANUAL_CSV):
+        if not os.path.exists(path):
+            continue
+        try:
+            df = pd.read_csv(path, encoding="utf-8-sig", dtype={"티커": str})
+        except Exception:
+            continue
+        if "증권사" in df.columns:
+            brokers |= {str(b).strip() for b in df["증권사"].dropna() if str(b).strip()}
+    return sorted(brokers)
+
+
+def delete_broker_imports(broker):
+    """특정 증권사의 임포트 거래·배당·잔고 행만 삭제합니다. 반환: 삭제된 행 수."""
+    broker = str(broker or "").strip()
+    if not broker:
+        return 0
+    removed = 0
+    for path in (TX_CSV, DIV_CSV, MANUAL_CSV):
+        if not os.path.exists(path):
+            continue
+        try:
+            df = pd.read_csv(path, encoding="utf-8-sig", dtype={"티커": str})
+        except Exception:
+            continue
+        if "증권사" not in df.columns or df.empty:
+            continue
+        before = len(df)
+        kept = df[df["증권사"].astype(str).str.strip() != broker]
+        if len(kept) < before:
+            kept.to_csv(path, index=False, encoding="utf-8-sig")
+            removed += before - len(kept)
+    return removed
+
 # 티커 변경/별칭 정규화 (과거 티커 → 현재 티커)
 TICKER_ALIASES = {
     "FB": "META",   # 메타 플랫폼스: 2022년 티커 변경 FB→META

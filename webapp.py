@@ -22,6 +22,7 @@ import pipeline
 from manual_holdings import (
     read_transactions_csv, read_manual_csv, read_dividends_csv,
     write_transactions_csv, write_dividends_csv, TX_COLUMNS, DIV_COLUMNS,
+    clear_all_imports, delete_broker_imports, imported_brokers,
 )
 from exporter import build_full_excel
 from report import build_portfolio_pdf
@@ -334,7 +335,9 @@ def import_page(request: Request, msg: str = ""):
     user = _current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
-    return templates.TemplateResponse(request, "import.html", {"user": user, "msg": msg})
+    pipeline.apply_credentials(user)
+    return templates.TemplateResponse(request, "import.html",
+                                      {"user": user, "msg": msg, "brokers": imported_brokers()})
 
 
 @app.post("/import")
@@ -372,6 +375,28 @@ async def import_save(request: Request, broker: str = Form("한화투자증권")
     dn = save_parsed_dividends(divs, replace_broker=broker) if divs else 0
     _CACHE.pop(user, None)
     return RedirectResponse(f"/import?msg={n}건 거래·{dn}건 배당 저장됨", status_code=302)
+
+
+@app.post("/import/clear")
+def import_clear(request: Request):
+    user = _current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    pipeline.apply_credentials(user)
+    n = clear_all_imports()
+    _CACHE.pop(user, None)
+    return RedirectResponse(f"/import?msg=임포트 데이터를 초기화했습니다({n}개 파일 삭제).", status_code=302)
+
+
+@app.post("/import/clear-broker")
+def import_clear_broker(request: Request, broker: str = Form(...)):
+    user = _current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    pipeline.apply_credentials(user)
+    n = delete_broker_imports(broker)
+    _CACHE.pop(user, None)
+    return RedirectResponse(f"/import?msg={broker} 임포트 {n}건을 삭제했습니다.", status_code=302)
 
 
 # ─────────────────────────── 데이터 편집(거래/배당 직접 수정) ───────────────────────────
