@@ -17,6 +17,7 @@ from manual_holdings import (
     set_data_dir, load_manual_holdings, manual_to_orders,
     read_manual_csv, read_transactions_csv, read_dividends_csv,
     transactions_to_orders, derive_holdings_from_tx,
+    read_toss_overrides, write_toss_overrides,
 )
 from performance import compute_performance_summary, build_holdings_breakdown
 from advanced_analytics import compute_dividends, compute_dividend_events
@@ -92,6 +93,76 @@ def toss_trades(creds, account="1"):
     name_map = {i.get("symbol"): i.get("name") for i in holdings_data.get("result", {}).get("items", [])}
     detail = build_transaction_detail(orders, fx, name_map)
     return detail, orders, fx, name_map
+
+
+# ─────────────────── 토스 거래 직접 수정(오버라이드 레이어) ───────────────────
+TOSS_OVR_FIELDS = ["일자", "티커", "종목명", "구분", "수량", "단가", "통화"]
+
+
+def toss_trade_key(o):
+    """토스 주문의 안정적 식별키(심볼|체결시각|매매구분|수량|금액). 새로고침해도 동일."""
+    ex = o.get("execution") or {}
+    raw = ex.get("filledAt") or o.get("orderedAt") or ""
+    return "|".join(str(x) for x in [o.get("symbol"), raw, o.get("side"),
+                                     ex.get("filledQuantity"), ex.get("filledAmount")])
+
+
+def toss_display_row(o, name_map=None):
+    """토스 주문을 편집 표에 보여줄 표준 dict(증권사·일자·티커·종목명·시장·구분·수량·단가·통화)로 변환."""
+    name_map = name_map or {}
+    ex = o.get("execution") or {}
+    raw = ex.get("filledAt") or o.get("orderedAt") or ""
+    try:
+        d = pd.to_datetime(raw).tz_localize(None).strftime("%Y-%m-%d")
+    except Exception:
+        try:
+            d = pd.to_datetime(raw, utc=True).tz_localize(None).strftime("%Y-%m-%d")
+        except Exception:
+            d = ""
+    sym = o.get("symbol")
+    return {"증권사": o.get("broker", "토스증권"), "일자": d, "티커": sym,
+            "종목명": name_map.get(sym, sym), "시장": "",
+            "구분": "매도" if o.get("side") == "SELL" else "매수",
+            "수량": float(ex.get("filledQuantity") or 0),
+            "단가": float(ex.get("averageFilledPrice") or 0),
+            "통화": o.get("currency", "KRW")}
+
+
+def _override_to_order(orig, e):
+    """오버라이드 dict(e)를 원본 주문(orig) 기반의 토스 주문으로 재구성합니다."""
+    qty = float(e.get("수량") or 0)
+    price = float(e.get("단가") or 0)
+    d = str(e.get("일자") or "").strip()
+    try:
+        filled_at = pd.to_datetime(d).strftime("%Y-%m-%dT00:00:00+09:00")
+    except Exception:
+        filled_at = (orig.get("execution") or {}).get("filledAt") or orig.get("orderedAt")
+    side = "SELL" if str(e.get("구분")) in ("매도", "SELL", "sell") else "BUY"
+    ex = dict(orig.get("execution") or {})
+    ex.update({"filledQuantity": qty, "averageFilledPrice": price,
+               "filledAmount": qty * price, "filledAt": filled_at})
+    out = dict(orig)
+    out.update({"symbol": str(e.get("티커") or orig.get("symbol")),
+                "currency": str(e.get("통화") or orig.get("currency", "KRW")).upper(),
+                "side": side, "orderedAt": filled_at, "execution": ex, "_edited": True})
+    return out
+
+
+def apply_toss_overrides(orders, overrides=None):
+    """토스 주문 리스트에 사용자 수정/삭제 오버라이드를 적용합니다."""
+    overrides = read_toss_overrides() if overrides is None else overrides
+    if not overrides:
+        return list(orders)
+    out = []
+    for o in orders:
+        e = overrides.get(toss_trade_key(o))
+        if e is None:
+            out.append(o)
+        elif e.get("deleted"):
+            continue
+        else:
+            out.append(_override_to_order(o, e))
+    return out
 
 
 def merge_manual_into_portfolio(portfolio_json, manual_df):
@@ -206,6 +277,7 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True):
 
     portfolio_json = None
     toss_orders = []
+    toss_orders_raw = []
     toss_name_map = {}
     fx_rate = None
     toss_err = None
@@ -216,6 +288,8 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True):
             portfolio_json = None
         else:
             _, toss_orders, fx_rate, toss_name_map = toss_trades(creds)
+            toss_orders_raw = list(toss_orders)
+            toss_orders = apply_toss_overrides(toss_orders)
     if not fx_rate:
         fx_rate = current_usdkrw()
     if portfolio_json is None:
@@ -285,6 +359,7 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True):
         "holdings": holdings,
         "combined_orders": combined_orders,
         "name_map": name_map,
+        "toss_orders_raw": toss_orders_raw,
         "detail_df": detail_df,
         "dividends_rows": div_rows,
         "div_krw_native": dkn,

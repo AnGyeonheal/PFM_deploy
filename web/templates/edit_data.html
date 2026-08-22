@@ -6,8 +6,9 @@
   <a class="btn btn-sm btn-outline-secondary" href="/">← 대시보드</a>
 </div>
 <div class="alert alert-info py-2 small">
-  임포트(수기 입력)한 데이터만 편집됩니다. 토스 API로 불러온 내역은 여기서 수정되지 않습니다.
-  잘못된 값을 고친 뒤 <b>저장</b>을 누르면 대시보드에 즉시 반영됩니다. 행 전체를 비우거나 ✕로 삭제할 수 있습니다.
+  <b>토스 API 데이터도 편집</b>할 수 있습니다. <span class="badge bg-primary">토스</span> 행은 수정 내용이 오버라이드로 저장되어
+  새로고침해도 유지되며, ✕로 삭제하면 숨겨집니다(원본은 보존). <span class="badge bg-secondary">임포트</span>·<span class="badge bg-success">검증</span> 행은 CSV에 저장됩니다.
+  수정 후 <b>저장</b>을 누르면 대시보드에 즉시 반영됩니다. <span class="badge bg-warning text-dark">추정</span> 배당을 저장하면 확정값으로 전환됩니다.
 </div>
 
 <div class="section">
@@ -63,21 +64,27 @@ function cell(col, val) {
   return `<td><input type="${type}"${step} class="form-control form-control-sm" style="min-width:${w}px" data-col="${col}" value="${safe}"></td>`;
 }
 function rowHtml(cols, data) {
-  return '<tr>' + cols.map(c => cell(c, data[c])).join('') +
+  const src = data._src || '임포트';
+  const key = data._key || '';
+  const badge = src === '토스' ? 'bg-primary' : (src === '추정' ? 'bg-warning text-dark' : (src === '검증' ? 'bg-success' : 'bg-secondary'));
+  return `<tr data-src="${src}" data-key="${String(key).replace(/"/g, '&quot;')}">` +
+    `<td><span class="badge ${badge}">${src}</span></td>` +
+    cols.map(c => cell(c, data[c])).join('') +
     '<td><button class="btn btn-sm btn-outline-danger" title="행 삭제" onclick="this.closest(\'tr\').remove()">✕</button></td></tr>';
 }
 function build(headId, bodyId, cols, data) {
-  document.getElementById(headId).innerHTML = cols.map(c => `<th>${c}</th>`).join('') + '<th></th>';
+  document.getElementById(headId).innerHTML = '<th>출처</th>' + cols.map(c => `<th>${c}</th>`).join('') + '<th></th>';
   document.getElementById(bodyId).innerHTML = data.map(d => rowHtml(cols, d)).join('') || '';
 }
 function addRow(kind) {
   const cols = kind === 'tx' ? TX_COLS : DIV_COLS;
-  document.getElementById(kind + '-body').insertAdjacentHTML('beforeend', rowHtml(cols, {}));
+  const src = kind === 'tx' ? '임포트' : '검증';
+  document.getElementById(kind + '-body').insertAdjacentHTML('beforeend', rowHtml(cols, {_src: src}));
 }
 function collect(bodyId) {
   const rows = [];
   document.querySelectorAll('#' + bodyId + ' tr').forEach(tr => {
-    const obj = {};
+    const obj = {_src: tr.dataset.src || '', _key: tr.dataset.key || ''};
     tr.querySelectorAll('[data-col]').forEach(el => obj[el.dataset.col] = el.value.trim());
     if (obj['티커']) rows.push(obj);
   });
@@ -93,8 +100,15 @@ async function save(kind) {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({rows})
     });
     const j = await r.json();
-    msg.className = j.ok ? 'text-success small' : 'text-danger small';
-    msg.textContent = j.ok ? (j.count + '건 저장됨 · 대시보드에 반영됩니다') : '저장 실패';
+    if (j.ok) {
+      let m = (kind === 'tx') ? ('임포트 ' + j.count + '건 · 토스 수정 ' + (j.toss_edited || 0) + '건 · 삭제 ' + (j.toss_deleted || 0) + '건')
+                              : (j.count + '건');
+      msg.className = 'text-success small';
+      msg.textContent = m + ' 저장됨 · 대시보드에 반영됩니다';
+    } else {
+      msg.className = 'text-danger small';
+      msg.textContent = '저장 실패';
+    }
   } catch (e) {
     msg.className = 'text-danger small';
     msg.textContent = '저장 실패';

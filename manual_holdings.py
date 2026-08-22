@@ -12,6 +12,7 @@ from benchmark import to_yf_ticker, get_history
 MANUAL_CSV = os.path.join(os.path.dirname(__file__), "manual_holdings.csv")
 TX_CSV = os.path.join(os.path.dirname(__file__), "manual_transactions.csv")
 DIV_CSV = os.path.join(os.path.dirname(__file__), "manual_dividends.csv")
+TOSS_OVR_JSON = os.path.join(os.path.dirname(__file__), "toss_overrides.json")
 
 COLUMNS = ["증권사", "티커", "종목명", "시장", "수량", "평균매수가", "통화", "매수일"]
 TX_COLUMNS = ["증권사", "일자", "티커", "종목명", "시장", "구분", "수량", "단가", "통화"]
@@ -20,10 +21,37 @@ DIV_COLUMNS = ["증권사", "일자", "티커", "종목명", "통화", "배당�
 
 def set_data_dir(directory):
     """사용자별 데이터 폴더로 CSV 저장 경로를 변경합니다(로그인 시 호출)."""
-    global MANUAL_CSV, TX_CSV, DIV_CSV
+    global MANUAL_CSV, TX_CSV, DIV_CSV, TOSS_OVR_JSON
     MANUAL_CSV = os.path.join(directory, "manual_holdings.csv")
     TX_CSV = os.path.join(directory, "manual_transactions.csv")
     DIV_CSV = os.path.join(directory, "manual_dividends.csv")
+    TOSS_OVR_JSON = os.path.join(directory, "toss_overrides.json")
+
+
+def read_toss_overrides():
+    """토스 거래 수정/삭제 오버라이드 {key: {...}} 를 반환합니다."""
+    if not os.path.exists(TOSS_OVR_JSON):
+        return {}
+    try:
+        import json
+        with open(TOSS_OVR_JSON, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print(f"[경고] 토스 오버라이드 읽기 실패: {e}")
+        return {}
+
+
+def write_toss_overrides(overrides):
+    """토스 거래 오버라이드 dict를 JSON으로 저장합니다."""
+    try:
+        import json
+        with open(TOSS_OVR_JSON, "w", encoding="utf-8") as f:
+            json.dump(overrides or {}, f, ensure_ascii=False, indent=2)
+        return len(overrides or {})
+    except Exception as e:
+        print(f"[경고] 토스 오버라이드 저장 실패: {e}")
+        return 0
 
 
 def clear_all_imports():

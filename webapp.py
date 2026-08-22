@@ -375,20 +375,64 @@ async def import_save(request: Request, broker: str = Form("한화투자증권")
 
 
 # ─────────────────────────── 데이터 편집(거래/배당 직접 수정) ───────────────────────────
+def _toss_row_differs(sub, orig):
+    for f in ("일자", "티커", "종목명", "구분", "통화"):
+        if str(sub.get(f, "")).strip() != str(orig.get(f, "")).strip():
+            return True
+    for f in ("수량", "단가"):
+        try:
+            if abs(float(sub.get(f) or 0) - float(orig.get(f) or 0)) > 1e-9:
+                return True
+        except Exception:
+            return True
+    return False
+
+
 @app.get("/edit-data", response_class=HTMLResponse)
 def edit_data_page(request: Request, msg: str = ""):
     user = _current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    data = get_portfolio(user)
     pipeline.apply_credentials(user)
+    name_map = data.get("name_map", {})
+
+    # 거래: 임포트(CSV) + 토스(오버라이드 반영)
     tx = read_transactions_csv()
+    tx_rows = []
+    if tx is not None and not tx.empty:
+        for r in tx.fillna("").to_dict("records"):
+            r["_src"] = "임포트"; r["_key"] = ""
+            tx_rows.append(r)
+    overrides = pipeline.read_toss_overrides()
+    for o in data.get("toss_orders_raw", []):
+        k = pipeline.toss_trade_key(o)
+        e = overrides.get(k)
+        if e and e.get("deleted"):
+            continue
+        base = pipeline.toss_display_row(o, name_map)
+        row = dict(base)
+        if e:
+            row.update({f: e.get(f, base.get(f)) for f in pipeline.TOSS_OVR_FIELDS})
+        row["_src"] = "토스"; row["_key"] = k
+        tx_rows.append(row)
+
+    # 배당: 검증(CSV) + 추정(토스 보유 기반 yfinance 추정)
     dv = read_dividends_csv()
-    ctx = {
-        "request": request, "user": user, "msg": msg,
-        "tx_rows": tx.fillna("").to_dict("records") if (tx is not None and not tx.empty) else [],
-        "div_rows": dv.fillna("").to_dict("records") if (dv is not None and not dv.empty) else [],
-        "tx_cols": TX_COLUMNS, "div_cols": DIV_COLUMNS,
-    }
+    div_rows = []
+    if dv is not None and not dv.empty:
+        for r in dv.fillna("").to_dict("records"):
+            r["_src"] = "검증"
+            div_rows.append(r)
+    for r in data.get("dividends_rows", []):
+        if str(r.get("구분", "")).startswith("추정"):
+            div_rows.append({"증권사": "토스(추정)", "일자": r.get("일자", ""), "티커": r.get("티커"),
+                             "종목명": r.get("종목"), "통화": r.get("통화"), "배당금": r.get("배당금"),
+                             "_src": "추정"})
+
+    ctx = {"request": request, "user": user, "msg": msg,
+           "tx_rows": tx_rows, "div_rows": div_rows,
+           "tx_cols": TX_COLUMNS, "div_cols": DIV_COLUMNS}
     return templates.TemplateResponse(request, "edit_data.html", ctx)
 
 
@@ -397,13 +441,37 @@ async def edit_data_tx(request: Request):
     user = _current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    data = get_portfolio(user)
     pipeline.apply_credentials(user)
     payload = await request.json()
     rows = payload.get("rows", [])
-    df = pd.DataFrame(rows, columns=TX_COLUMNS) if rows else pd.DataFrame(columns=TX_COLUMNS)
+    manual_rows = [r for r in rows if r.get("_src") != "토스"]
+    toss_rows = [r for r in rows if r.get("_src") == "토스"]
+
+    # 임포트(CSV) 거래 저장
+    df = pd.DataFrame([{c: r.get(c, "") for c in TX_COLUMNS} for r in manual_rows], columns=TX_COLUMNS)
     n = write_transactions_csv(df)
+
+    # 토스 거래: 원본과 다른 행만 오버라이드, 삭제된 행은 deleted 표시
+    raw_by_key = {pipeline.toss_trade_key(o): o for o in data.get("toss_orders_raw", [])}
+    submitted = set()
+    ov = {}
+    for r in toss_rows:
+        k = r.get("_key")
+        if not k or k not in raw_by_key:
+            continue
+        submitted.add(k)
+        orig = pipeline.toss_display_row(raw_by_key[k], data.get("name_map", {}))
+        if _toss_row_differs(r, orig):
+            ov[k] = {f: r.get(f, "") for f in pipeline.TOSS_OVR_FIELDS}
+    for k in raw_by_key:
+        if k not in submitted:
+            ov[k] = {"deleted": True}
+    pipeline.write_toss_overrides(ov)
     _CACHE.pop(user, None)
-    return JSONResponse({"ok": True, "count": n})
+    edited = sum(1 for v in ov.values() if not v.get("deleted"))
+    deleted = sum(1 for v in ov.values() if v.get("deleted"))
+    return JSONResponse({"ok": True, "count": n, "toss_edited": edited, "toss_deleted": deleted})
 
 
 @app.post("/edit-data/div")
@@ -414,7 +482,7 @@ async def edit_data_div(request: Request):
     pipeline.apply_credentials(user)
     payload = await request.json()
     rows = payload.get("rows", [])
-    df = pd.DataFrame(rows, columns=DIV_COLUMNS) if rows else pd.DataFrame(columns=DIV_COLUMNS)
+    df = pd.DataFrame([{c: r.get(c, "") for c in DIV_COLUMNS} for r in rows], columns=DIV_COLUMNS) if rows else pd.DataFrame(columns=DIV_COLUMNS)
     n = write_dividends_csv(df)
     _CACHE.pop(user, None)
     return JSONResponse({"ok": True, "count": n})
