@@ -501,9 +501,9 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
         div_cum.loc[div_cum.index >= d] += amt
 
     out = pd.DataFrame({
-        "내 자산가치": my_val + sell_cash + div_cum,
-        "S&P500 자산가치": spy_val + sell_cash,
-        "누적 투자원금": gross_buy,
+        "내 자산가치": my_val + div_cum,
+        "S&P500 자산가치": spy_val,
+        "순투자원금": gross_buy - sell_cash,
     })
     if ticker and ticker in sym_hist:
         out["주가"] = sym_hist[ticker]
@@ -530,19 +530,91 @@ def build_ticker_price_trades(orders, ticker, start=None):
     return hist, pd.DataFrame(buys, columns=cols), pd.DataFrame(sells, columns=cols), cur
 
 
-def build_trade_bars(orders, ticker=None):
-    """매수/매도 이벤트를 막대 그래프용 DataFrame으로 반환합니다.
-    반환: (buys[date,qty,amount,symbol], sells[date,qty,amount,symbol]). ticker=None이면 전체(합산).
+def build_trade_bars(orders, ticker=None, fx_now=1400.0):
+    """매수/매도 이벤트를 막대 그래프용 DataFrame으로 반환합니다. amount_krw(원화 환산) 포함.
+    반환: (buys[date,qty,amount,amount_krw,symbol], sells[...]). ticker=None이면 전체(합산).
     """
     recs = _trade_records(orders)
     if ticker:
         recs = [r for r in recs if r["symbol"] == ticker]
-    cols = ["date", "qty", "amount", "symbol"]
-    buys = [{"date": r["date"], "qty": r["qty"], "amount": r["amount"], "symbol": r["symbol"]}
+    fx_hist = get_usdkrw_history("10y")
+
+    def _krw(r):
+        if r["currency"] == "USD":
+            return r["amount"] * _safe_asof(fx_hist, r["date"], fx_now)
+        return r["amount"]
+
+    cols = ["date", "qty", "amount", "amount_krw", "symbol"]
+    buys = [{"date": r["date"], "qty": r["qty"], "amount": r["amount"], "amount_krw": _krw(r), "symbol": r["symbol"]}
             for r in recs if r["side"] == "BUY" and r["qty"]]
-    sells = [{"date": r["date"], "qty": r["qty"], "amount": r["amount"], "symbol": r["symbol"]}
+    sells = [{"date": r["date"], "qty": r["qty"], "amount": r["amount"], "amount_krw": _krw(r), "symbol": r["symbol"]}
              for r in recs if r["side"] == "SELL" and r["qty"]]
     return pd.DataFrame(buys, columns=cols), pd.DataFrame(sells, columns=cols)
+
+
+def build_stock_analytics(orders, fx_now=1400.0, name_map=None, holdings=None):
+    """종목별 현재주가·S&P500 대비 수익률·알파(연)·베타·알파기여%·베타기여%를 계산합니다.
+    베타/알파는 최초 매수 이후 일간 수익률을 S&P500(원화 환산) 대비 회귀해 산출합니다.
+    반환: DataFrame(티커, 현재주가, 통화, S&P500대비(%p), 알파(연%), 베타, 알파기여(%), 베타기여(%))
+    """
+    name_map = name_map or {}
+    recs = _trade_records(orders)
+    if not recs:
+        return pd.DataFrame()
+    weight = {}
+    for h in (holdings or []):
+        weight[str(h.get("ticker"))] = float(h.get("weight_pct") or 0)
+
+    symbols = sorted(set(r["symbol"] for r in recs))
+    spy = get_history(BENCHMARK_TICKER, period="5y")
+    fx_hist = get_usdkrw_history("5y")
+    if spy.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for s in symbols:
+        srecs = [r for r in recs if r["symbol"] == s]
+        cur = srecs[0]["currency"]
+        yft = to_yf_ticker(s, "KR" if cur == "KRW" else "US")
+        h = get_history(yft, period="5y")
+        if h.empty:
+            continue
+        first_buy = min(r["date"] for r in srecs)
+        idx = h.index[h.index >= first_buy]
+        if len(idx) < 30:
+            idx = h.index
+        px = h.reindex(idx).ffill()
+        sp = spy.reindex(idx.union(spy.index)).ffill().reindex(idx)
+        fxd = (fx_hist.reindex(idx.union(fx_hist.index)).ffill().reindex(idx)
+               if not fx_hist.empty else pd.Series(fx_now, index=idx))
+        stock_krw = px * fxd if cur == "USD" else px   # 투자자(원화) 관점 평가액
+        mkt_krw = sp * fxd                              # SPY 원화 환산
+        mkt_native = sp if cur == "USD" else sp * fxd   # 베타/알파는 종목 통화 기준
+        rs = px.pct_change()                            # 종목 자국통화 수익률
+        rm = mkt_native.pct_change()
+        reg = (pd.concat([rs, rm], axis=1, keys=["s", "m"])
+               .replace([float("inf"), float("-inf")], pd.NA).dropna())
+        if len(reg) < 20 or reg["m"].var() == 0:
+            continue
+        beta = float(reg["s"].cov(reg["m"]) / reg["m"].var())
+        alpha_ann = float((reg["s"].mean() - beta * reg["m"].mean()) * 252 * 100)
+        my_tot = float(stock_krw.iloc[-1] / stock_krw.iloc[0] - 1) * 100
+        spy_tot = float(mkt_krw.iloc[-1] / mkt_krw.iloc[0] - 1) * 100
+        rows.append({"티커": s, "종목": name_map.get(s, s), "통화": cur,
+                     "현재주가": round(float(px.iloc[-1]), 2),
+                     "S&P500대비(%p)": round(my_tot - spy_tot, 2),
+                     "알파(연%)": round(alpha_ann, 2), "베타": round(beta, 3),
+                     "_w": weight.get(s, 0.0)})
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    wa = df["_w"] * df["알파(연%)"]
+    wb = df["_w"] * df["베타"]
+    tot_a = wa.abs().sum() or 1.0
+    tot_b = wb.sum() or 1.0
+    df["알파기여(%)"] = (wa / tot_a * 100).round(1)
+    df["베타기여(%)"] = (wb / tot_b * 100).round(1)
+    return df.drop(columns=["_w"])
 
 
 # ───────────── 달러 평단가 · 10년 환율 · S&P500 알파/베타 (방법 A: 현금흐름 PME) ─────────────

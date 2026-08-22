@@ -22,9 +22,10 @@ from performance import compute_performance_summary, build_holdings_breakdown
 from advanced_analytics import compute_dividends, compute_dividend_events
 from pme import (
     compute_alpha_beta, build_total_profit_growth, build_ticker_profit_growth,
-    build_trade_bars, build_asset_value_growth,
+    build_trade_bars, build_asset_value_growth, build_stock_analytics, compute_rolling_beta,
 )
 import auth
+from names import enrich_name_map
 
 
 def current_usdkrw():
@@ -249,6 +250,13 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True):
     if has_manual:
         for _, r in manual_df.iterrows():
             name_map.setdefault(str(r.get("티커")), r.get("종목명"))
+    # 국내 종목은 티커만 있는 경우 한글 종목명으로 보강
+    _all_tickers = {o.get("symbol") for o in combined_orders if o.get("symbol")}
+    _all_tickers |= {str(h.get("ticker")) for h in portfolio_json.get("holdings", [])}
+    try:
+        name_map = enrich_name_map(name_map, _all_tickers)
+    except Exception:
+        pass
 
     detail_df = build_transaction_detail(combined_orders, fx_rate, name_map)
 
@@ -317,5 +325,13 @@ def growth_frame(combined_orders, fx_rate, ticker=None):
     return build_asset_value_growth(combined_orders, fx_rate, div_events, tk)
 
 
-def trade_bars(combined_orders, ticker=None):
-    return build_trade_bars(combined_orders, ticker)
+def trade_bars(combined_orders, ticker=None, fx=1400.0):
+    return build_trade_bars(combined_orders, ticker, fx)
+
+
+def stock_analytics(combined_orders, fx, name_map=None, holdings=None):
+    return build_stock_analytics(combined_orders, fx, name_map, holdings)
+
+
+def rolling_beta(combined_orders, fx, ticker=None):
+    return compute_rolling_beta(combined_orders, fx, ticker)

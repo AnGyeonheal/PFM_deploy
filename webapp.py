@@ -112,6 +112,22 @@ def dashboard(request: Request, refresh: int = 0):
     breakdown_records = _df_records(data["breakdown"])
     tickers = sorted(data["breakdown"]["티커"].unique()) if (data["breakdown"] is not None and not data["breakdown"].empty) else []
 
+    # 종목별 분석(현재주가·알파·베타·기여도) 병합 + 한글 종목명 보강
+    name_map = data["name_map"]
+    try:
+        sa = pipeline.stock_analytics(data["combined_orders"], data["fx_rate"], name_map, data["holdings"])
+        sa_map = {str(r["티커"]): r for r in sa.to_dict("records")} if (sa is not None and not sa.empty) else {}
+    except Exception:
+        sa_map = {}
+    _ana_cols = ["현재주가", "S&P500대비(%p)", "알파(연%)", "베타", "알파기여(%)", "베타기여(%)"]
+    for rec in breakdown_records:
+        tkey = str(rec.get("티커"))
+        if name_map.get(tkey):
+            rec["종목"] = name_map[tkey]
+        a = sa_map.get(tkey)
+        for c in _ana_cols:
+            rec[c] = (a.get(c) if a else None)
+
     ctx = {
         "request": request, "user": user, "fx_rate": data["fx_rate"],
         "toss_ok": auth.has_toss_credentials(user), "toss_error": data["toss_error"],
@@ -145,35 +161,81 @@ def api_growth(request: Request, ticker: str = ""):
     gdf = pipeline.growth_frame(orders, fx, tk)
     if gdf is None or gdf.empty:
         return JSONResponse({"error": "no_growth"}, status_code=404)
-    bars_buys, bars_sells = pipeline.trade_bars(orders, tk)
-
+    bars_buys, bars_sells = pipeline.trade_bars(orders, tk, fx)
+    name_map = data["name_map"]
     is_ind = bool(tk)
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28],
-                        vertical_spacing=0.06, specs=[[{"secondary_y": True}], [{"secondary_y": False}]])
+
+    if is_ind:
+        rbeta = pipeline.rolling_beta(orders, fx, tk)
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.56, 0.2, 0.24],
+                            vertical_spacing=0.05,
+                            specs=[[{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]])
+        bar_row = 3
+    else:
+        rbeta = None
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28],
+                            vertical_spacing=0.06, specs=[[{"secondary_y": False}], [{"secondary_y": False}]])
+        bar_row = 2
+
     gidx = gdf.index
     fig.add_trace(go.Scatter(x=gidx, y=gdf["내 자산가치"], name="내 자산가치", mode="lines",
-                             line=dict(color="#EF553B", width=2.4)), row=1, col=1, secondary_y=False)
+                             line=dict(color="#EF553B", width=2.4),
+                             hovertemplate="%{x|%Y-%m-%d}<br>내 자산가치 %{y:,.0f}원<extra></extra>"),
+                  row=1, col=1, secondary_y=False)
     fig.add_trace(go.Scatter(x=gidx, y=gdf["S&P500 자산가치"], name="S&P500 동일투자", mode="lines",
-                             line=dict(color="#636EFA", dash="dash", width=2)), row=1, col=1, secondary_y=False)
-    fig.add_trace(go.Scatter(x=gidx, y=gdf["누적 투자원금"], name="누적 투자원금", mode="lines",
-                             line=dict(color="#9AA4AE", width=1.4, dash="dot")), row=1, col=1, secondary_y=False)
+                             line=dict(color="#636EFA", dash="dash", width=2),
+                             hovertemplate="%{x|%Y-%m-%d}<br>S&P500 %{y:,.0f}원<extra></extra>"),
+                  row=1, col=1, secondary_y=False)
+    fig.add_trace(go.Scatter(x=gidx, y=gdf["순투자원금"], name="순투자원금(매수−매도)", mode="lines",
+                             line=dict(color="#9AA4AE", width=1.4, dash="dot"),
+                             hovertemplate="%{x|%Y-%m-%d}<br>순투자원금 %{y:,.0f}원<extra></extra>"),
+                  row=1, col=1, secondary_y=False)
     if is_ind and "주가" in gdf.columns:
         fig.add_trace(go.Scatter(x=gidx, y=gdf["주가"], name="주가", mode="lines",
-                                 line=dict(color="#F9A825", width=1.2), opacity=0.75),
+                                 line=dict(color="#F9A825", width=1.2), opacity=0.75,
+                                 hovertemplate="%{x|%Y-%m-%d}<br>주가 %{y:,.2f}<extra></extra>"),
                       row=1, col=1, secondary_y=True)
         fig.update_yaxes(title_text="주가", secondary_y=True, showgrid=False, row=1, col=1)
+        alpha = (gdf["내 자산가치"] - gdf["S&P500 자산가치"]).dropna()
+        if not alpha.empty:
+            mx_x, mx_y, mx_t, mn_x, mn_y, mn_t = [], [], [], [], [], []
+            for yr, grp in alpha.groupby(alpha.index.year):
+                dmax, dmin = grp.idxmax(), grp.idxmin()
+                mx_x.append(dmax); mx_y.append(float(gdf["내 자산가치"].loc[dmax])); mx_t.append(f"{yr} 최대 알파 {grp.loc[dmax]:,.0f}원")
+                mn_x.append(dmin); mn_y.append(float(gdf["내 자산가치"].loc[dmin])); mn_t.append(f"{yr} 최소 알파 {grp.loc[dmin]:,.0f}원")
+            fig.add_trace(go.Scatter(x=mx_x, y=mx_y, name="연 최대 알파", mode="markers",
+                                     marker=dict(symbol="star", size=12, color="#16A34A", line=dict(width=1, color="#052E16")),
+                                     text=mx_t, hovertemplate="%{text}<extra></extra>"), row=1, col=1, secondary_y=False)
+            fig.add_trace(go.Scatter(x=mn_x, y=mn_y, name="연 최소 알파", mode="markers",
+                                     marker=dict(symbol="star-triangle-down", size=12, color="#DC2626", line=dict(width=1, color="#450A0A")),
+                                     text=mn_t, hovertemplate="%{text}<extra></extra>"), row=1, col=1, secondary_y=False)
+
+    if is_ind and rbeta is not None and not rbeta.empty:
+        fig.add_trace(go.Scatter(x=rbeta.index, y=rbeta.values, name="베타(60일)", mode="lines",
+                                 line=dict(color="#8B5CF6", width=1.6),
+                                 hovertemplate="%{x|%Y-%m-%d}<br>베타 %{y:.2f}<extra></extra>"), row=2, col=1)
+        fig.add_hline(y=1.0, line_dash="dot", line_color="#B0B8C1", row=2, col=1)
+        fig.update_yaxes(title_text="베타", row=2, col=1)
+
     span = max((pd.Timestamp(gidx.max()) - pd.Timestamp(gidx.min())).days, 1)
     bw = max(span / 130.0, 1.0) * 86400000
     if bars_buys is not None and not bars_buys.empty:
-        fig.add_trace(go.Bar(x=bars_buys["date"], y=bars_buys["qty"], name="매수 수량",
-                             marker_color="#16A34A", opacity=0.85, width=bw), row=2, col=1)
+        _nb = [name_map.get(s, s) for s in bars_buys["symbol"]]
+        fig.add_trace(go.Bar(x=bars_buys["date"], y=bars_buys["amount_krw"], name="매수 금액",
+                             marker_color="#16A34A", opacity=0.85, width=bw, customdata=_nb,
+                             hovertemplate="매수 %{x|%Y-%m-%d}<br>%{customdata}<br>%{y:,.0f}원<extra></extra>"),
+                      row=bar_row, col=1)
     if bars_sells is not None and not bars_sells.empty:
-        fig.add_trace(go.Bar(x=bars_sells["date"], y=bars_sells["qty"], name="매도 수량",
-                             marker_color="#DC2626", opacity=0.6, width=bw), row=2, col=1)
+        _ns = [name_map.get(s, s) for s in bars_sells["symbol"]]
+        fig.add_trace(go.Bar(x=bars_sells["date"], y=bars_sells["amount_krw"], name="매도 금액",
+                             marker_color="#DC2626", opacity=0.6, width=bw, customdata=_ns,
+                             hovertemplate="매도 %{x|%Y-%m-%d}<br>%{customdata}<br>%{y:,.0f}원<extra></extra>"),
+                      row=bar_row, col=1)
+
     fig.update_yaxes(title_text="자산가치(원)", secondary_y=False, row=1, col=1)
-    fig.update_yaxes(title_text="수량(주)", rangemode="tozero", row=2, col=1)
-    fig.update_layout(margin=dict(t=10, r=10, l=10, b=10), legend=dict(orientation="h", y=1.05),
-                      height=460, barmode="overlay")
+    fig.update_yaxes(title_text="금액(원)", rangemode="tozero", row=bar_row, col=1)
+    fig.update_layout(margin=dict(t=10, r=10, l=10, b=10), legend=dict(orientation="h", y=1.06),
+                      height=(640 if is_ind else 460), barmode="overlay")
     return JSONResponse(_json.loads(_json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)))
 
 @app.get("/api/allocation")
