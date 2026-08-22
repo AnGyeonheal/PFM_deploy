@@ -406,6 +406,7 @@ def compute_rolling_beta(orders, fx_now=1400.0, ticker=None, window=60, period="
 
     reg = (pd.concat([rp, rm], axis=1, keys=["rp", "rm"])
            .replace([float("inf"), float("-inf")], pd.NA).dropna())
+    reg = reg[reg["rm"] != 0.0]  # 거래일만(주말·휴장 평탄 잡음 제거)
     if len(reg) < window:
         return pd.Series(dtype=float)
     cov = reg["rp"].rolling(window).cov(reg["rm"])
@@ -432,7 +433,7 @@ def build_total_profit_growth(orders, fx_now=1400.0):
 
 def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None):
     """보유 자산가치(원금+수익금) 성장 추이.
-    내 자산가치 = 주식평가액(일별 환율 반영) + 누적 배당(지급일 반영).
+    내 자산가치 = 주식평가액(일뱄 환율) + 누적 실현 매도대금 + 누적 배당(지급일 반영).
     S&P500 자산가치 = 매수 금액을 SPY에 투입하고 매도 없이 계속 보유했다고 가정한 가치.
     div_events: [(date, krw, symbol), ...]. ticker=None이면 전체(합산).
     반환 DataFrame(index=날짜): [내 자산가치, S&P500 자산가치, 순투자원금, 내 누적손익, (개별시)주가]
@@ -505,11 +506,11 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
         div_cum.loc[div_cum.index >= d] += amt
 
     out = pd.DataFrame({
-        "내 자산가치": my_val + div_cum,
+        "내 자산가치": my_val + sell_cash + div_cum,
         "S&P500 자산가치": spy_val,
         "순투자원금": gross_buy - sell_cash,
     })
-    out["내 누적손익"] = out["내 자산가치"] - out["순투자원금"]
+    out["내 누적손익"] = out["내 자산가치"] - gross_buy  # 총가치 − 총 매수원금 = 총손익
     if ticker and ticker in sym_hist:
         out["주가"] = sym_hist[ticker]
     return out
@@ -795,6 +796,7 @@ def compute_alpha_beta(orders, fx_now=1400.0, period="10y"):
         .replace([float("inf"), float("-inf")], pd.NA)
         .dropna()
     )
+    reg = reg[reg["rm"] != 0.0]  # 주말·휴장(ffill로 평탄) 잡음 제거 → 실제 거래일만 회귀
     beta = corr = None
     if len(reg) > 5 and reg["rm"].var() > 0:
         beta = float(reg["rp"].cov(reg["rm"]) / reg["rm"].var())
