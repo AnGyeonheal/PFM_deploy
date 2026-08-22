@@ -227,8 +227,13 @@ def build_holdings_breakdown(orders, fx_now=1400.0, name_map=None, div_krw_by_ti
             cur_val_krw = pn * held_qty * (fx_now if cur == "USD" else 1.0)
             unreal_pnl_krw = cur_val_krw - cost_krw
 
-        total_pnl_krw = realized_pnl_krw + unreal_pnl_krw
-        ret_pct = (total_pnl_krw / buy_krw * 100) if buy_krw else 0.0
+        # 투자원금 = 현재 보유분의 매입원가(청산 종목은 실현된 총 매수원가). 수익률은 그에 대응.
+        if held_qty > 0:
+            principal_krw = cost_krw
+            ret_pct = (unreal_pnl_krw / cost_krw * 100) if cost_krw else 0.0
+        else:
+            principal_krw = buy_krw
+            ret_pct = (realized_pnl_krw / buy_krw * 100) if buy_krw else 0.0
 
         rows.append({
             "종목": name_map.get(s, s),
@@ -238,7 +243,7 @@ def build_holdings_breakdown(orders, fx_now=1400.0, name_map=None, div_krw_by_ti
             "보유수량": round(held_qty, 4),
             "평단가(달러)": round(avg_buy_native, 2) if cur == "USD" else None,
             "평단가(원화)": round(avg_buy_krw, 2),
-            "투자원금(원)": round(buy_krw),
+            "투자원금(원)": round(principal_krw),
             "매도실현금액(원)": round(sell_proceeds_krw),
             "실현손익(원)": round(realized_pnl_krw),
             "평가손익(원)": round(unreal_pnl_krw),

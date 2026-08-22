@@ -433,8 +433,8 @@ def build_total_profit_growth(orders, fx_now=1400.0):
 
 def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None):
     """보유 자산가치(원금+수익금) 성장 추이.
-    내 자산가치 = 주식평가액(일뱄 환율) + 누적 실현 매도대금 + 누적 배당(지급일 반영).
-    S&P500 자산가치 = 매수 금액을 SPY에 투입하고 매도 없이 계속 보유했다고 가정한 가치.
+    내 자산가치 = 주식평가액(일뱄 환율) + 누적 배당(지급일 반영).
+    S&P500 자산가치 = 매수는 SPY 매입, 매도는 '판 비중만큼' SPY도 매도(Modified PME) → 유령자본 제거.
     div_events: [(date, krw, symbol), ...]. ticker=None이면 전체(합산).
     반환 DataFrame(index=날짜): [내 자산가치, S&P500 자산가치, 순투자원금, 내 누적손익, (개별시)주가]
     """
@@ -475,25 +475,37 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
             qty.loc[qty.index >= r["date"]] += sign * r["qty"]
         my_val = my_val.add(qty * sym_hist[s] * (fx_daily if sym_cur[s] == "USD" else 1.0), fill_value=0)
 
+    # S&P500 가상펀드(Modified PME): 매수는 SPY 매입, 매도는 '판 비중만큼' SPY도 매도.
     spy_shares = pd.Series(0.0, index=idx)
     gross_buy = pd.Series(0.0, index=idx)
     sell_cash = pd.Series(0.0, index=idx)
+    held = {s: 0.0 for s in symbols}
+    spy_now = 0.0
+
+    def _px_krw(sym, d):
+        if sym not in sym_hist:
+            return 0.0
+        fxv = float(fx_daily.asof(d)) if sym_cur[sym] == "USD" else 1.0
+        return float(sym_hist[sym].asof(d)) * fxv
+
     for r in recs_sorted:
-        fx_d = _safe_asof(fx_hist, r["date"], fx_now)
+        d = r["date"]
+        s = r["symbol"]
+        fx_d = _safe_asof(fx_hist, d, fx_now)
+        cf = r["amount"] * fx_d if r["currency"] == "USD" else r["amount"]
+        spy_px = _safe_asof(spy_hist, d, float(spy_hist.iloc[-1]))
         if r["side"] == "BUY":
-            spy_px = _safe_asof(spy_hist, r["date"], float(spy_hist.iloc[-1]))
-            if r["currency"] == "USD":
-                delta = r["amount"] / spy_px
-                cf = r["amount"] * fx_d
-            else:
-                delta = r["amount"] / (spy_px * fx_d)
-                cf = r["amount"]
-            # S&P500 비교: 매수 금액만 SPY에 투입하고 매도 없이 계속 보유했다고 가정
-            spy_shares.loc[spy_shares.index >= r["date"]] += delta
-            gross_buy.loc[gross_buy.index >= r["date"]] += cf
+            spy_now += cf / (spy_px * fx_d)  # 원화 매수금액 ÷ SPY 원화가
+            held[s] = held.get(s, 0.0) + r["qty"]
+            gross_buy.loc[gross_buy.index >= d] += cf
         else:
-            cf = r["amount"] * fx_d if r["currency"] == "USD" else r["amount"]
-            sell_cash.loc[sell_cash.index >= r["date"]] += cf
+            port_val = sum(held[k] * _px_krw(k, d) for k in symbols if held.get(k, 0) > 0)
+            sold_val = r["qty"] * _px_krw(s, d)
+            w = min(max((sold_val / port_val) if port_val > 0 else 1.0, 0.0), 1.0)
+            spy_now *= (1.0 - w)  # 판 비중만큼 SPY 매도
+            held[s] = held.get(s, 0.0) - r["qty"]
+            sell_cash.loc[sell_cash.index >= d] += cf
+        spy_shares.loc[spy_shares.index >= d] = spy_now
     spy_val = spy_shares * spy_daily * fx_daily
 
     div_cum = pd.Series(0.0, index=idx)
@@ -506,11 +518,11 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
         div_cum.loc[div_cum.index >= d] += amt
 
     out = pd.DataFrame({
-        "내 자산가치": my_val + sell_cash + div_cum,
+        "내 자산가치": my_val + div_cum,
         "S&P500 자산가치": spy_val,
         "순투자원금": gross_buy - sell_cash,
     })
-    out["내 누적손익"] = out["내 자산가치"] - gross_buy  # 총가치 − 총 매수원금 = 총손익
+    out["내 누적손익"] = out["내 자산가치"] - out["순투자원금"]  # 보유가치+배당 − 순투입원금 = 총손익
     if ticker and ticker in sym_hist:
         out["주가"] = sym_hist[ticker]
     return out
@@ -757,31 +769,51 @@ def compute_alpha_beta(orders, fx_now=1400.0, period="10y"):
         val = qty_steps * sym_hist[s] * (fx_daily if sym_cur[s] == "USD" else 1.0)
         my_val = my_val.add(val, fill_value=0)
 
-    # S&P500 가상펀드: 같은 날짜·금액으로 SPY 매매 + 현금흐름 기록
+    # S&P500 가상펀드(Modified PME): 매수는 SPY 매입, 매도는 '판 비중만큼' SPY 매도 → 음수 지분 방지.
     spy_shares = pd.Series(0.0, index=idx)
     invested = pd.Series(0.0, index=idx)
-    cashflows = []
+    my_cashflows = []
+    spy_cashflows = []
+    held = {s: 0.0 for s in symbols}
+    spy_now = 0.0
+
+    def _px_krw(sym, d):
+        if sym not in sym_hist:
+            return 0.0
+        fxv = float(fx_daily.asof(d)) if sym_cur[sym] == "USD" else 1.0
+        return float(sym_hist[sym].asof(d)) * fxv
+
     for r in recs_sorted:
-        sign = 1 if r["side"] == "BUY" else -1
-        spy_px = _safe_asof(spy_hist, r["date"], float(spy_hist.iloc[-1]))
-        fx_d = _safe_asof(fx_hist, r["date"], fx_now)
-        if r["currency"] == "USD":
-            delta = sign * (r["amount"] / spy_px)
-            cf = r["amount"] * fx_d
-        else:
-            delta = sign * (r["amount"] / (spy_px * fx_d))
-            cf = r["amount"]
-        spy_shares.loc[spy_shares.index >= r["date"]] += delta
-        invested.loc[invested.index >= r["date"]] += sign * cf
-        cashflows.append((r["date"], -cf if r["side"] == "BUY" else cf))  # 매수=유출(-), 매도=유입(+)
+        d = r["date"]
+        s = r["symbol"]
+        spy_px = _safe_asof(spy_hist, d, float(spy_hist.iloc[-1]))
+        fx_d = _safe_asof(fx_hist, d, fx_now)
+        cf = r["amount"] * fx_d if r["currency"] == "USD" else r["amount"]
+        if r["side"] == "BUY":
+            spy_now += cf / (spy_px * fx_d)
+            held[s] = held.get(s, 0.0) + r["qty"]
+            invested.loc[invested.index >= d] += cf
+            my_cashflows.append((d, -cf))
+            spy_cashflows.append((d, -cf))
+        else:  # 판 비중(w)만큼 SPY도 인출
+            port_val = sum(held[k] * _px_krw(k, d) for k in symbols if held.get(k, 0) > 0)
+            sold_val = r["qty"] * _px_krw(s, d)
+            w = min(max((sold_val / port_val) if port_val > 0 else 1.0, 0.0), 1.0)
+            spy_dist = spy_now * spy_px * fx_d * w  # SPY 가상펀드에서 인출한 금액
+            spy_now *= (1.0 - w)
+            held[s] = held.get(s, 0.0) - r["qty"]
+            invested.loc[invested.index >= d] -= cf
+            my_cashflows.append((d, cf))
+            spy_cashflows.append((d, spy_dist))
+        spy_shares.loc[spy_shares.index >= d] = spy_now
 
     spy_val = spy_shares * spy_daily * fx_daily
     today = idx.max()
     my_final = float(my_val.iloc[-1])
     spy_final = float(spy_val.iloc[-1])
 
-    port_xirr = xirr(cashflows + [(today, my_final)])
-    spy_xirr = xirr(cashflows + [(today, spy_final)])
+    port_xirr = xirr(my_cashflows + [(today, my_final)])
+    spy_xirr = xirr(spy_cashflows + [(today, spy_final)])
     alpha_pct = ((port_xirr - spy_xirr) * 100.0) if (port_xirr is not None and spy_xirr is not None) else None
 
     # 베타: 기여금 제거 일간 수익률 vs 시장(SPY 원화)

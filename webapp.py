@@ -186,7 +186,7 @@ def api_growth(request: Request, ticker: str = ""):
                              line=dict(color="#EF553B", width=2.4),
                              hovertemplate="%{x|%Y-%m-%d}<br>내 자산가치 %{y:,.0f}원<extra></extra>"),
                   row=1, col=1, secondary_y=False)
-    fig.add_trace(go.Scatter(x=gidx, y=gdf["S&P500 자산가치"], name="S&P500 동일투자(계속 보유)", mode="lines",
+    fig.add_trace(go.Scatter(x=gidx, y=gdf["S&P500 자산가치"], name="S&P500 동일투자(매도 반영)", mode="lines",
                              line=dict(color="#636EFA", dash="dash", width=2),
                              hovertemplate="%{x|%Y-%m-%d}<br>S&P500 %{y:,.0f}원<extra></extra>"),
                   row=1, col=1, secondary_y=False)
