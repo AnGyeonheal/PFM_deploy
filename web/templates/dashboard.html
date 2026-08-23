@@ -175,7 +175,7 @@
       <div id="fx-chart" style="height:380px" class="text-secondary">환율 탭을 선택하면 최근 10년 USD/KRW 환율과 달러 평단가를 불러옵니다…</div>
     </div>
     <div class="tab-pane fade" id="t-dca">
-      <p class="text-secondary small mb-2"><b>소득 시작월</b>을 정하면, 그 이전에 보유하던 종목은 그대로 이어가고, 그 시점부터 투자한 총액을 <b>매월 균등하게</b> S&P500(SPY)에 적립했다면의 결과를 보여줍니다.</p>
+      <p class="text-secondary small mb-2"><b>소득 시작월</b>을 정하면, 그 이전에 보유하던 종목은 그대로 이어가고, 그 시점부터 투자한 총액을 <b>시작월~오늘까지 매월 균등하게</b>(투자총액 ÷ 개월수) S&P500(SPY)에 적립했다면의 결과를 보여줍니다.</p>
       <div class="d-flex gap-2 align-items-center mb-3 flex-wrap">
         <label class="small text-secondary mb-0">소득(적립) 시작</label>
         <input type="month" id="dca-start" class="form-control form-control-sm" style="width:auto">

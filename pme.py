@@ -637,7 +637,8 @@ def build_stock_analytics(orders, fx_now=1400.0, name_map=None, holdings=None):
 
 
 def build_spy_dca(orders, fx_now=1400.0, start_ym=None):
-    """소득(적립) 시작월(start_ym='YYYY-MM')부터, 그 이후 투자한 총액을 매월 균등하게 S&P500(SPY)에 적립.
+    """소득(적립) 시작월(start_ym='YYYY-MM')부터 오늘까지, 시작월 이후 투자한 총액을
+    매월 균등하게(총액 ÷ 시작월~오늘 개월수) S&P500(SPY)에 적립합니다.
     시작월 이전의 보유 종목(순포지션)은 실제 주식 그대로 보유해 이어갑니다.
     start_ym이 없으면 첫 매수월부터(=전체 DCA, 기존 보유분 없음).
     반환: (ts[시뮬레이션 자산, 매월적립 S&P500, 기존 보유분, 누적 적립원금], monthly_df, summary)
@@ -667,16 +668,12 @@ def build_spy_dca(orders, fx_now=1400.0, start_ym=None):
     dca_buys = [r for r in buys if r["date"] >= T0]
     total_krw = sum(_krw(r) for r in dca_buys)
 
-    if dca_buys:
-        last = max(r["date"] for r in dca_buys)
-        months = pd.date_range(start=T0.replace(day=1), end=pd.Timestamp(last).replace(day=1), freq="MS")
-    else:
-        months = pd.DatetimeIndex([T0])
+    end = spy.index.max()  # 시작월~오늘까지 매월 균등 적립
+    months = pd.date_range(start=T0.replace(day=1), end=pd.Timestamp(end).replace(day=1), freq="MS")
     if len(months) == 0:
         months = pd.DatetimeIndex([T0])
     monthly_amt = total_krw / len(months) if len(months) else 0.0
 
-    end = spy.index.max()
     idx = pd.date_range(start=min(pd.Timestamp(first_buy).normalize(), T0), end=end, freq="D")
 
     def align(s):
