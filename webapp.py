@@ -560,7 +560,7 @@ def export_xlsx(request: Request):
 
 
 @app.get("/report.pdf")
-def report_pdf(request: Request, ai: int = 1):
+def report_pdf(request: Request, ai: int = 1, tickers: str = ""):
     user = _current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
@@ -580,15 +580,26 @@ def report_pdf(request: Request, ai: int = 1):
         for c in ("현재주가", "S&P500대비(%p)", "알파(연%)", "베타", "알파기여(%)", "베타기여(%)"):
             rec[c] = (a.get(c) if a else None)
 
-    # 차트 이미지(matplotlib)
+    # 차트 이미지(matplotlib): 전체 성장 + 보유 비중 + 선택 개별 종목
     charts = []
     try:
         import report_charts
-        gdf = pipeline.growth_frame(data["combined_orders"], data["fx_rate"], None) if data["combined_orders"] else None
-        charts = [("자산 성장 추이 · S&P500(매도 반영) 비교", report_charts.growth_png(gdf)),
-                  ("보유 비중", report_charts.allocation_png(data["holdings"]))]
+        orders = data["combined_orders"]
+        if orders:
+            gdf = pipeline.growth_frame(orders, data["fx_rate"], None)
+            charts.append(("자산 성장 추이 · S&P500(매도 반영) 비교", report_charts.growth_png(gdf)))
+        charts.append(("보유 비중", report_charts.allocation_png(data["holdings"])))
+        sel = [t.strip() for t in (tickers or "").split(",") if t.strip()][:10]
+        valid = (set(str(x) for x in data["breakdown"]["티커"].tolist())
+                 if (data["breakdown"] is not None and not data["breakdown"].empty) else set())
+        for tk in sel:
+            if orders and (not valid or tk in valid):
+                gt = pipeline.growth_frame(orders, data["fx_rate"], tk)
+                png = report_charts.growth_png(gt, title=f"{tk} - Growth vs S&P500 (KRW)")
+                if png:
+                    charts.append((f"{name_map.get(tk, tk)} ({tk}) 성장 추이", png))
     except Exception:
-        charts = []
+        pass
     charts = [(t, p) for t, p in charts if p]
 
     # AI 진단: 대시보드에서 생성했으면 재사용, 없으면 생성(키 없으면 건너뜀)

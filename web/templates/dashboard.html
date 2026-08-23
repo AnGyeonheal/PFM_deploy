@@ -70,10 +70,24 @@
 <div class="section">
   <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
     <h5 class="mb-0">보유 자산 성장 · S&P500 비교 · 매수/매도 금액</h5>
-    <select id="growth-ticker" class="form-select form-select-sm" style="width:auto">
-      <option value="">전체 자산(합산)</option>
-      {% for t in tickers %}<option value="{{ t }}">{{ name_map.get(t, t) }} ({{ t }})</option>{% endfor %}
-    </select>
+    <div class="d-flex gap-2">
+      <select id="growth-ticker" class="form-select form-select-sm" style="width:auto">
+        <option value="">전체 자산(합산)</option>
+        {% for t in tickers %}<option value="{{ t }}">{{ name_map.get(t, t) }} ({{ t }})</option>{% endfor %}
+      </select>
+      <div class="dropdown">
+        <button class="btn btn-sm btn-outline-primary dropdown-toggle" type="button"
+                data-bs-toggle="dropdown" data-bs-auto-close="outside">📄 종목별 PDF</button>
+        <div class="dropdown-menu dropdown-menu-end p-2" style="max-height:320px; overflow:auto; min-width:250px">
+          <div class="small text-secondary px-1 mb-1">PDF에 포함할 개별 종목 (전체 자산 차트는 항상 포함)</div>
+          {% for t in tickers %}
+          <label class="dropdown-item px-1 py-1 small"><input type="checkbox" class="pdf-tk me-1" value="{{ t }}">{{ name_map.get(t, t) }} ({{ t }})</label>
+          {% endfor %}
+          <hr class="my-1">
+          <button class="btn btn-sm btn-primary w-100" id="pdf-download">선택 종목 포함해 다운로드</button>
+        </div>
+      </div>
+    </div>
   </div>
   <div id="growth" style="height:460px">불러오는 중…</div>
   <div class="accordion accordion-flush mt-2" id="growth-help">
@@ -192,6 +206,15 @@ async function loadGrowth(ticker) {
 }
 const sel = document.getElementById('growth-ticker');
 if (sel) { sel.addEventListener('change', e => loadGrowth(e.target.value)); loadGrowth(''); }
+
+const pdfBtn = document.getElementById('pdf-download');
+if (pdfBtn) pdfBtn.addEventListener('click', () => {
+  const tks = Array.from(document.querySelectorAll('.pdf-tk:checked')).map(c => c.value);
+  pdfBtn.disabled = true; pdfBtn.textContent = '생성 중… (수 초 소요)';
+  const url = '/report.pdf' + (tks.length ? ('?tickers=' + encodeURIComponent(tks.join(','))) : '');
+  window.location.href = url;
+  setTimeout(() => { pdfBtn.disabled = false; pdfBtn.textContent = '선택 종목 포함해 다운로드'; }, 4000);
+});
 
 (async () => {
   const el = document.getElementById('allocation'); if (!el) return;
