@@ -637,11 +637,10 @@ def build_stock_analytics(orders, fx_now=1400.0, name_map=None, holdings=None):
 
 
 def build_spy_dca(orders, fx_now=1400.0, start_ym=None):
-    """소득(적립) 시작월(start_ym='YYYY-MM')부터 오늘까지, 시작월 이후 투자한 총액을
-    매월 균등하게(총액 ÷ 시작월~오늘 개월수) S&P500(SPY)에 적립합니다.
-    시작월 이전의 보유 종목(순포지션)은 실제 주식 그대로 보유해 이어갑니다.
-    start_ym이 없으면 첫 매수월부터(=전체 DCA, 기존 보유분 없음).
-    반환: (ts[시뮬레이션 자산, 매월적립 S&P500, 기존 보유분, 누적 적립원금], monthly_df, summary)
+    """시작월 기준 '내 자산(순보유 평가액)'을 그 시점에 S&P500(SPY)에 일시투자(lump-sum)해
+    현재까지 보유했다면의 결과. 시작월 이전에는 실제 포트폴리오 가치를 그대로 따라가고,
+    시작월에 전량 SPY로 전환했다고 가정합니다. start_ym이 없으면 첫 매수 시점 기준.
+    반환: (ts[S&P500 일시투자, 내 포트폴리오, 시작 금액], monthly_df, summary)
     """
     recs = _trade_records(orders)
     buys = [r for r in recs if r["side"] == "BUY"]
@@ -658,22 +657,11 @@ def build_spy_dca(orders, fx_now=1400.0, start_ym=None):
         try:
             T0 = pd.to_datetime(str(start_ym)).replace(day=1).normalize()
         except Exception:
-            T0 = pd.Timestamp(first_buy).replace(day=1).normalize()
+            T0 = pd.Timestamp(first_buy).normalize()
     else:
-        T0 = pd.Timestamp(first_buy).replace(day=1).normalize()
+        T0 = pd.Timestamp(first_buy).normalize()
 
-    def _krw(r):
-        return r["amount"] * _safe_asof(fx_hist, r["date"], fx_now) if r["currency"] == "USD" else r["amount"]
-
-    dca_buys = [r for r in buys if r["date"] >= T0]
-    total_krw = sum(_krw(r) for r in dca_buys)
-
-    end = spy.index.max()  # 시작월~오늘까지 매월 균등 적립
-    months = pd.date_range(start=T0.replace(day=1), end=pd.Timestamp(end).replace(day=1), freq="MS")
-    if len(months) == 0:
-        months = pd.DatetimeIndex([T0])
-    monthly_amt = total_krw / len(months) if len(months) else 0.0
-
+    end = spy.index.max()
     idx = pd.date_range(start=min(pd.Timestamp(first_buy).normalize(), T0), end=end, freq="D")
 
     def align(s):
@@ -681,74 +669,72 @@ def build_spy_dca(orders, fx_now=1400.0, start_ym=None):
 
     spy_daily = align(spy)
     fx_daily = align(fx_hist) if not fx_hist.empty else pd.Series(fx_now, index=idx)
-    spy_now = float(spy.iloc[-1])
-    spy_last = float(spy_daily.iloc[-1])
-    fx_last = float(fx_daily.iloc[-1])
 
-    # 기존 보유분: T0 이전 매매로 형성된 순포지션을 그대로 보유(T0 이후 수량 고정)
+    # 내 실제 보유 평가액(전체 매매 반영) — 시작금액 산출 & 비교용
     symbols = sorted(set(r["symbol"] for r in recs))
     sym_cur = {s: next(r["currency"] for r in recs if r["symbol"] == s) for s in symbols}
-    pre_hold_val = pd.Series(0.0, index=idx)
+    my_hold = pd.Series(0.0, index=idx)
     for s in symbols:
-        pre = [r for r in recs if r["symbol"] == s and r["date"] < T0]
-        if not pre:
-            continue
         h = get_history(to_yf_ticker(s, "KR" if sym_cur[s] == "KRW" else "US"), period="10y")
         if h.empty:
             continue
         px = align(h)
         qty = pd.Series(0.0, index=idx)
-        for r in pre:
+        for r in [x for x in recs if x["symbol"] == s]:
             qty.loc[qty.index >= r["date"]] += (1 if r["side"] == "BUY" else -1) * r["qty"]
-        pre_hold_val = pre_hold_val.add(qty * px * (fx_daily if sym_cur[s] == "USD" else 1.0), fill_value=0)
+        my_hold = my_hold.add(qty * px * (fx_daily if sym_cur[s] == "USD" else 1.0), fill_value=0)
 
-    # DCA S&P500
-    cum_shares = pd.Series(0.0, index=idx)
-    inv_step = pd.Series(0.0, index=idx)
-    running_shares = running_inv = 0.0
+    # 시작월 시점 내 자산을 SPY에 일시투자
+    after = idx[idx >= T0]
+    T0_eff = after[0] if len(after) else idx[-1]
+    start_krw = float(my_hold.loc[T0_eff])
+    spy_last = float(spy_daily.iloc[-1])
+    fx_last = float(fx_daily.iloc[-1])
+    spy_T0 = _safe_asof(spy, T0_eff, spy_last)
+    fx_T0 = _safe_asof(fx_hist, T0_eff, fx_last)
+    start_shares = start_krw / (spy_T0 * fx_T0) if (start_krw > 0 and spy_T0 * fx_T0) else 0.0
+
+    sim = my_hold.copy()  # 시작월 이전은 실제 포트폴리오를 그대로 따라감
+    mask = idx >= T0_eff
+    sim.loc[mask] = start_shares * spy_daily.loc[mask] * fx_daily.loc[mask]
+
+    ts = pd.DataFrame({
+        "S&P500 일시투자": sim,
+        "내 포트폴리오": my_hold,
+        "시작 금액": pd.Series(start_krw, index=idx),
+    })
+
+    months = pd.date_range(start=pd.Timestamp(T0_eff).replace(day=1),
+                           end=pd.Timestamp(end).replace(day=1), freq="MS")
     rows = []
-    for m in months:
-        cand = spy.index[spy.index >= m]
-        d = cand[0] if len(cand) else pd.Timestamp(m)
-        spy_px = _safe_asof(spy, d, spy_now)
-        fx_d = _safe_asof(fx_hist, d, fx_now)
-        shares = monthly_amt / (spy_px * fx_d) if (monthly_amt and spy_px * fx_d) else 0.0
-        running_shares += shares
-        running_inv += monthly_amt
-        cum_shares.loc[cum_shares.index >= d] += shares
-        inv_step.loc[inv_step.index >= d] += monthly_amt
+    for i, m in enumerate(months):
+        if i == len(months) - 1:  # 마지막(현재) 달은 최신값으로
+            spy_px, fx_d = spy_last, fx_last
+        else:
+            cand = spy.index[spy.index >= m]
+            d = cand[0] if len(cand) else pd.Timestamp(m)
+            spy_px = _safe_asof(spy, d, spy_last)
+            fx_d = _safe_asof(fx_hist, d, fx_last)
+        val = start_shares * spy_px * fx_d
         rows.append({
             "월": m.strftime("%Y-%m"),
-            "적립액(원)": round(monthly_amt),
             "SPY(USD)": round(spy_px, 2),
             "환율": round(fx_d, 1),
-            "매수주수": round(shares, 4),
-            "누적주수": round(running_shares, 4),
-            "누적적립(원)": round(running_inv),
-            "누적평가액(원)": round(running_shares * spy_last * fx_last),
+            "평가액(원)": round(val),
+            "수익률(%)": round((val / start_krw - 1) * 100, 2) if start_krw else 0.0,
         })
 
-    dca_val = cum_shares * spy_daily * fx_daily
-    sim_val = pre_hold_val + dca_val
-    ts = pd.DataFrame({
-        "시뮬레이션 자산": sim_val,
-        "매월적립 S&P500": dca_val,
-        "기존 보유분": pre_hold_val,
-        "누적 적립원금": inv_step,
-    })
-    pre_now = float(pre_hold_val.iloc[-1])
-    dca_now = float(dca_val.iloc[-1])
-    sim_now = float(sim_val.iloc[-1])
+    sim_now = float(sim.iloc[-1])
+    my_now = float(my_hold.iloc[-1])
     summary = {
-        "소득시작": T0.strftime("%Y-%m"),
-        "적립총액": round(total_krw),
-        "월적립액": round(monthly_amt),
-        "개월수": int(len(months)),
-        "기간": f"{months[0].strftime('%Y-%m')} ~ {months[-1].strftime('%Y-%m')}",
-        "기존보유현재가치": round(pre_now),
-        "적립S&P500현재가치": round(dca_now),
-        "시뮬현재총자산": round(sim_now),
-        "적립수익률(%)": round((dca_now / total_krw - 1) * 100, 2) if total_krw else 0.0,
+        "시작월": T0.strftime("%Y-%m"),
+        "시작금액": round(start_krw),
+        "SPY시작가": round(spy_T0, 2),
+        "매수주수": round(start_shares, 4),
+        "현재평가액": round(sim_now),
+        "총수익": round(sim_now - start_krw),
+        "수익률(%)": round((sim_now / start_krw - 1) * 100, 2) if start_krw else 0.0,
+        "내실제현재자산": round(my_now),
     }
     return ts, pd.DataFrame(rows), summary
 

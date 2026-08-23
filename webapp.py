@@ -318,21 +318,15 @@ def api_dca(request: Request, start: str = ""):
         return JSONResponse({"error": "no_dca"}, status_code=404)
     import plotly.graph_objects as go
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=ts.index, y=ts["시뮬레이션 자산"], name="시뮬레이션 자산(기존보유+적립)", mode="lines",
+    fig.add_trace(go.Scatter(x=ts.index, y=ts["S&P500 일시투자"], name="S&P500 일시투자(시작월 내 자산)", mode="lines",
                              line=dict(color="#636EFA", width=2.4),
-                             hovertemplate="%{x|%Y-%m-%d}<br>시뮬 자산 %{y:,.0f}원<extra></extra>"))
-    gdf = pipeline.growth_frame(orders, data["fx_rate"], None)
-    if gdf is not None and not gdf.empty and "내 자산가치" in gdf:
-        fig.add_trace(go.Scatter(x=gdf.index, y=gdf["내 자산가치"], name="내 포트폴리오(실제)", mode="lines",
-                                 line=dict(color="#EF553B", width=2.0),
-                                 hovertemplate="%{x|%Y-%m-%d}<br>실제 %{y:,.0f}원<extra></extra>"))
-    if "기존 보유분" in ts and float(ts["기존 보유분"].max()) > 0:
-        fig.add_trace(go.Scatter(x=ts.index, y=ts["기존 보유분"], name="기존 보유분(소득 전)", mode="lines",
-                                 line=dict(color="#00A676", width=1.4, dash="dash"),
-                                 hovertemplate="%{x|%Y-%m-%d}<br>기존 보유분 %{y:,.0f}원<extra></extra>"))
-    fig.add_trace(go.Scatter(x=ts.index, y=ts["누적 적립원금"], name="누적 적립원금", mode="lines",
-                             line=dict(color="#9AA4AE", width=1.4, dash="dot"),
-                             hovertemplate="%{x|%Y-%m-%d}<br>누적 적립원금 %{y:,.0f}원<extra></extra>"))
+                             hovertemplate="%{x|%Y-%m-%d}<br>S&P500 %{y:,.0f}원<extra></extra>"))
+    fig.add_trace(go.Scatter(x=ts.index, y=ts["내 포트폴리오"], name="내 포트폴리오(실제)", mode="lines",
+                             line=dict(color="#EF553B", width=2.0),
+                             hovertemplate="%{x|%Y-%m-%d}<br>실제 %{y:,.0f}원<extra></extra>"))
+    fig.add_trace(go.Scatter(x=ts.index, y=ts["시작 금액"], name="시작 금액(기준선)", mode="lines",
+                             line=dict(color="#9AA4AE", width=1.2, dash="dot"),
+                             hovertemplate="시작 금액 %{y:,.0f}원<extra></extra>"))
     fig.update_layout(margin=dict(t=10, r=10, l=10, b=10), height=420,
                       legend=dict(orientation="h", y=1.08))
     return JSONResponse({"fig": _fig_json(fig), "summary": summary,
@@ -627,7 +621,7 @@ def report_pdf(request: Request, ai: int = 1, tickers: str = ""):
         charts.append(("보유 비중", report_charts.allocation_png(data["holdings"])))
         if orders:
             ts_dca, _m, _s = pipeline.spy_dca(orders, data["fx_rate"])
-            charts.append(("S&P500 매월 적립 시뮬레이션", report_charts.dca_png(ts_dca, gdf)))
+            charts.append(("S&P500 일시투자 시뮬레이션", report_charts.dca_png(ts_dca, gdf)))
         sel = [t.strip() for t in (tickers or "").split(",") if t.strip()][:10]
         valid = (set(str(x) for x in data["breakdown"]["티커"].tolist())
                  if (data["breakdown"] is not None and not data["breakdown"].empty) else set())
