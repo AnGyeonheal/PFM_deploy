@@ -53,6 +53,27 @@ def growth_png(gdf, title="Asset Growth vs S&P500 (KRW)"):
     return _to_png(fig)
 
 
+def dca_png(ts, my_gdf=None):
+    """S&P500 매월 적립 시뮬레이션 → PNG bytes. my_gdf가 있으면 내 포트폴리오도 오버레이."""
+    if ts is None or getattr(ts, "empty", True):
+        return None
+    idx = ts.index
+    fig, ax = plt.subplots(figsize=(8.2, 3.5), dpi=140)
+    if "매월적립 S&P500" in ts:
+        ax.plot(idx, ts["매월적립 S&P500"], color="#636EFA", lw=2.0, label="Monthly DCA S&P500")
+    if my_gdf is not None and not getattr(my_gdf, "empty", True) and "내 자산가치" in my_gdf:
+        ax.plot(my_gdf.index, my_gdf["내 자산가치"], color="#EF553B", lw=1.8, label="My Portfolio")
+    if "누적 적립원금" in ts:
+        ax.plot(idx, ts["누적 적립원금"], color="#9AA4AE", lw=1.2, ls=":", label="Cumulative Contributions")
+    ax.set_title("If Invested Monthly into S&P500 (KRW)", fontsize=11)
+    ax.legend(loc="upper left", fontsize=8, framealpha=0.85)
+    ax.grid(True, alpha=0.25)
+    ax.yaxis.set_major_formatter(FuncFormatter(_won_fmt))
+    ax.tick_params(labelsize=8)
+    fig.autofmt_xdate(rotation=0, ha="center")
+    return _to_png(fig)
+
+
 def allocation_png(holdings):
     """보유 비중 파이 → PNG bytes. 없으면 None."""
     hs = [h for h in (holdings or []) if float(h.get("weight_pct") or 0) > 0]

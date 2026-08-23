@@ -303,6 +303,37 @@ def api_fx(request: Request):
         figj = _fig_json(fig)
     return JSONResponse({"fig": figj, "summary": usd})
 
+
+@app.get("/api/dca")
+def api_dca(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    data = get_portfolio(user)
+    orders = data["combined_orders"]
+    if not orders:
+        return JSONResponse({"error": "no_data"}, status_code=404)
+    ts, monthly, summary = pipeline.spy_dca(orders, data["fx_rate"])
+    if ts is None or ts.empty:
+        return JSONResponse({"error": "no_dca"}, status_code=404)
+    import plotly.graph_objects as go
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=ts.index, y=ts["매월적립 S&P500"], name="매월 적립 S&P500", mode="lines",
+                             line=dict(color="#636EFA", width=2.2),
+                             hovertemplate="%{x|%Y-%m-%d}<br>적립 S&P500 %{y:,.0f}원<extra></extra>"))
+    gdf = pipeline.growth_frame(orders, data["fx_rate"], None)
+    if gdf is not None and not gdf.empty and "내 자산가치" in gdf:
+        fig.add_trace(go.Scatter(x=gdf.index, y=gdf["내 자산가치"], name="내 포트폴리오", mode="lines",
+                                 line=dict(color="#EF553B", width=2.0),
+                                 hovertemplate="%{x|%Y-%m-%d}<br>내 포트폴리오 %{y:,.0f}원<extra></extra>"))
+    fig.add_trace(go.Scatter(x=ts.index, y=ts["누적 적립원금"], name="누적 적립원금", mode="lines",
+                             line=dict(color="#9AA4AE", width=1.4, dash="dot"),
+                             hovertemplate="%{x|%Y-%m-%d}<br>누적 적립원금 %{y:,.0f}원<extra></extra>"))
+    fig.update_layout(margin=dict(t=10, r=10, l=10, b=10), height=420,
+                      legend=dict(orientation="h", y=1.06))
+    return JSONResponse({"fig": _fig_json(fig), "summary": summary,
+                         "monthly": monthly.to_dict("records") if not monthly.empty else []})
+
 # ─────────────────────────── 설정(토스/API 키) ───────────────────────────
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, msg: str = ""):
@@ -585,10 +616,14 @@ def report_pdf(request: Request, ai: int = 1, tickers: str = ""):
     try:
         import report_charts
         orders = data["combined_orders"]
+        gdf = None
         if orders:
             gdf = pipeline.growth_frame(orders, data["fx_rate"], None)
             charts.append(("자산 성장 추이 · S&P500(매도 반영) 비교", report_charts.growth_png(gdf)))
         charts.append(("보유 비중", report_charts.allocation_png(data["holdings"])))
+        if orders:
+            ts_dca, _m, _s = pipeline.spy_dca(orders, data["fx_rate"])
+            charts.append(("S&P500 매월 적립 시뮬레이션", report_charts.dca_png(ts_dca, gdf)))
         sel = [t.strip() for t in (tickers or "").split(",") if t.strip()][:10]
         valid = (set(str(x) for x in data["breakdown"]["티커"].tolist())
                  if (data["breakdown"] is not None and not data["breakdown"].empty) else set())

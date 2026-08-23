@@ -636,6 +636,87 @@ def build_stock_analytics(orders, fx_now=1400.0, name_map=None, holdings=None):
     return df.drop(columns=["_w"])
 
 
+def build_spy_dca(orders, fx_now=1400.0):
+    """내가 투자한 총액을 '첫 매수달~마지막 매수달' 매월 균등하게 S&P500(SPY)에 적립했다고 가정한 시뮬레이션.
+    같은 총액·같은 기간을 균등 분할해 투입하므로 '타이밍'만 다른 비교가 됩니다.
+    반환: (ts[매월적립 S&P500, 누적 적립원금], monthly_df, summary dict)
+    """
+    recs = [r for r in _trade_records(orders) if r["side"] == "BUY"]
+    empty = (pd.DataFrame(), pd.DataFrame(), {})
+    if not recs:
+        return empty
+    spy = get_history(BENCHMARK_TICKER, period="10y")
+    fx_hist = get_usdkrw_history("10y")
+    if spy.empty:
+        return empty
+
+    def _krw(r):
+        return r["amount"] * _safe_asof(fx_hist, r["date"], fx_now) if r["currency"] == "USD" else r["amount"]
+
+    total_krw = sum(_krw(r) for r in recs)
+    if total_krw <= 0:
+        return empty
+
+    first = min(r["date"] for r in recs)
+    last = max(r["date"] for r in recs)
+    months = pd.date_range(start=pd.Timestamp(first).replace(day=1),
+                           end=pd.Timestamp(last).replace(day=1), freq="MS")
+    if len(months) == 0:
+        months = pd.DatetimeIndex([pd.Timestamp(first).replace(day=1)])
+    monthly_amt = total_krw / len(months)
+
+    end = spy.index.max()
+    idx = pd.date_range(start=pd.Timestamp(first).normalize(), end=end, freq="D")
+
+    def align(s):
+        return s.reindex(idx.union(s.index)).ffill().reindex(idx).bfill()
+
+    spy_daily = align(spy)
+    fx_daily = align(fx_hist) if not fx_hist.empty else pd.Series(fx_now, index=idx)
+    spy_now = float(spy.iloc[-1])
+    spy_last = float(spy_daily.iloc[-1])   # 차트/요약과 동일 기준(정렬된 최종값)
+    fx_last = float(fx_daily.iloc[-1])
+
+    cum_shares = pd.Series(0.0, index=idx)
+    inv_step = pd.Series(0.0, index=idx)
+    running_shares = running_inv = 0.0
+    rows = []
+    for m in months:
+        cand = spy.index[spy.index >= m]
+        d = cand[0] if len(cand) else pd.Timestamp(m)
+        spy_px = _safe_asof(spy, d, spy_now)
+        fx_d = _safe_asof(fx_hist, d, fx_now)
+        shares = monthly_amt / (spy_px * fx_d) if (spy_px * fx_d) else 0.0
+        running_shares += shares
+        running_inv += monthly_amt
+        cum_shares.loc[cum_shares.index >= d] += shares
+        inv_step.loc[inv_step.index >= d] += monthly_amt
+        rows.append({
+            "월": m.strftime("%Y-%m"),
+            "적립액(원)": round(monthly_amt),
+            "SPY(USD)": round(spy_px, 2),
+            "환율": round(fx_d, 1),
+            "매수주수": round(shares, 4),
+            "누적주수": round(running_shares, 4),
+            "누적적립(원)": round(running_inv),
+            "누적평가액(원)": round(running_shares * spy_last * fx_last),
+        })
+
+    dca_val = cum_shares * spy_daily * fx_daily
+    ts = pd.DataFrame({"매월적립 S&P500": dca_val, "누적 적립원금": inv_step})
+    final_val = float(dca_val.iloc[-1])
+    summary = {
+        "총적립액": round(total_krw),
+        "월적립액": round(monthly_amt),
+        "개월수": int(len(months)),
+        "기간": f"{months[0].strftime('%Y-%m')} ~ {months[-1].strftime('%Y-%m')}",
+        "현재평가액": round(final_val),
+        "총수익": round(final_val - total_krw),
+        "수익률(%)": round((final_val / total_krw - 1) * 100, 2) if total_krw else 0.0,
+    }
+    return ts, pd.DataFrame(rows), summary
+
+
 # ───────────── 달러 평단가 · 10년 환율 · S&P500 알파/베타 (방법 A: 현금흐름 PME) ─────────────
 
 def compute_usd_avg_cost(orders, fx_now=1400.0):

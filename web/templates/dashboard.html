@@ -123,6 +123,7 @@
     <li class="nav-item"><button class="nav-link" data-bs-toggle="pill" data-bs-target="#t-tx">거래 내역</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="pill" data-bs-target="#t-div">배당 내역</button></li>
     <li class="nav-item"><button id="tab-fx-btn" class="nav-link" data-bs-toggle="pill" data-bs-target="#t-fx">환율</button></li>
+    <li class="nav-item"><button id="tab-dca-btn" class="nav-link" data-bs-toggle="pill" data-bs-target="#t-dca">S&P500 적립</button></li>
   </ul>
   <div class="tab-content">
     <div class="tab-pane fade show active" id="t-hold">
@@ -172,6 +173,15 @@
     <div class="tab-pane fade" id="t-fx">
       <div id="fx-metrics" class="row g-3 mb-3"></div>
       <div id="fx-chart" style="height:380px" class="text-secondary">환율 탭을 선택하면 최근 10년 USD/KRW 환율과 달러 평단가를 불러옵니다…</div>
+    </div>
+    <div class="tab-pane fade" id="t-dca">
+      <p class="text-secondary small mb-2">내가 투자한 총액을 <b>첫 매수달부터 마지막 매수달까지 매월 균등하게</b> S&P500(SPY)에 적립했다면의 결과입니다. 같은 총액·같은 기간, 타이밍만 균등으로 다릅니다.</p>
+      <div id="dca-metrics" class="row g-3 mb-3"></div>
+      <div id="dca-chart" style="height:420px" class="text-secondary">탭을 선택하면 시뮬레이션을 계산합니다…</div>
+      <div class="table-scroll mt-3"><table class="table table-sm table-hover align-middle" id="dca-table">
+        <thead><tr><th>월</th><th class="text-end">적립액(원)</th><th class="text-end">당시 SPY($)</th><th class="text-end">환율</th><th class="text-end">매수주수</th><th class="text-end">누적주수</th><th class="text-end">누적적립(원)</th><th class="text-end">누적평가액(원)</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
     </div>
   </div>
 </div>
@@ -244,6 +254,36 @@ if (fxBtn) fxBtn.addEventListener('shown.bs.tab', async () => {
     if (j.fig) { chart.innerHTML=''; Plotly.newPlot('fx-chart', j.fig.data, j.fig.layout, {responsive:true, displayModeBar:false}); }
     else { chart.innerHTML = '<span class="text-secondary">환율/달러 매수 데이터가 없습니다.</span>'; }
   } catch(e) { chart.innerHTML = '환율 데이터를 불러오지 못했습니다.'; }
+});
+
+let dcaLoaded = false;
+const dcaBtn = document.getElementById('tab-dca-btn');
+if (dcaBtn) dcaBtn.addEventListener('shown.bs.tab', async () => {
+  if (dcaLoaded) return; dcaLoaded = true;
+  const chart = document.getElementById('dca-chart');
+  const met = document.getElementById('dca-metrics');
+  const won = v => Math.round(v || 0).toLocaleString() + '원';
+  try {
+    const r = await fetch('/api/dca');
+    if (!r.ok) { chart.innerHTML = '<span class="text-secondary">적립 시뮬레이션 데이터가 없습니다.</span>'; return; }
+    const j = await r.json();
+    const s = j.summary || {};
+    const card = (label, val, sub) => `<div class="col-6 col-md-3"><div class="metric"><div class="label">${label}</div><div class="value">${val}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div></div>`;
+    const rc = (s['수익률(%)'] || 0) >= 0 ? 'pos' : 'neg';
+    met.innerHTML =
+      card('월 적립액', won(s['월적립액']), (s['개월수'] || 0) + '개월 · ' + (s['기간'] || '')) +
+      card('총 적립액', won(s['총적립액']), '내 투자 총액과 동일') +
+      card('현재 평가액', won(s['현재평가액']), null) +
+      `<div class="col-6 col-md-3"><div class="metric"><div class="label">총수익 / 수익률</div><div class="value ${rc}">${won(s['총수익'])}</div><div class="sub ${rc}">${(s['수익률(%)'] >= 0 ? '+' : '') + (s['수익률(%)'] || 0)}%</div></div></div>`;
+    if (j.fig) { chart.innerHTML = ''; Plotly.newPlot('dca-chart', j.fig.data, j.fig.layout, {responsive: true, displayModeBar: false}); }
+    const tb = document.querySelector('#dca-table tbody');
+    tb.innerHTML = (j.monthly || []).map(m =>
+      `<tr><td>${m['월']}</td><td class="text-end">${Math.round(m['적립액(원)']).toLocaleString()}</td>` +
+      `<td class="text-end">${m['SPY(USD)']}</td><td class="text-end">${m['환율']}</td>` +
+      `<td class="text-end">${m['매수주수']}</td><td class="text-end">${m['누적주수']}</td>` +
+      `<td class="text-end">${Math.round(m['누적적립(원)']).toLocaleString()}</td>` +
+      `<td class="text-end">${Math.round(m['누적평가액(원)']).toLocaleString()}</td></tr>`).join('');
+  } catch (e) { chart.innerHTML = '불러오지 못했습니다.'; }
 });
 
 const genBtn = document.getElementById('gen-rebal');

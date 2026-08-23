@@ -24,6 +24,7 @@ from advanced_analytics import compute_dividends, compute_dividend_events
 from pme import (
     compute_alpha_beta, build_total_profit_growth, build_ticker_profit_growth,
     build_trade_bars, build_asset_value_growth, build_stock_analytics, compute_rolling_beta,
+    build_spy_dca,
 )
 import auth
 from names import enrich_name_map
@@ -416,3 +417,7 @@ def stock_analytics(combined_orders, fx, name_map=None, holdings=None):
 
 def rolling_beta(combined_orders, fx, ticker=None):
     return compute_rolling_beta(combined_orders, fx, ticker)
+
+
+def spy_dca(combined_orders, fx):
+    return build_spy_dca(combined_orders, fx)
