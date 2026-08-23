@@ -698,43 +698,43 @@ def build_spy_dca(orders, fx_now=1400.0, start_ym=None):
     mask = idx >= T0_eff
     sim.loc[mask] = start_shares * spy_daily.loc[mask] * fx_daily.loc[mask]
 
-    ts = pd.DataFrame({
-        "S&P500 일시투자": sim,
-        "내 포트폴리오": my_hold,
-        "시작 금액": pd.Series(start_krw, index=idx),
-    })
+    # 내 투자원금(수익금 계산용): 시작월 시점 자산 + 이후 추가 매수 원가(누적)
+    my_principal = pd.Series(0.0, index=idx)
+    my_principal.loc[mask] = start_krw
+    for r in buys:
+        if r["date"] >= T0_eff:
+            cost = r["amount"] * _safe_asof(fx_hist, r["date"], fx_last) if r["currency"] == "USD" else r["amount"]
+            my_principal.loc[my_principal.index >= r["date"]] += cost
+
+    # 투자원금을 제외한 '수익금'만 비교 (둘 다 시작월 기준 0에서 출발)
+    spy_profit = pd.Series(0.0, index=idx)
+    my_profit = pd.Series(0.0, index=idx)
+    spy_profit.loc[mask] = sim.loc[mask] - start_krw
+    my_profit.loc[mask] = my_hold.loc[mask] - my_principal.loc[mask]
+
+    ts = pd.DataFrame({"S&P500 수익금": spy_profit, "내 수익금": my_profit})
 
     months = pd.date_range(start=pd.Timestamp(T0_eff).replace(day=1),
                            end=pd.Timestamp(end).replace(day=1), freq="MS")
     rows = []
     for i, m in enumerate(months):
-        if i == len(months) - 1:  # 마지막(현재) 달은 최신값으로
-            spy_px, fx_d = spy_last, fx_last
-        else:
-            cand = spy.index[spy.index >= m]
-            d = cand[0] if len(cand) else pd.Timestamp(m)
-            spy_px = _safe_asof(spy, d, spy_last)
-            fx_d = _safe_asof(fx_hist, d, fx_last)
-        val = start_shares * spy_px * fx_d
+        d = idx[-1] if i == len(months) - 1 else (m if m in idx else idx[idx >= m][0])
         rows.append({
             "월": m.strftime("%Y-%m"),
-            "SPY(USD)": round(spy_px, 2),
-            "환율": round(fx_d, 1),
-            "평가액(원)": round(val),
-            "수익률(%)": round((val / start_krw - 1) * 100, 2) if start_krw else 0.0,
+            "SPY(USD)": round(_safe_asof(spy, d, spy_last), 2),
+            "S&P500 수익금(원)": round(float(spy_profit.loc[d])),
+            "내 수익금(원)": round(float(my_profit.loc[d])),
         })
 
-    sim_now = float(sim.iloc[-1])
-    my_now = float(my_hold.iloc[-1])
+    spy_p = float(spy_profit.iloc[-1])
+    my_p = float(my_profit.iloc[-1])
     summary = {
         "시작월": T0.strftime("%Y-%m"),
         "시작금액": round(start_krw),
         "SPY시작가": round(spy_T0, 2),
-        "매수주수": round(start_shares, 4),
-        "현재평가액": round(sim_now),
-        "총수익": round(sim_now - start_krw),
-        "수익률(%)": round((sim_now / start_krw - 1) * 100, 2) if start_krw else 0.0,
-        "내실제현재자산": round(my_now),
+        "S&P500수익금": round(spy_p),
+        "내수익금": round(my_p),
+        "차이": round(my_p - spy_p),
     }
     return ts, pd.DataFrame(rows), summary
 

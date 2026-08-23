@@ -175,7 +175,7 @@
       <div id="fx-chart" style="height:380px" class="text-secondary">환율 탭을 선택하면 최근 10년 USD/KRW 환율과 달러 평단가를 불러옵니다…</div>
     </div>
     <div class="tab-pane fade" id="t-dca">
-      <p class="text-secondary small mb-2"><b>시작월</b>을 정하면, 그 시점의 <b>내 자산(보유 평가액)</b>을 그때 <b>전부 S&P500(SPY)에 일시투자</b>해 지금까지 보유했다면의 결과를, 내 실제 포트폴리오와 비교해 보여줍니다.</p>
+      <p class="text-secondary small mb-2"><b>시작월</b>을 정하면, 그 시점의 <b>내 자산</b>을 그때 전부 S&P500(SPY)에 일시투자했을 때의 <b>수익금</b>과, 이후 내 실제 투자의 <b>수익금(투자원금 제외)</b>을 비교합니다. 두 선 모두 시작월 0에서 출발합니다.</p>
       <div class="d-flex gap-2 align-items-center mb-3 flex-wrap">
         <label class="small text-secondary mb-0">시작월(내 자산 기준)</label>
         <input type="month" id="dca-start" class="form-control form-control-sm" style="width:auto">
@@ -185,7 +185,7 @@
       <div id="dca-metrics" class="row g-3 mb-3"></div>
       <div id="dca-chart" style="height:420px" class="text-secondary">탭을 선택하면 시뮬레이션을 계산합니다…</div>
       <div class="table-scroll mt-3"><table class="table table-sm table-hover align-middle" id="dca-table">
-        <thead><tr><th>월</th><th class="text-end">SPY($)</th><th class="text-end">환율</th><th class="text-end">평가액(원)</th><th class="text-end">수익률(%)</th></tr></thead>
+        <thead><tr><th>월</th><th class="text-end">SPY($)</th><th class="text-end">S&P500 수익금(원)</th><th class="text-end">내 수익금(원)</th></tr></thead>
         <tbody></tbody>
       </table></div>
     </div>
@@ -272,20 +272,19 @@ async function loadDca(start) {
     if (!r.ok) { chart.innerHTML = '<span class="text-secondary">적립 시뮬레이션 데이터가 없습니다.</span>'; met.innerHTML = ''; return; }
     const j = await r.json();
     const s = j.summary || {};
-    const rc = (s['수익률(%)'] || 0) >= 0 ? 'pos' : 'neg';
+    const spyP = s['S&P500수익금'] || 0, myP = s['내수익금'] || 0, diff = s['차이'] || 0;
     const card = (label, val, sub, cls) => `<div class="col-6 col-md-3"><div class="metric"><div class="label">${label}</div><div class="value ${cls || ''}">${val}</div>${sub ? `<div class="sub ${cls || ''}">${sub}</div>` : ''}</div></div>`;
     met.innerHTML =
-      card('시작월 · 시작금액', won(s['시작금액']), (s['시작월'] || '') + ' · SPY ' + (s['SPY시작가'] || 0) + '$') +
-      card('S&P500 일시투자 현재가치', won(s['현재평가액']), (s['매수주수'] || 0) + '주 보유') +
-      `<div class="col-6 col-md-3"><div class="metric"><div class="label">총수익 / 수익률</div><div class="value ${rc}">${won(s['총수익'])}</div><div class="sub ${rc}">${(s['수익률(%)'] >= 0 ? '+' : '') + (s['수익률(%)'] || 0)}%</div></div></div>` +
-      card('내 실제 현재자산(비교)', won(s['내실제현재자산']), (s['현재평가액'] || 0) >= (s['내실제현재자산'] || 0) ? 'S&P500이 더 높음' : '내 포트폴리오가 더 높음');
+      card('시작월 · 시작금액', won(s['시작금액']), (s['시작월'] || '') + ' 기준 내 자산') +
+      card('S&P500 수익금', won(spyP), '시작금액 일시투자', spyP >= 0 ? 'pos' : 'neg') +
+      card('내 수익금(투자원금 제외)', won(myP), '실제 투자', myP >= 0 ? 'pos' : 'neg') +
+      card('차이 (내 − S&P500)', won(diff), diff >= 0 ? '내 투자가 우위' : 'S&P500이 우위', diff >= 0 ? 'pos' : 'neg');
     if (j.fig) { chart.innerHTML = ''; Plotly.newPlot('dca-chart', j.fig.data, j.fig.layout, {responsive: true, displayModeBar: false}); }
     const tb = document.querySelector('#dca-table tbody');
     tb.innerHTML = (j.monthly || []).map(m =>
       `<tr><td>${m['월']}</td><td class="text-end">${m['SPY(USD)']}</td>` +
-      `<td class="text-end">${m['환율']}</td>` +
-      `<td class="text-end">${Math.round(m['평가액(원)']).toLocaleString()}</td>` +
-      `<td class="text-end">${m['수익률(%)']}</td></tr>`).join('');
+      `<td class="text-end">${Math.round(m['S&P500 수익금(원)']).toLocaleString()}</td>` +
+      `<td class="text-end">${Math.round(m['내 수익금(원)']).toLocaleString()}</td></tr>`).join('');
   } catch (e) { chart.innerHTML = '불러오지 못했습니다.'; }
 }
 let dcaLoaded = false;
