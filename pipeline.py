@@ -419,5 +419,5 @@ def rolling_beta(combined_orders, fx, ticker=None):
     return compute_rolling_beta(combined_orders, fx, ticker)
 
 
-def spy_dca(combined_orders, fx):
-    return build_spy_dca(combined_orders, fx)
+def spy_dca(combined_orders, fx, start_ym=None):
+    return build_spy_dca(combined_orders, fx, start_ym)

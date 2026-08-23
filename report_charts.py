@@ -59,8 +59,9 @@ def dca_png(ts, my_gdf=None):
         return None
     idx = ts.index
     fig, ax = plt.subplots(figsize=(8.2, 3.5), dpi=140)
-    if "매월적립 S&P500" in ts:
-        ax.plot(idx, ts["매월적립 S&P500"], color="#636EFA", lw=2.0, label="Monthly DCA S&P500")
+    main = "시뮬레이션 자산" if "시뮬레이션 자산" in ts else "매월적립 S&P500"
+    if main in ts:
+        ax.plot(idx, ts[main], color="#636EFA", lw=2.2, label="Simulation (Hold + DCA)")
     if my_gdf is not None and not getattr(my_gdf, "empty", True) and "내 자산가치" in my_gdf:
         ax.plot(my_gdf.index, my_gdf["내 자산가치"], color="#EF553B", lw=1.8, label="My Portfolio")
     if "누적 적립원금" in ts:

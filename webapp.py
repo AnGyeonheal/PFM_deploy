@@ -305,7 +305,7 @@ def api_fx(request: Request):
 
 
 @app.get("/api/dca")
-def api_dca(request: Request):
+def api_dca(request: Request, start: str = ""):
     user = _current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -313,24 +313,28 @@ def api_dca(request: Request):
     orders = data["combined_orders"]
     if not orders:
         return JSONResponse({"error": "no_data"}, status_code=404)
-    ts, monthly, summary = pipeline.spy_dca(orders, data["fx_rate"])
+    ts, monthly, summary = pipeline.spy_dca(orders, data["fx_rate"], start or None)
     if ts is None or ts.empty:
         return JSONResponse({"error": "no_dca"}, status_code=404)
     import plotly.graph_objects as go
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=ts.index, y=ts["매월적립 S&P500"], name="매월 적립 S&P500", mode="lines",
-                             line=dict(color="#636EFA", width=2.2),
-                             hovertemplate="%{x|%Y-%m-%d}<br>적립 S&P500 %{y:,.0f}원<extra></extra>"))
+    fig.add_trace(go.Scatter(x=ts.index, y=ts["시뮬레이션 자산"], name="시뮬레이션 자산(기존보유+적립)", mode="lines",
+                             line=dict(color="#636EFA", width=2.4),
+                             hovertemplate="%{x|%Y-%m-%d}<br>시뮬 자산 %{y:,.0f}원<extra></extra>"))
     gdf = pipeline.growth_frame(orders, data["fx_rate"], None)
     if gdf is not None and not gdf.empty and "내 자산가치" in gdf:
-        fig.add_trace(go.Scatter(x=gdf.index, y=gdf["내 자산가치"], name="내 포트폴리오", mode="lines",
+        fig.add_trace(go.Scatter(x=gdf.index, y=gdf["내 자산가치"], name="내 포트폴리오(실제)", mode="lines",
                                  line=dict(color="#EF553B", width=2.0),
-                                 hovertemplate="%{x|%Y-%m-%d}<br>내 포트폴리오 %{y:,.0f}원<extra></extra>"))
+                                 hovertemplate="%{x|%Y-%m-%d}<br>실제 %{y:,.0f}원<extra></extra>"))
+    if "기존 보유분" in ts and float(ts["기존 보유분"].max()) > 0:
+        fig.add_trace(go.Scatter(x=ts.index, y=ts["기존 보유분"], name="기존 보유분(소득 전)", mode="lines",
+                                 line=dict(color="#00A676", width=1.4, dash="dash"),
+                                 hovertemplate="%{x|%Y-%m-%d}<br>기존 보유분 %{y:,.0f}원<extra></extra>"))
     fig.add_trace(go.Scatter(x=ts.index, y=ts["누적 적립원금"], name="누적 적립원금", mode="lines",
                              line=dict(color="#9AA4AE", width=1.4, dash="dot"),
                              hovertemplate="%{x|%Y-%m-%d}<br>누적 적립원금 %{y:,.0f}원<extra></extra>"))
     fig.update_layout(margin=dict(t=10, r=10, l=10, b=10), height=420,
-                      legend=dict(orientation="h", y=1.06))
+                      legend=dict(orientation="h", y=1.08))
     return JSONResponse({"fig": _fig_json(fig), "summary": summary,
                          "monthly": monthly.to_dict("records") if not monthly.empty else []})
 
