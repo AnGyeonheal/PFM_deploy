@@ -698,13 +698,13 @@ def build_spy_dca(orders, fx_now=1400.0, start_ym=None):
     mask = idx >= T0_eff
     sim.loc[mask] = start_shares * spy_daily.loc[mask] * fx_daily.loc[mask]
 
-    # 내 투자원금(수익금 계산용): 시작월 시점 자산 + 이후 추가 매수 원가(누적)
+    # 내 투자원금(수익금 계산용): 시작월 시점 자산 + 이후 순투입(추가 매수 − 매도 회수)
     my_principal = pd.Series(0.0, index=idx)
     my_principal.loc[mask] = start_krw
-    for r in buys:
+    for r in recs:
         if r["date"] >= T0_eff:
-            cost = r["amount"] * _safe_asof(fx_hist, r["date"], fx_last) if r["currency"] == "USD" else r["amount"]
-            my_principal.loc[my_principal.index >= r["date"]] += cost
+            cf = r["amount"] * _safe_asof(fx_hist, r["date"], fx_last) if r["currency"] == "USD" else r["amount"]
+            my_principal.loc[my_principal.index >= r["date"]] += (1 if r["side"] == "BUY" else -1) * cf
 
     # 투자원금을 제외한 '수익금'만 비교 (둘 다 시작월 기준 0에서 출발)
     spy_profit = pd.Series(0.0, index=idx)
