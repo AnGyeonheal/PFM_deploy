@@ -528,6 +528,73 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
     return out
 
 
+def build_twr_comparison(orders, fx_now=1400.0, ticker=None, period="10y"):
+    """투자금(현금흐름) 효과를 제거한 시간가중수익률(TWR) 비교.
+    월급 등 추가 투입과 무관하게 '1원당 성과'로 내 포트폴리오 vs S&P500(원화)을 비교합니다.
+    둘 다 시작 0%에서 출발. 반환: DataFrame[내 수익률(%), S&P500 수익률(%)]
+    """
+    recs = _trade_records(orders)
+    if ticker:
+        recs = [r for r in recs if r["symbol"] == ticker]
+    if not recs:
+        return pd.DataFrame()
+    symbols = sorted(set(r["symbol"] for r in recs))
+    spy = get_history(BENCHMARK_TICKER, period=period)
+    fx_hist = get_usdkrw_history(period)
+    if spy.empty:
+        return pd.DataFrame()
+    start = min(r["date"] for r in recs)
+    idx = pd.date_range(start=start, end=spy.index.max(), freq="D")
+
+    def align(s):
+        return s.reindex(idx.union(s.index)).ffill().reindex(idx).bfill()
+
+    fx_daily = align(fx_hist) if not fx_hist.empty else pd.Series(fx_now, index=idx)
+    spy_daily = align(spy)
+    sym_cur = {s: next(r["currency"] for r in recs if r["symbol"] == s) for s in symbols}
+    sym_hist = {}
+    for s in symbols:
+        h = get_history(to_yf_ticker(s, "KR" if sym_cur[s] == "KRW" else "US"), period=period)
+        if not h.empty:
+            sym_hist[s] = align(h)
+
+    recs_sorted = sorted(recs, key=lambda r: r["date"])
+    my_val = pd.Series(0.0, index=idx)
+    for s in symbols:
+        if s not in sym_hist:
+            continue
+        qty = pd.Series(0.0, index=idx)
+        for r in [x for x in recs_sorted if x["symbol"] == s]:
+            qty.loc[qty.index >= r["date"]] += (1 if r["side"] == "BUY" else -1) * r["qty"]
+        my_val = my_val.add(qty * sym_hist[s] * (fx_daily if sym_cur[s] == "USD" else 1.0), fill_value=0)
+
+    invested = pd.Series(0.0, index=idx)
+    for r in recs_sorted:
+        fx_d = _safe_asof(fx_hist, r["date"], fx_now)
+        cf = r["amount"] * fx_d if r["currency"] == "USD" else r["amount"]
+        invested.loc[invested.index >= r["date"]] += (1 if r["side"] == "BUY" else -1) * cf
+
+    # 시간가중수익률: 기여금(입출금) 제거한 일간 수익률을 누적 곱
+    prev = my_val.shift(1)
+    contrib = invested.diff().fillna(0.0)
+    r_my = ((my_val - prev - contrib) / prev).where(prev > 1.0)
+    r_my = r_my.replace([float("inf"), float("-inf")], pd.NA).fillna(0.0).clip(-0.95, 5.0)
+    my_twr = (1.0 + r_my).cumprod()
+    market = spy_daily * fx_daily
+
+    active = my_val[my_val > 0]
+    if active.empty:
+        return pd.DataFrame()
+    t0 = active.index[0]
+    my_twr = my_twr / float(my_twr.loc[t0])
+    spy_twr = market / float(market.loc[t0])
+    out = pd.DataFrame({
+        "내 수익률(%)": (my_twr - 1.0) * 100,
+        "S&P500 수익률(%)": (spy_twr - 1.0) * 100,
+    })
+    return out.loc[out.index >= t0]
+
+
 def build_ticker_price_trades(orders, ticker, start=None):
     """개별 종목의 주가 시계열과 내 매수/매도 시점(체결단가·수량, native)을 반환합니다.
     반환: (price(Series, native), buys(DataFrame[date,price,qty]), sells(DataFrame[date,price,qty]), currency)

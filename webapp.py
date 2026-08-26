@@ -144,7 +144,7 @@ def dashboard(request: Request, refresh: int = 0):
 
 # ─────────────────────────── 성장 추이 차트(JSON) ───────────────────────────
 @app.get("/api/growth")
-def api_growth(request: Request, ticker: str = ""):
+def api_growth(request: Request, ticker: str = "", mode: str = "value"):
     user = _current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -160,6 +160,24 @@ def api_growth(request: Request, ticker: str = ""):
     import json as _json
 
     tk = ticker or None
+
+    if mode == "return":
+        rdf = pipeline.twr_comparison(orders, fx, tk)
+        if rdf is None or rdf.empty:
+            return JSONResponse({"error": "no_return"}, status_code=404)
+        rfig = go.Figure()
+        rfig.add_trace(go.Scatter(x=rdf.index, y=rdf["내 수익률(%)"], name="내 수익률", mode="lines",
+                                  line=dict(color="#EF553B", width=2.4),
+                                  hovertemplate="%{x|%Y-%m-%d}<br>내 수익률 %{y:.1f}%<extra></extra>"))
+        rfig.add_trace(go.Scatter(x=rdf.index, y=rdf["S&P500 수익률(%)"], name="S&P500 수익률", mode="lines",
+                                  line=dict(color="#636EFA", width=2.0, dash="dash"),
+                                  hovertemplate="%{x|%Y-%m-%d}<br>S&P500 수익률 %{y:.1f}%<extra></extra>"))
+        rfig.add_hline(y=0, line_dash="dot", line_color="#B0B8C1")
+        rfig.update_yaxes(title_text="수익률(%)", ticksuffix="%")
+        rfig.update_layout(margin=dict(t=10, r=10, l=10, b=10), height=460,
+                           legend=dict(orientation="h", y=1.05))
+        return JSONResponse(_json.loads(_json.dumps(rfig, cls=plotly.utils.PlotlyJSONEncoder)))
+
     gdf = pipeline.growth_frame(orders, fx, tk)
     if gdf is None or gdf.empty:
         return JSONResponse({"error": "no_growth"}, status_code=404)

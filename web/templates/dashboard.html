@@ -70,7 +70,11 @@
 <div class="section">
   <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
     <h5 class="mb-0">보유 자산 성장 · S&P500 비교 · 매수/매도 금액</h5>
-    <div class="d-flex gap-2">
+    <div class="d-flex gap-2 align-items-center flex-wrap">
+      <div class="btn-group btn-group-sm" role="group" id="growth-mode">
+        <button type="button" class="btn btn-outline-secondary active" data-mode="value">자산가치(원)</button>
+        <button type="button" class="btn btn-outline-secondary" data-mode="return">수익률(%)</button>
+      </div>
       <select id="growth-ticker" class="form-select form-select-sm" style="width:auto">
         <option value="">전체 자산(합산)</option>
         {% for t in tickers %}<option value="{{ t }}">{{ name_map.get(t, t) }} ({{ t }})</option>{% endfor %}
@@ -108,6 +112,7 @@
             <li><span style="color:#16A34A">★ 연 최대 알파</span> / <span style="color:#DC2626">▼ 연 최소 알파</span> : 해마다 S&P500 대비 초과수익(알파)이 가장 컸/작았던 시점.</li>
             <li><b style="color:#8B5CF6">베타(60일)</b> (개별 종목) : 최근 60일 기준 시장 민감도. 1보다 높으면 시장보다 변동이 큽니다.</li>
             <li><b style="color:#16A34A">매수 금액</b> / <b style="color:#DC2626">매도 금액</b> : 막대에 커서를 올리면 날짜·종목·금액(원)이 표시됩니다.</li>
+            <li><b>자산가치(원) / 수익률(%) 토글</b> : '수익률(%)'은 투자금(월급) 추가 효과를 제거한 1원당 시간가중수익률(TWR)입니다. 내 수익률 선이 S&P500 수익률 선 위에 있으면, 넣은 돈과 무관하게 종목 선택이 지수를 이겼다는 뜻입니다. 두 선 모두 0%에서 시작합니다.</li>
           </ul>
           <div class="mb-0"><b>해석</b> : 빨간 선(내 자산)이 파란 선(S&P500) 위에 있으면 지수 대비 초과성과, 순투자원금 위에 있으면 순수익 상태입니다.</div>
         </div>
@@ -210,18 +215,26 @@
 {% block scripts %}
 <script>
 const gEl = document.getElementById('growth');
+let growthMode = 'value';
 async function loadGrowth(ticker) {
   if (!gEl) return;
   gEl.innerHTML = '불러오는 중…';
   try {
-    const r = await fetch('/api/growth?ticker=' + encodeURIComponent(ticker || ''));
+    const r = await fetch('/api/growth?ticker=' + encodeURIComponent(ticker || '') + '&mode=' + growthMode);
     if (!r.ok) { gEl.innerHTML = '<span class="text-secondary">성장 추이 데이터가 없습니다.</span>'; return; }
     const fig = await r.json();
     Plotly.newPlot('growth', fig.data, fig.layout, {responsive:true, displayModeBar:false});
   } catch(e) { gEl.innerHTML = '차트를 불러오지 못했습니다.'; }
 }
 const sel = document.getElementById('growth-ticker');
-if (sel) { sel.addEventListener('change', e => loadGrowth(e.target.value)); loadGrowth(''); }
+if (sel) sel.addEventListener('change', e => loadGrowth(e.target.value));
+document.querySelectorAll('#growth-mode button').forEach(b => b.addEventListener('click', () => {
+  growthMode = b.dataset.mode;
+  document.querySelectorAll('#growth-mode button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  loadGrowth(sel ? sel.value : '');
+}));
+loadGrowth('');
 
 const pdfBtn = document.getElementById('pdf-download');
 if (pdfBtn) pdfBtn.addEventListener('click', () => {
