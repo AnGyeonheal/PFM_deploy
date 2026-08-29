@@ -5,7 +5,7 @@
 """
 import pandas as pd
 
-from benchmark import to_yf_ticker, get_history, get_usdkrw_history
+from benchmark import to_yf_ticker, get_history, get_usdkrw_history, get_native_price_now
 
 
 def _fx_asof(fx_hist, date, fx_now):
@@ -28,13 +28,13 @@ def _records(orders):
             continue
         raw = ex.get("filledAt") or o.get("orderedAt")
         try:
-            date = pd.to_datetime(raw).tz_localize(None).normalize()
+            ts = pd.to_datetime(raw).tz_localize(None)
         except (TypeError, ValueError):
             try:
-                date = pd.to_datetime(raw, utc=True).tz_localize(None).normalize()
+                ts = pd.to_datetime(raw, utc=True).tz_localize(None)
             except Exception:
                 continue
-        if pd.isna(date):
+        if pd.isna(ts):
             continue
         recs.append({
             "symbol": o.get("symbol"),
@@ -43,7 +43,8 @@ def _records(orders):
             "qty": qty,
             "price": amt / qty,
             "amount": amt,
-            "date": date,
+            "date": ts.normalize(),
+            "ts": ts,  # 같은 날 매수→매도 순서 보존을 위한 체결 시각(정규화 전)
         })
     return recs
 
@@ -66,9 +67,7 @@ def compute_performance_summary(orders, fx_now=1400.0, div_krw_native=0.0, div_u
     for s in symbols:
         cur = next(r["currency"] for r in recs if r["symbol"] == s)
         cur_map[s] = cur
-        yft = to_yf_ticker(s, "KR" if cur == "KRW" else "US")
-        h = get_history(yft, period="5d")
-        price_now[s] = float(h.iloc[-1]) if (not h.empty and pd.notna(h.iloc[-1])) else None
+        price_now[s] = get_native_price_now(s, "KR" if cur == "KRW" else "US")
 
     t = dict(
         realized_price_krw=0.0, realized_fx_krw=0.0,
@@ -80,7 +79,7 @@ def compute_performance_summary(orders, fx_now=1400.0, div_krw_native=0.0, div_u
 
     for s in symbols:
         cur = cur_map[s]
-        srecs = sorted((r for r in recs if r["symbol"] == s), key=lambda r: r["date"])
+        srecs = sorted((r for r in recs if r["symbol"] == s), key=lambda r: r["ts"])
         qty = cost_native = cost_krw = 0.0
         for r in srecs:
             fx_d = _fx_asof(fx_hist, r["date"], fx_now) if cur == "USD" else 1.0
@@ -166,6 +165,7 @@ def compute_performance_summary(orders, fx_now=1400.0, div_krw_native=0.0, div_u
 def build_holdings_breakdown(orders, fx_now=1400.0, name_map=None, div_krw_by_ticker=None):
     """종목별로 분할매도를 반영한 평균단가 회계 표를 만듭니다.
     청산 종목은 '매도 시점 실현' 기준(현재가 아님), 보유 종목은 잔여수량 평가 기준으로 계산합니다.
+    미국(USD) 종목은 달러 네이티브 컬럼과 환차 제거된 달러 기준 수익률(%)을 함께 제공합니다.
     누적배당금은 검증된 임포트 기록(div_krw_by_ticker: {티커: 원화배당})만 사용합니다.
     """
     name_map = name_map or {}
@@ -182,17 +182,16 @@ def build_holdings_breakdown(orders, fx_now=1400.0, name_map=None, div_krw_by_ti
     for s in symbols:
         cur = next(r["currency"] for r in recs if r["symbol"] == s)
         cur_map[s] = cur
-        yft = to_yf_ticker(s, "KR" if cur == "KRW" else "US")
-        h = get_history(yft, period="5d")
-        price_now[s] = float(h.iloc[-1]) if (not h.empty and pd.notna(h.iloc[-1])) else None
+        price_now[s] = get_native_price_now(s, "KR" if cur == "KRW" else "US")
 
     rows = []
     for s in symbols:
         cur = cur_map[s]
-        srecs = sorted((r for r in recs if r["symbol"] == s), key=lambda r: r["date"])
+        srecs = sorted((r for r in recs if r["symbol"] == s), key=lambda r: r["ts"])
         qty = cost_native = cost_krw = 0.0
         buy_qty = buy_native = buy_krw = 0.0
         realized_pnl_krw = sell_proceeds_krw = 0.0
+        realized_pnl_native = sell_proceeds_native = 0.0
         for r in srecs:
             fx_d = _fx_asof(fx_hist, r["date"], fx_now) if cur == "USD" else 1.0
             if r["side"] == "BUY":
@@ -206,13 +205,18 @@ def build_holdings_breakdown(orders, fx_now=1400.0, name_map=None, div_krw_by_ti
                 if qty <= 1e-9:
                     continue
                 sell_qty = min(r["qty"], qty)
+                avg_native_per = cost_native / qty
                 avg_krw_per = cost_krw / qty
-                proceeds_krw = sell_qty * r["price"] * fx_d
+                cost_out_native = avg_native_per * sell_qty
                 cost_out_krw = avg_krw_per * sell_qty
+                proceeds_native = sell_qty * r["price"]  # 매도대금(네이티브) — 환율 미적용
+                proceeds_krw = sell_qty * r["price"] * fx_d
+                realized_pnl_native += proceeds_native - cost_out_native
                 realized_pnl_krw += proceeds_krw - cost_out_krw
+                sell_proceeds_native += proceeds_native
                 sell_proceeds_krw += proceeds_krw
                 qty -= sell_qty
-                cost_native -= (cost_native / (qty + sell_qty)) * sell_qty
+                cost_native -= cost_out_native
                 cost_krw -= cost_out_krw
 
         if buy_qty <= 1e-9:
@@ -222,30 +226,38 @@ def build_holdings_breakdown(orders, fx_now=1400.0, name_map=None, div_krw_by_ti
         held_qty = qty if qty > 1e-9 else 0.0
 
         pn = price_now.get(s)
-        unreal_pnl_krw = 0.0
+        unreal_pnl_krw = unreal_pnl_native = 0.0
         if held_qty > 0 and pn is not None:
             cur_val_krw = pn * held_qty * (fx_now if cur == "USD" else 1.0)
             unreal_pnl_krw = cur_val_krw - cost_krw
+            unreal_pnl_native = pn * held_qty - cost_native  # 달러 기준 미실현손익(환차 제외)
 
-        # 투자원금 = 현재 보유분의 매입원가(청산 종목은 실현된 총 매수원가). 수익률은 그에 대응.
+        # 투자원금 = 현재 보유분의 매입원가(청산 종목은 실현된 총 매수원가).
+        # 수익률(%)은 네이티브(미국=달러) 기준 → 환차 제거된 순수 주가 수익률.
         if held_qty > 0:
             principal_krw = cost_krw
-            ret_pct = (unreal_pnl_krw / cost_krw * 100) if cost_krw else 0.0
+            principal_native = cost_native
+            ret_pct = (unreal_pnl_native / cost_native * 100) if cost_native else 0.0
         else:
             principal_krw = buy_krw
-            ret_pct = (realized_pnl_krw / buy_krw * 100) if buy_krw else 0.0
+            principal_native = buy_native
+            ret_pct = (realized_pnl_native / buy_native * 100) if buy_native else 0.0
 
+        is_usd = cur == "USD"
         rows.append({
             "종목": name_map.get(s, s),
             "티커": s,
             "통화": cur,
             "상태": "보유중" if held_qty > 0 else "청산",
             "보유수량": round(held_qty, 4),
-            "평단가(달러)": round(avg_buy_native, 2) if cur == "USD" else None,
+            "평단가(달러)": round(avg_buy_native, 2) if is_usd else None,
             "평단가(원화)": round(avg_buy_krw, 2),
+            "투자원금(달러)": round(principal_native, 2) if is_usd else None,
             "투자원금(원)": round(principal_krw),
             "매도실현금액(원)": round(sell_proceeds_krw),
+            "실현손익(달러)": round(realized_pnl_native, 2) if is_usd else None,
             "실현손익(원)": round(realized_pnl_krw),
+            "평가손익(달러)": round(unreal_pnl_native, 2) if is_usd else None,
             "평가손익(원)": round(unreal_pnl_krw),
             "누적배당금(원)": round(div_krw_map.get(s, 0.0)),
             "수익률(%)": round(ret_pct, 2),

@@ -9,10 +9,10 @@ import pandas as pd
 
 from pm import (
     get_access_token, get_holdings, get_buying_power, get_exchange_rate,
-    get_order_history, get_stock_info,
+    get_order_history, get_stock_info, get_current_prices,
 )
 from analytics_engine import transform_to_mvp_json, build_transaction_detail
-from benchmark import get_usdkrw_history
+from benchmark import get_usdkrw_history, set_price_overrides
 from manual_holdings import (
     set_data_dir, load_manual_holdings, manual_to_orders,
     read_manual_csv, read_transactions_csv, read_dividends_csv,
@@ -320,6 +320,16 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True):
         combined_orders += transactions_to_orders(tx_df)
     if use_tx and holdings_snapshot is not None and not holdings_snapshot.empty:
         combined_orders += manual_to_orders(holdings_snapshot)
+
+    # 보유 종목 현재가: 토스 실시간 배치 시세를 주입해 최고 싱크로율 확보(연동 시). 미연동 시 pykrx·yfinance.
+    if use_toss:
+        try:
+            _syms = sorted({o.get("symbol") for o in combined_orders if o.get("symbol")})
+            _tok = get_access_token(creds.get("TOSS_CLIENT_ID"), creds.get("TOSS_CLIENT_SECRET"))
+            if _tok and _syms:
+                set_price_overrides(get_current_prices(_tok, _syms))
+        except Exception:
+            pass
 
     name_map = dict(toss_name_map)
     if has_manual:

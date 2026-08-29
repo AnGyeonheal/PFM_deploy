@@ -39,6 +39,40 @@ def _num(v):
         return v
 
 
+def build_toss_raw_df(orders, name_map=None):
+    """토스 API 원본 주문 리스트를 검토·엑셀용 DataFrame으로 평탄화합니다.
+    변환 전 원본 필드(체결수량·단가·금액·수수료·세금·시각)를 그대로 담습니다.
+    """
+    name_map = name_map or {}
+    rows = []
+    for o in orders or []:
+        ex = o.get("execution") or {}
+        rows.append({
+            "심볼": o.get("symbol"),
+            "종목명": name_map.get(o.get("symbol"), o.get("symbol")),
+            "매매구분": o.get("side"),
+            "통화": o.get("currency", "KRW"),
+            "체결수량": ex.get("filledQuantity"),
+            "체결단가": ex.get("averageFilledPrice"),
+            "체결금액": ex.get("filledAmount"),
+            "수수료": ex.get("commission"),
+            "세금": ex.get("tax"),
+            "체결시각": ex.get("filledAt"),
+            "주문시각": o.get("orderedAt"),
+            "주문상태": o.get("status") or o.get("orderState"),
+            "증권사": o.get("broker", "토스증권"),
+        })
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    try:
+        df["_sort"] = pd.to_datetime(df["체결시각"], utc=True, errors="coerce")
+        df = df.sort_values("_sort", ascending=False, na_position="last").drop(columns=["_sort"])
+    except Exception:
+        pass
+    return df.reset_index(drop=True)
+
+
 def _summary_frame(summary, perf, ab, fx_rate, meta):
     rows = []
     meta = meta or {}
@@ -103,7 +137,7 @@ def _fx_frame(usd_cost, fx_pnl_df):
 def build_full_excel(summary=None, perf=None, ab=None, holdings=None,
                      detail_df=None, holdings_breakdown=None, dividends_df=None,
                      usd_cost=None, fx_pnl_df=None, raw_tx=None, raw_holdings=None,
-                     raw_dividends=None, fx_rate=None, meta=None):
+                     raw_dividends=None, fx_rate=None, meta=None, raw_toss=None):
     """모든 데이터를 다중 시트 엑셀 바이트로 반환합니다."""
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -113,6 +147,9 @@ def build_full_excel(summary=None, perf=None, ab=None, holdings=None,
 
         # 2) 전체 거래내역 (토스 + 임포트 통합)
         _write(writer, "거래내역", detail_df)
+
+        # 2-1) 토스 API 원본(raw) 주문 데이터
+        _write(writer, "토스_원본데이터", raw_toss)
 
         # 3) 달러 매매 기록 (통화=USD)
         if detail_df is not None and not detail_df.empty and "통화" in detail_df.columns:

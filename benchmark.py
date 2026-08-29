@@ -89,6 +89,60 @@ def get_usdkrw_history(period="2y"):
     return get_history("KRW=X", period=period)
 
 
+# ─────────────────── 보유 종목 현재가(네이티브) 제공 ───────────────────
+# 우선순위: 토스 실시간 배치(_PRICE_OVERRIDE) → pykrx(국내 공식 종가) → yfinance 최근 종가.
+# pipeline이 로드 시 토스 배치 시세를 set_price_overrides()로 주입해 최고 싱크로율을 확보합니다.
+_PRICE_OVERRIDE = {}
+
+
+def set_price_overrides(price_map):
+    """토스 실시간 배치 현재가 {symbol: price}를 주입(병합)합니다. 시세는 사용자 무관이라 병합해도 안전."""
+    if price_map:
+        _PRICE_OVERRIDE.update({str(k): v for k, v in price_map.items() if v})
+
+
+def _pykrx_close(symbol):
+    """pykrx로 국내 종목의 최신 종가(KRX 공식)를 반환. 실패 시 None."""
+    import datetime as _dt
+    try:
+        from pykrx import stock
+    except Exception:
+        return None
+    code = str(symbol).zfill(6)
+    today = _dt.datetime.now().strftime("%Y%m%d")
+    frm = (_dt.datetime.now() - _dt.timedelta(days=14)).strftime("%Y%m%d")
+    try:
+        df = stock.get_market_ohlcv_by_date(frm, today, code)
+        if df is not None and not df.empty:
+            return float(df["종가"].iloc[-1])
+    except Exception:
+        return None
+    return None
+
+
+def get_native_price_now(symbol, country="US", market=None):
+    """보유 종목의 현재가(네이티브 통화)를 최고 싱크로율로 반환합니다.
+    토스 실시간 → pykrx(국내) → yfinance 순으로 시도. pykrx/yfinance는 TTL 캐시.
+    """
+    if symbol is None:
+        return None
+    ov = _PRICE_OVERRIDE.get(str(symbol))
+    if ov:
+        return float(ov)
+    return _memo(("pxnow", str(symbol), (country or "US").upper()),
+                 lambda: _native_price_uncached(symbol, country, market))
+
+
+def _native_price_uncached(symbol, country, market):
+    is_kr = (country or "US").upper() in ("KR", "KOR", "KOREA")
+    if is_kr:
+        p = _pykrx_close(symbol)
+        if p:
+            return p
+    h = get_history(to_yf_ticker(symbol, "KR" if is_kr else "US", market), period="5d")
+    return float(h.iloc[-1]) if (not h.empty and pd.notna(h.iloc[-1])) else None
+
+
 
 def normalize_to_100(price_series):
     """첫 유효값을 100으로 재설정(리베이스)하여 스케일·통화 차이를 통일합니다."""

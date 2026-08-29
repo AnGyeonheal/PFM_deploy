@@ -1,7 +1,9 @@
 # 비밀/환경설정
-.env
+# ⚠️ 배포 전 임시로 .env 를 커밋 허용 상태로 둠. 배포 단계에서 아래 두 줄의 주석을 해제할 것.
+# .env
 .env.*
 !.env.example
+!.env
 .streamlit/secrets.toml
 
 # 사용자 개인정보/데이터

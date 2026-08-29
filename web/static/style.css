@@ -29,3 +29,19 @@ h1,h2,h3,h4 { font-weight: 700; letter-spacing: -.02em; }
 #ai-report h2 { font-size: 1.15rem; margin-top: 1rem; }
 #ai-report h3 { font-size: 1rem; }
 .table-scroll { max-height: 460px; overflow: auto; }
+
+/* 표 셀 넘침 방지: 한 줄 유지 + 가로 스크롤로 잘림 방지 */
+.table-scroll table { margin-bottom: 0; }
+.table th, .table td { white-space: nowrap; }
+.table td.wrap, .table th.wrap { white-space: normal; word-break: keep-all; }
+
+/* 드롭다운/셀렉트: 선택값·항목이 칸을 벗어나지 않도록 */
+.form-select { max-width: 100%; text-overflow: ellipsis; }
+select.form-select[style*="width:auto"] { min-width: 160px; max-width: 260px; }
+.dropdown-menu .dropdown-item,
+.dropdown-menu label { white-space: normal; word-break: keep-all; }
+
+/* 표 검색 필터 입력 */
+.table-filter { max-width: 280px; }
+.filter-empty td { color: var(--toss-sub); text-align: center; }
+

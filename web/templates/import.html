@@ -46,7 +46,8 @@
   <p class="text-secondary small">삭제·초기화·편집 <b>직전 상태</b>로 되돌립니다. 복구할 때 현재 상태도 자동 백업되어 다시 되돌릴 수 있습니다.
     (토스 수정·삭제도 함께 복구됩니다.)</p>
   {% if snapshots %}
-  <div class="table-scroll"><table class="table table-sm align-middle">
+  <input type="search" class="form-control form-control-sm table-filter mb-2" data-filter="#tbl-snap" placeholder="🔍 시각·상황 검색">
+  <div class="table-scroll"><table id="tbl-snap" class="table table-sm align-middle">
     <thead><tr><th>시각</th><th>상황</th><th class="text-end">거래</th><th class="text-end">배당</th><th></th></tr></thead>
     <tbody>
     {% for s in snapshots %}<tr>

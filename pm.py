@@ -162,6 +162,32 @@ def get_current_price(access_token, symbol):
         print(f"[에러] 현재가({symbol}) 조회 실패: {e}")
     return None
 
+def get_current_prices(access_token, symbols, chunk=50):
+    """9-2) 여러 종목 현재가를 한 번에 조회(배치). 반환: {symbol: 현재가(float)}.
+    보유 종목 실시간 시세를 한 번의 호출로 받아 대시보드 싱크로율을 높입니다."""
+    url = 'https://openapi.tossinvest.com/api/v1/prices'
+    headers = {'Authorization': f'Bearer {access_token}'}
+    syms = [str(s) for s in dict.fromkeys(symbols) if s]  # 중복 제거·순서 유지
+    out = {}
+    for i in range(0, len(syms), chunk):
+        batch = syms[i:i + chunk]
+        try:
+            response = requests.get(url, headers=headers,
+                                    params={'symbols': ",".join(batch)}, timeout=8)
+            response.raise_for_status()
+            for r0 in response.json().get("result", []):
+                sym = r0.get("symbol")
+                for key in ("price", "lastPrice", "closePrice", "currentPrice"):
+                    if r0.get(key) is not None:
+                        try:
+                            out[sym] = float(r0[key])
+                        except (TypeError, ValueError):
+                            pass
+                        break
+        except Exception as e:
+            print(f"[에러] 배치 현재가 조회 실패({batch[:3]}…): {e}")
+    return out
+
 def get_order_history(access_token, account="1", max_pages=50):
     """7) 체결 완료된 주문(매수/매도) 전체 이력 조회 (페이지네이션)"""
     url = 'https://openapi.tossinvest.com/api/v1/orders'

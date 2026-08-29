@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}토스 원본 데이터 검토{% endblock %}
+{% macro cell(v) %}{% if v is none or v == '' %}–{% else %}{{ v }}{% endif %}{% endmacro %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <h2 class="mb-0">🧾 토스 API 원본 데이터 검토</h2>
+  <div class="d-flex gap-2">
+    <a class="btn btn-sm btn-outline-secondary" href="/raw-data?refresh=1">🔄 새로고침</a>
+    <a class="btn btn-sm btn-toss-green" href="/export-raw.xlsx">⬇️ 원본 엑셀 내보내기</a>
+    <a class="btn btn-sm btn-outline-secondary" href="/">← 대시보드</a>
+  </div>
+</div>
+
+{% if not toss_ok %}
+<div class="alert alert-warning py-2">토스 API 키가 없어 원본 데이터를 불러올 수 없습니다.
+  <a href="/settings">API 키 설정</a>에서 등록하세요.</div>
+{% elif toss_error %}
+<div class="alert alert-danger py-2">토스 연동 실패: {{ toss_error }} — <a href="/settings">키·IP 확인</a></div>
+{% endif %}
+
+<div class="section">
+  <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+    <h5 class="mb-0">🤖 AI 거래내역 점검</h5>
+    <button id="ai-check-btn" class="btn btn-sm btn-primary" onclick="runAiCheck()">AI로 거래내역 점검</button>
+  </div>
+  <p class="text-secondary small mb-2">토스 API로 가져온 거래내역을 Gemini가 교차 검토해 체결금액 불일치·선행 매수 없는 매도·중복·비정상 단가·통화 불일치 등 이상 징후를 찾습니다.</p>
+  <div id="ai-check-result"></div>
+</div>
+
+<div class="section">
+  <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+    <h5 class="mb-0">토스 원본 주문 데이터 <span class="badge bg-primary">{{ raw_count }}건</span></h5>
+    <input type="search" class="form-control form-control-sm table-filter" data-filter="#tbl-raw" placeholder="🔍 심볼·종목·구분·통화 검색">
+  </div>
+  <p class="text-secondary small">변환 전 토스 API가 반환한 체결 주문 원본입니다(수량·단가·금액·수수료·세금·시각). 검토 후 위 버튼으로 엑셀 내보내기가 가능합니다.</p>
+  <div class="table-scroll"><table id="tbl-raw" class="table table-sm table-hover align-middle">
+    <thead><tr>
+      <th>심볼</th><th>종목명</th><th>구분</th><th>통화</th>
+      <th class="text-end">체결수량</th><th class="text-end">체결단가</th><th class="text-end">체결금액</th>
+      <th class="text-end">수수료</th><th class="text-end">세금</th><th>체결시각</th><th>주문시각</th><th>상태</th>
+    </tr></thead>
+    <tbody>{% for r in raw_records %}<tr>
+      <td>{{ cell(r['심볼']) }}</td><td>{{ cell(r['종목명']) }}</td>
+      <td>{% if r['매매구분']=='BUY' %}매수{% elif r['매매구분']=='SELL' %}매도{% else %}{{ cell(r['매매구분']) }}{% endif %}</td>
+      <td>{{ cell(r['통화']) }}</td>
+      <td class="text-end">{{ cell(r['체결수량']) }}</td>
+      <td class="text-end">{{ cell(r['체결단가']) }}</td>
+      <td class="text-end">{{ cell(r['체결금액']) }}</td>
+      <td class="text-end">{{ cell(r['수수료']) }}</td>
+      <td class="text-end">{{ cell(r['세금']) }}</td>
+      <td class="small text-nowrap">{{ cell(r['체결시각']) }}</td>
+      <td class="small text-nowrap">{{ cell(r['주문시각']) }}</td>
+      <td>{{ cell(r['주문상태']) }}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  {% if not raw_records %}<p class="text-secondary small mb-0">표시할 토스 원본 주문이 없습니다.</p>{% endif %}
+</div>
+
+<div class="section">
+  <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+    <h5 class="mb-0">변환된 거래내역 (토스 + 임포트 통합)</h5>
+    <input type="search" class="form-control form-control-sm table-filter" data-filter="#tbl-detail" placeholder="🔍 날짜·증권사·종목·구분 검색">
+  </div>
+  <p class="text-secondary small">원본을 표준 형식으로 변환·통합한 거래내역입니다. 전체 데이터가 담긴 엑셀은 대시보드의 <a href="/export.xlsx">⬇️ 엑셀</a>에서 받을 수 있습니다.</p>
+  <div class="table-scroll"><table id="tbl-detail" class="table table-sm table-hover align-middle">
+    <thead><tr>
+      <th>날짜</th><th>증권사</th><th>종목명</th><th>티커</th><th>구분</th><th>통화</th>
+      <th class="text-end">수량</th><th class="text-end">체결단가</th><th class="text-end">체결금액(원)</th>
+    </tr></thead>
+    <tbody>{% for r in detail_records %}<tr>
+      <td class="text-nowrap">{{ cell(r['날짜']) }}</td><td>{{ cell(r['증권사']) }}</td>
+      <td>{{ cell(r['종목명']) }}</td><td>{{ cell(r['티커']) }}</td><td>{{ cell(r['구분']) }}</td>
+      <td>{{ cell(r['통화']) }}</td>
+      <td class="text-end">{{ cell(r['수량']) }}</td>
+      <td class="text-end">{{ cell(r['체결단가']) }}</td>
+      <td class="text-end">{{ "{:,.0f}".format(r['체결금액(원)']) if r.get('체결금액(원)') is not none else '–' }}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  {% if not detail_records %}<p class="text-secondary small mb-0">표시할 거래내역이 없습니다.</p>{% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const SEV = {"높음": "danger", "중간": "warning", "낮음": "secondary"};
+async function runAiCheck() {
+  const btn = document.getElementById('ai-check-btn');
+  const box = document.getElementById('ai-check-result');
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = '점검 중… (AI 분석)';
+  box.innerHTML = '<div class="text-secondary small">Gemini가 거래내역을 분석하고 있습니다…</div>';
+  try {
+    const r = await fetch('/raw-data/ai-check');
+    const j = await r.json();
+    if (!j.ok) {
+      box.innerHTML = '<div class="alert alert-danger py-2 mb-0">' + (j.error || '점검 실패') + '</div>';
+      return;
+    }
+    const res = j.result || {};
+    const issues = res.issues || [];
+    let html = '<div class="alert alert-info py-2">' + (res.summary || '점검 완료') + '</div>';
+    if (issues.length === 0) {
+      html += '<div class="alert alert-success py-2 mb-0">✅ 특별한 이상 징후가 발견되지 않았습니다.</div>';
+    } else {
+      html += '<div class="table-scroll"><table class="table table-sm align-middle"><thead><tr>' +
+        '<th>심각도</th><th>종목</th><th>티커</th><th>유형</th><th>설명</th><th>근거</th></tr></thead><tbody>';
+      issues.forEach(function (it) {
+        const sev = it['심각도'] || '낮음';
+        const color = SEV[sev] || 'secondary';
+        html += '<tr>' +
+          '<td><span class="badge text-bg-' + color + '">' + sev + '</span></td>' +
+          '<td>' + (it['종목명'] || '') + '</td>' +
+          '<td>' + (it['티커'] || '') + '</td>' +
+          '<td>' + (it['유형'] || '') + '</td>' +
+          '<td class="wrap">' + (it['설명'] || '') + '</td>' +
+          '<td class="wrap small text-secondary">' + (it['근거'] || '') + '</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    box.innerHTML = html;
+  } catch (e) {
+    box.innerHTML = '<div class="alert alert-danger py-2 mb-0">점검 요청 실패: ' + e + '</div>';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+</script>
+{% endblock %}

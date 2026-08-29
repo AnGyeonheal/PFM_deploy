@@ -330,6 +330,83 @@ def parse_brokerage_dividends(raw_text, broker_name="증권사"):
         return None, f"배당 파싱 중 에러: {e}"
 
 
+def review_toss_transactions(orders, name_map=None):
+    """토스 API로 가져온 거래 체결내역을 Gemini로 교차 점검해 이상 징후를 찾습니다.
+    데이터 무결성(체결금액 불일치·선행 매수 없는 매도·중복·비정상 단가·통화 불일치 등)을 검토합니다.
+    반환: (dict{"summary": str, "issues": [ {...} ]} 또는 None, 에러메시지 또는 None)
+    """
+    load_dotenv()
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요":
+        return None, "[오류] .env 파일 또는 API 키 설정에 유효한 GEMINI_API_KEY가 없습니다."
+
+    genai.configure(api_key=gemini_key, transport="rest")
+
+    name_map = name_map or {}
+    lines = []
+    for o in orders or []:
+        ex = o.get("execution") or {}
+        sym = o.get("symbol")
+        lines.append("|".join(str(x) for x in [
+            sym, name_map.get(sym, sym), o.get("side"), o.get("currency", "KRW"),
+            ex.get("filledQuantity"), ex.get("averageFilledPrice"),
+            ex.get("filledAmount"), ex.get("commission"), ex.get("tax"),
+            ex.get("filledAt") or o.get("orderedAt"),
+        ]))
+    if not lines:
+        return None, "점검할 토스 거래내역이 없습니다."
+    data_text = ("심볼|종목명|구분|통화|체결수량|체결단가|체결금액|수수료|세금|체결시각\n"
+                 + "\n".join(lines[:400]))
+
+    prompt = f"""
+당신은 증권 거래내역의 데이터 무결성을 점검하는 감사(audit) 전문가입니다.
+아래는 토스증권 API에서 가져온 체결 거래내역입니다. 각 행은 개별 체결 1건이며 '|'로 구분됩니다.
+데이터를 분석해 **이상 징후·오류 가능성**을 찾아내세요.
+
+점검 항목:
+1. 체결금액 불일치: 체결금액 ≈ 체결수량 × 체결단가 인지. 크게 어긋나면 이상.
+2. 선행 매수 없는 매도: 특정 종목의 누적 매수 수량보다 매도 수량이 많은지(공매도/데이터 누락 의심).
+3. 중복 의심: 동일 종목·구분·수량·금액·시각이 반복되는 체결.
+4. 비정상 단가/수량: 0 이하, 비현실적으로 크거나 작은 값, 자릿수 이상.
+5. 통화 불일치: 국내(6자리 숫자 코드) 종목인데 USD, 미국 종목인데 KRW 등.
+6. 시각 이상: 미래 날짜, 파싱 불가.
+
+반드시 아래 JSON만 출력하세요(설명·코드펜스 없이):
+{{
+  "summary": "전체 점검 요약 1~3문장",
+  "issues": [
+    {{"심각도": "높음|중간|낮음", "티커": "종목코드", "종목명": "이름", "유형": "점검항목", "설명": "무엇이 왜 이상한지", "근거": "관련 수치/시각"}}
+  ]
+}}
+이상이 없으면 issues는 빈 배열로 두고 summary에 정상임을 적으세요.
+
+[거래내역]
+{data_text}
+"""
+    response, err = _generate_with_fallback(prompt)
+    if response is None:
+        if _is_quota_error(err):
+            return None, "⚠️ Gemini 무료 사용량(하루 한도)을 초과했습니다. 잠시 후 다시 시도해 주세요."
+        return None, f"거래내역 점검 중 에러: {err}"
+    try:
+        text = (response.text or "").strip()
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        text = text.strip()
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            data = {"summary": "", "issues": data if isinstance(data, list) else []}
+        data.setdefault("summary", "")
+        data.setdefault("issues", [])
+        return data, None
+    except json.JSONDecodeError:
+        return None, f"AI 응답을 JSON으로 변환하지 못했습니다.\n응답: {text[:300]}"
+    except Exception as e:
+        return None, f"거래내역 점검 중 에러: {e}"
+
+
 def _build_toss_tools(token, account="1"):
     """Gemini가 자율적으로 호출할 수 있는 토스증권 API 도구 함수들을 생성합니다."""
 

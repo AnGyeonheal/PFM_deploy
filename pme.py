@@ -5,7 +5,7 @@
 """
 import pandas as pd
 
-from benchmark import to_yf_ticker, get_history, get_usdkrw_history, BENCHMARK_TICKER
+from benchmark import to_yf_ticker, get_history, get_usdkrw_history, get_native_price_now, BENCHMARK_TICKER
 
 
 def _trade_records(orders):
@@ -22,13 +22,13 @@ def _trade_records(orders):
             continue
         raw = ex.get("filledAt") or o.get("orderedAt")
         try:
-            date = pd.to_datetime(raw).tz_localize(None).normalize()
+            ts = pd.to_datetime(raw).tz_localize(None)
         except (TypeError, ValueError):
             try:
-                date = pd.to_datetime(raw, utc=True).tz_localize(None).normalize()
+                ts = pd.to_datetime(raw, utc=True).tz_localize(None)
             except Exception:
                 continue  # 날짜 파싱 실패한 주문은 건너뜀
-        if pd.isna(date):
+        if pd.isna(ts):
             continue
         recs.append({
             "symbol": o.get("symbol"),
@@ -36,8 +36,10 @@ def _trade_records(orders):
             "side": o.get("side"),
             "qty": qty,
             "amount": amt,
-            "date": date,
+            "date": ts.normalize(),
+            "ts": ts,  # 같은 날 매수→매도 순서 보존을 위한 체결 시각(정규화 전)
         })
+    recs.sort(key=lambda r: r["ts"])  # 이후 date(정규화) 재정렬 시에도 같은 날 체결순서 유지(안정정렬)
     return recs
 
 
@@ -72,13 +74,11 @@ def build_pme_table(orders, fx_now=1400.0, name_map=None):
         return pd.DataFrame()
     spy_now = float(spy_hist.iloc[-1])
 
-    # 종목별 현재가(yfinance 최근 종가)
+    # 종목별 현재가(토스 실시간 → pykrx → yfinance)
     price_now = {}
     for s in symbols:
         cur = next(r["currency"] for r in recs if r["symbol"] == s)
-        yft = to_yf_ticker(s, "KR" if cur == "KRW" else "US")
-        h = get_history(yft, period="5d")
-        price_now[s] = float(h.iloc[-1]) if (not h.empty and pd.notna(h.iloc[-1])) else None
+        price_now[s] = get_native_price_now(s, "KR" if cur == "KRW" else "US")
 
     by = {}
     for r in recs:
@@ -208,13 +208,11 @@ def build_pme_growth(orders, fx_now=1400.0):
 
 
 def _current_prices(symbols, currencies):
-    """종목별 현재가(yfinance 최근 종가) 조회. 반환: {symbol: price(native)}"""
+    """종목별 현재가 조회(토스 실시간 → pykrx → yfinance). 반환: {symbol: price(native)}"""
     price_now = {}
     for s in symbols:
         cur = currencies.get(s, "KRW")
-        yft = to_yf_ticker(s, "KR" if cur == "KRW" else "US")
-        h = get_history(yft, period="5d")
-        price_now[s] = float(h.iloc[-1]) if (not h.empty and pd.notna(h.iloc[-1])) else None
+        price_now[s] = get_native_price_now(s, "KR" if cur == "KRW" else "US")
     return price_now
 
 

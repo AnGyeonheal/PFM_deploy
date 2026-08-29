@@ -25,7 +25,7 @@ from manual_holdings import (
     clear_all_imports, delete_broker_imports, imported_brokers,
     snapshot_imports, list_snapshots, restore_snapshot,
 )
-from exporter import build_full_excel
+from exporter import build_full_excel, build_toss_raw_df
 from report import build_portfolio_pdf
 from ai_copilot import generate_rebalancing_report, chat_with_portfolio
 from advanced_analytics import compute_fx_pnl
@@ -597,9 +597,77 @@ def export_xlsx(request: Request):
         detail_df=data["detail_df"], holdings_breakdown=data["breakdown"],
         dividends_df=pd.DataFrame(data["dividends_rows"]), usd_cost=usd_cost, fx_pnl_df=fx_df,
         raw_tx=read_transactions_csv(), raw_holdings=read_manual_csv(), raw_dividends=read_dividends_csv(),
+        raw_toss=build_toss_raw_df(data.get("toss_orders_raw"), data.get("name_map")),
         fx_rate=data["fx_rate"], meta={"사용자": user, "데이터 소스": SOURCE_LABELS.get("both")})
     fname = f"portfolio_data_{user}_{time.strftime('%Y%m%d_%H%M')}.xlsx"
     return StreamingResponse(io.BytesIO(xlsx),
+                             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f"attachment; filename={fname}"})
+
+
+# ─────────────── 토스 API 원본 데이터 검토 · 내보내기 ───────────────
+@app.get("/raw-data", response_class=HTMLResponse)
+def raw_data_page(request: Request, refresh: int = 0):
+    user = _current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    data = get_portfolio(user, force=bool(refresh))
+    raw_df = build_toss_raw_df(data.get("toss_orders_raw"), data.get("name_map"))
+    detail_df = data["detail_df"]
+    return templates.TemplateResponse(request, "raw_data.html", {
+        "request": request, "user": user,
+        "toss_ok": auth.has_toss_credentials(user), "toss_error": data["toss_error"],
+        "raw_records": _df_records(raw_df),
+        "raw_count": 0 if raw_df is None or raw_df.empty else len(raw_df),
+        "detail_records": _df_records(
+            detail_df.sort_values("체결일시", ascending=False) if (detail_df is not None and not detail_df.empty) else detail_df,
+            limit=500),
+    })
+
+
+@app.get("/raw-data/ai-check")
+def raw_data_ai_check(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"ok": False, "error": "로그인이 필요합니다."}, status_code=401)
+    data = get_portfolio(user)
+    orders = data.get("toss_orders_raw") or []
+    if not orders:
+        return JSONResponse({"ok": False, "error": "점검할 토스 거래내역이 없습니다. API 키를 연동하세요."})
+    from ai_copilot import review_toss_transactions
+    result, err = review_toss_transactions(orders, data.get("name_map"))
+    if err:
+        return JSONResponse({"ok": False, "error": err})
+    return JSONResponse({"ok": True, "result": result})
+
+
+@app.get("/export-raw.xlsx")
+def export_raw_xlsx(request: Request):
+    user = _current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    data = get_portfolio(user)
+    raw_toss = build_toss_raw_df(data.get("toss_orders_raw"), data.get("name_map"))
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        if raw_toss is not None and not raw_toss.empty:
+            raw_toss.to_excel(writer, sheet_name="토스_원본데이터", index=False)
+        detail_df = data["detail_df"]
+        if detail_df is not None and not detail_df.empty:
+            _san = detail_df.copy()
+            for c in _san.columns:
+                try:
+                    if pd.api.types.is_datetime64tz_dtype(_san[c]):
+                        _san[c] = _san[c].dt.tz_localize(None)
+                except Exception:
+                    pass
+            _san.to_excel(writer, sheet_name="변환_거래내역", index=False)
+        if raw_toss is None or raw_toss.empty:  # 최소 1개 시트 보장
+            pd.DataFrame([{"안내": "토스 API 원본 데이터가 없습니다. API 키를 연동하세요."}]).to_excel(
+                writer, sheet_name="안내", index=False)
+    buf.seek(0)
+    fname = f"toss_raw_{user}_{time.strftime('%Y%m%d_%H%M')}.xlsx"
+    return StreamingResponse(buf,
                              media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                              headers={"Content-Disposition": f"attachment; filename={fname}"})
 

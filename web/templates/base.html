@@ -17,6 +17,7 @@
     <div class="navbar-nav me-auto">
       <a class="nav-link" href="/">대시보드</a>
       <a class="nav-link" href="/import">거래내역 임포트</a>
+      <a class="nav-link" href="/raw-data">원본 데이터</a>
       <a class="nav-link" href="/edit-data">데이터 편집</a>
       <a class="nav-link" href="/settings">API 키 설정</a>
     </div>
@@ -32,5 +33,56 @@
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 {% block scripts %}{% endblock %}
+<script>
+// 공용 표 필터: <input data-filter="#tableId"> 로 해당 표의 tbody 행을 텍스트/입력값 기준으로 걸러냅니다.
+(function () {
+  function rowText(tr) {
+    let t = tr.textContent.toLowerCase();
+    tr.querySelectorAll('input, select, textarea').forEach(function (el) {
+      const v = el.value || (el.selectedOptions && el.selectedOptions[0] && el.selectedOptions[0].text) || '';
+      t += ' ' + String(v).toLowerCase();
+    });
+    return t;
+  }
+  function apply(input) {
+    const table = document.querySelector(input.getAttribute('data-filter'));
+    if (!table) return;
+    const q = input.value.trim().toLowerCase();
+    let shown = 0;
+    table.querySelectorAll('tbody tr').forEach(function (tr) {
+      if (tr.classList.contains('filter-empty')) return;
+      const ok = !q || rowText(tr).includes(q);
+      tr.style.display = ok ? '' : 'none';
+      if (ok) shown++;
+    });
+    const tbody = table.querySelector('tbody');
+    if (tbody) {
+      let empty = tbody.querySelector('tr.filter-empty');
+      if (shown === 0 && q) {
+        if (!empty) {
+          empty = document.createElement('tr');
+          empty.className = 'filter-empty';
+          const cols = (table.querySelectorAll('thead th').length) || 1;
+          empty.innerHTML = '<td colspan="' + cols + '">검색 결과가 없습니다</td>';
+          tbody.appendChild(empty);
+        }
+        empty.style.display = '';
+      } else if (empty) {
+        empty.style.display = 'none';
+      }
+    }
+  }
+  window.initTableFilters = function () {
+    document.querySelectorAll('input[data-filter]').forEach(function (input) {
+      if (input._filterBound) return;
+      input._filterBound = true;
+      input.addEventListener('input', function () { apply(input); });
+    });
+  };
+  // 서버 렌더 표 + 동적 생성 표(편집 페이지) 모두 커버하도록 로드 후 한 번 더 바인딩
+  document.addEventListener('DOMContentLoaded', window.initTableFilters);
+  window.addEventListener('load', window.initTableFilters);
+})();
+</script>
 </body>
 </html>
