@@ -37,7 +37,7 @@
       <input class="form-check-input" type="checkbox" id="g-fx" {{ 'checked' if inc_fx else '' }}>
       <label class="form-check-label small" for="g-fx">환차손익 반영</label>
     </div>
-    <span class="small text-secondary">아래 모든 수익률·손익·알파·베타·성장 차트에 일괄 적용됩니다.</span>
+    <span class="small text-secondary">아래 수익률·손익·알파·베타 지표에 일괄 적용됩니다. (성장 차트는 자체 배당·환차 토글로 즉시 조정)</span>
   </div>
 </div>
 
@@ -96,6 +96,24 @@
       <div class="btn-group btn-group-sm" role="group" id="growth-mode">
         <button type="button" class="btn btn-outline-secondary active" data-mode="value">자산가치(원)</button>
         <button type="button" class="btn btn-outline-secondary" data-mode="return">수익률(%)</button>
+      </div>
+      <div class="btn-group btn-group-sm" role="group" id="growth-range">
+        <button type="button" class="btn btn-outline-secondary" data-range="1m">1개월</button>
+        <button type="button" class="btn btn-outline-secondary" data-range="3m">3개월</button>
+        <button type="button" class="btn btn-outline-secondary" data-range="6m">6개월</button>
+        <button type="button" class="btn btn-outline-secondary" data-range="1y">1년</button>
+        <button type="button" class="btn btn-outline-secondary" data-range="5y">5년</button>
+        <button type="button" class="btn btn-outline-secondary active" data-range="all">전체</button>
+      </div>
+      <div id="growth-opts" class="d-flex gap-2 align-items-center" title="이 차트에만 즉시 적용">
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="growth-div" {{ 'checked' if inc_div else '' }}>
+          <label class="form-check-label small" for="growth-div">배당</label>
+        </div>
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="growth-fx" {{ 'checked' if inc_fx else '' }}>
+          <label class="form-check-label small" for="growth-fx">환차</label>
+        </div>
       </div>
       <select id="growth-ticker" class="form-select form-select-sm" style="width:auto">
         <option value="">전체 자산(합산)</option>
@@ -239,15 +257,18 @@
 <script>
 const gEl = document.getElementById('growth');
 let growthMode = 'value';
+let growthRange = 'all';
+const cDiv = document.getElementById('growth-div');
+const cFx = document.getElementById('growth-fx');
 const gDiv = document.getElementById('g-div');
 const gFx = document.getElementById('g-fx');
 async function loadGrowth(ticker) {
   if (!gEl) return;
   gEl.innerHTML = '불러오는 중…';
   try {
-    const sd = gDiv && gDiv.checked ? 1 : 0;
-    const sf = gFx && gFx.checked ? 1 : 0;
-    const r = await fetch('/api/growth?ticker=' + encodeURIComponent(ticker || '') + '&mode=' + growthMode + '&showdiv=' + sd + '&showfx=' + sf);
+    const sd = cDiv && cDiv.checked ? 1 : 0;
+    const sf = cFx && cFx.checked ? 1 : 0;
+    const r = await fetch('/api/growth?ticker=' + encodeURIComponent(ticker || '') + '&mode=' + growthMode + '&showdiv=' + sd + '&showfx=' + sf + '&period=' + growthRange);
     if (!r.ok) { gEl.innerHTML = '<span class="text-secondary">성장 추이 데이터가 없습니다.</span>'; return; }
     const fig = await r.json();
     Plotly.newPlot('growth', fig.data, fig.layout, {responsive:true, displayModeBar:false});
@@ -259,9 +280,19 @@ document.querySelectorAll('#growth-mode button').forEach(b => b.addEventListener
   growthMode = b.dataset.mode;
   document.querySelectorAll('#growth-mode button').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
+  const opts = document.getElementById('growth-opts');
+  if (opts) opts.style.display = (growthMode === 'value') ? '' : 'none';
   loadGrowth(sel ? sel.value : '');
 }));
-// 전역 성과 기준(배당·환차) 토글 → 페이지 리로드로 모든 지표 재계산
+document.querySelectorAll('#growth-range button').forEach(b => b.addEventListener('click', () => {
+  growthRange = b.dataset.range;
+  document.querySelectorAll('#growth-range button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  loadGrowth(sel ? sel.value : '');
+}));
+[cDiv, cFx].forEach(el => {
+  if (el) el.addEventListener('change', () => loadGrowth(sel ? sel.value : ''));
+});
 [gDiv, gFx].forEach(el => {
   if (el) el.addEventListener('change', () => {
     const d = gDiv && gDiv.checked ? 1 : 0;

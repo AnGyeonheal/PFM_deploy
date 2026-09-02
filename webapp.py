@@ -148,7 +148,7 @@ def dashboard(request: Request, refresh: int = 0, div: int = 1, fx: int = 1):
 
 # ─────────────────────────── 성장 추이 차트(JSON) ───────────────────────────
 @app.get("/api/growth")
-def api_growth(request: Request, ticker: str = "", mode: str = "value", showdiv: int = 1, showfx: int = 1):
+def api_growth(request: Request, ticker: str = "", mode: str = "value", showdiv: int = 1, showfx: int = 1, period: str = "all"):
     user = _current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -165,10 +165,18 @@ def api_growth(request: Request, ticker: str = "", mode: str = "value", showdiv:
 
     tk = ticker or None
 
+    _PMONTHS = {"1m": 1, "3m": 3, "6m": 6, "1y": 12, "5y": 60}
+    def _cut(df, col=None):
+        if period in _PMONTHS and df is not None and not df.empty:
+            cutoff = pd.Timestamp.now().normalize() - pd.DateOffset(months=_PMONTHS[period])
+            return df[df[col] >= cutoff] if col else df[df.index >= cutoff]
+        return df
+
     if mode == "return":
         rdf = pipeline.twr_comparison(orders, fx, tk)
         if rdf is None or rdf.empty:
             return JSONResponse({"error": "no_return"}, status_code=404)
+        rdf = _cut(rdf)
         rfig = go.Figure()
         rfig.add_trace(go.Scatter(x=rdf.index, y=rdf["내 수익률(%)"], name="내 수익률", mode="lines",
                                   line=dict(color="#EF553B", width=2.4),
@@ -185,7 +193,9 @@ def api_growth(request: Request, ticker: str = "", mode: str = "value", showdiv:
     gdf = pipeline.growth_frame(orders, fx, tk, include_div=bool(showdiv), include_fx=bool(showfx))
     if gdf is None or gdf.empty:
         return JSONResponse({"error": "no_growth"}, status_code=404)
+    gdf = _cut(gdf)
     bars_buys, bars_sells = pipeline.trade_bars(orders, tk, fx)
+    bars_buys, bars_sells = _cut(bars_buys, "date"), _cut(bars_sells, "date")
     name_map = data["name_map"]
     is_ind = bool(tk)
     tk_cur = next((o.get("currency", "KRW") for o in orders if o.get("symbol") == tk), "KRW") if tk else "KRW"
