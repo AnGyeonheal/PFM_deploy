@@ -5,7 +5,7 @@
 """
 import pandas as pd
 
-from benchmark import to_yf_ticker, get_history, get_usdkrw_history, get_native_price_now, BENCHMARK_TICKER
+from benchmark import to_yf_ticker, get_history, get_usdkrw_history, BENCHMARK_TICKER
 
 
 def _trade_records(orders):
@@ -22,13 +22,13 @@ def _trade_records(orders):
             continue
         raw = ex.get("filledAt") or o.get("orderedAt")
         try:
-            ts = pd.to_datetime(raw).tz_localize(None)
+            date = pd.to_datetime(raw).tz_localize(None).normalize()
         except (TypeError, ValueError):
             try:
-                ts = pd.to_datetime(raw, utc=True).tz_localize(None)
+                date = pd.to_datetime(raw, utc=True).tz_localize(None).normalize()
             except Exception:
                 continue  # 날짜 파싱 실패한 주문은 건너뜀
-        if pd.isna(ts):
+        if pd.isna(date):
             continue
         recs.append({
             "symbol": o.get("symbol"),
@@ -36,10 +36,8 @@ def _trade_records(orders):
             "side": o.get("side"),
             "qty": qty,
             "amount": amt,
-            "date": ts.normalize(),
-            "ts": ts,  # 같은 날 매수→매도 순서 보존을 위한 체결 시각(정규화 전)
+            "date": date,
         })
-    recs.sort(key=lambda r: r["ts"])  # 이후 date(정규화) 재정렬 시에도 같은 날 체결순서 유지(안정정렬)
     return recs
 
 
@@ -74,11 +72,13 @@ def build_pme_table(orders, fx_now=1400.0, name_map=None):
         return pd.DataFrame()
     spy_now = float(spy_hist.iloc[-1])
 
-    # 종목별 현재가(토스 실시간 → pykrx → yfinance)
+    # 종목별 현재가(yfinance 최근 종가)
     price_now = {}
     for s in symbols:
         cur = next(r["currency"] for r in recs if r["symbol"] == s)
-        price_now[s] = get_native_price_now(s, "KR" if cur == "KRW" else "US")
+        yft = to_yf_ticker(s, "KR" if cur == "KRW" else "US")
+        h = get_history(yft, period="5d")
+        price_now[s] = float(h.iloc[-1]) if (not h.empty and pd.notna(h.iloc[-1])) else None
 
     by = {}
     for r in recs:
@@ -208,11 +208,13 @@ def build_pme_growth(orders, fx_now=1400.0):
 
 
 def _current_prices(symbols, currencies):
-    """종목별 현재가 조회(토스 실시간 → pykrx → yfinance). 반환: {symbol: price(native)}"""
+    """종목별 현재가(yfinance 최근 종가) 조회. 반환: {symbol: price(native)}"""
     price_now = {}
     for s in symbols:
         cur = currencies.get(s, "KRW")
-        price_now[s] = get_native_price_now(s, "KR" if cur == "KRW" else "US")
+        yft = to_yf_ticker(s, "KR" if cur == "KRW" else "US")
+        h = get_history(yft, period="5d")
+        price_now[s] = float(h.iloc[-1]) if (not h.empty and pd.notna(h.iloc[-1])) else None
     return price_now
 
 
@@ -429,11 +431,31 @@ def build_total_profit_growth(orders, fx_now=1400.0):
     })
 
 
-def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None):
+def _avg_buy_fx_series(sym_recs, idx, fx_hist, fx_now):
+    """USD 종목의 보유분 가중평균 매수환율 시계열(평균법). 환차손익 제거용."""
+    eff = pd.Series(fx_now, index=idx)
+    cost_fx, hold_q, cur = 0.0, 0.0, fx_now
+    for r in sorted(sym_recs, key=lambda x: x["date"]):
+        fx_b = _safe_asof(fx_hist, r["date"], fx_now)
+        if r["side"] == "BUY":
+            cost_fx += r["qty"] * fx_b
+            hold_q += r["qty"]
+        elif hold_q > 0:
+            cost_fx -= r["qty"] * (cost_fx / hold_q)
+            hold_q -= r["qty"]
+        cur = (cost_fx / hold_q) if hold_q > 1e-9 else cur
+        eff.loc[eff.index >= r["date"]] = cur
+    return eff
+
+
+def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None,
+                             include_div=True, include_fx=True):
     """보유 자산가치(원금+수익금) 성장 추이.
-    내 자산가치 = 주식평가액(일뱄 환율) + 누적 배당(지급일 반영).
+    내 자산가치 = 주식평가액(일별 환율) + 누적 배당(지급일 반영).
     S&P500 자산가치 = 매수는 SPY 매입, 매도는 '판 비중만큼' SPY도 매도(Modified PME) → 유령자본 제거.
     div_events: [(date, krw, symbol), ...]. ticker=None이면 전체(합산).
+    include_div=False면 배당을 자산가치/손익에서 제외.
+    include_fx=False면 달러 자산을 매수 가중평균 환율로 고정(환차손익 제거, 순수 주가손익).
     반환 DataFrame(index=날짜): [내 자산가치, S&P500 자산가치, 순투자원금, 내 누적손익, (개별시)주가]
     """
     recs = _trade_records(orders)
@@ -467,11 +489,16 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
     for s in symbols:
         if s not in sym_hist:
             continue
+        if sym_cur[s] == "USD":
+            fx_use = fx_daily if include_fx else _avg_buy_fx_series(
+                [x for x in recs_sorted if x["symbol"] == s], idx, fx_hist, fx_now)
+        else:
+            fx_use = 1.0
         qty = pd.Series(0.0, index=idx)
         for r in [x for x in recs_sorted if x["symbol"] == s]:
             sign = 1 if r["side"] == "BUY" else -1
             qty.loc[qty.index >= r["date"]] += sign * r["qty"]
-        my_val = my_val.add(qty * sym_hist[s] * (fx_daily if sym_cur[s] == "USD" else 1.0), fill_value=0)
+        my_val = my_val.add(qty * sym_hist[s] * fx_use, fill_value=0)
 
     # S&P500 가상펀드(Modified PME): 매수는 SPY 매입, 매도는 '판 비중만큼' SPY도 매도.
     spy_shares = pd.Series(0.0, index=idx)
@@ -507,13 +534,14 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
     spy_val = spy_shares * spy_daily * fx_daily
 
     div_cum = pd.Series(0.0, index=idx)
-    for ev in (div_events or []):
-        try:
-            d = pd.to_datetime(ev[0]).tz_localize(None).normalize()
-            amt = float(ev[1])
-        except Exception:
-            continue
-        div_cum.loc[div_cum.index >= d] += amt
+    if include_div:
+        for ev in (div_events or []):
+            try:
+                d = pd.to_datetime(ev[0]).tz_localize(None).normalize()
+                amt = float(ev[1])
+            except Exception:
+                continue
+            div_cum.loc[div_cum.index >= d] += amt
 
     out = pd.DataFrame({
         "내 자산가치": my_val + div_cum,

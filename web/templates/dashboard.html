@@ -2,7 +2,6 @@
 {% block title %}대시보드{% endblock %}
 {% macro won(v) %}{{ "{:,.0f}".format(v or 0) }}원{% endmacro %}
 {% macro price(v, cur) %}{% if v is none or v == '' %}–{% elif cur == 'USD' %}{{ "{:,.2f}".format(v) }}{% else %}{{ "{:,.0f}".format(v) }}{% endif %}{% endmacro %}
-{% macro nmoney(row, base) %}{% if row['통화'] == 'USD' %}${{ "{:,.2f}".format(row[base ~ '(달러)'] or 0) }}{% else %}{{ "{:,.0f}".format(row[base ~ '(원)'] or 0) }}원{% endif %}{% endmacro %}
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
   <h2 class="mb-0">📈 자산관리 대시보드</h2>
@@ -76,6 +75,16 @@
         <button type="button" class="btn btn-outline-secondary active" data-mode="value">자산가치(원)</button>
         <button type="button" class="btn btn-outline-secondary" data-mode="return">수익률(%)</button>
       </div>
+      <div id="growth-opts" class="d-flex gap-3 align-items-center">
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="growth-div" checked>
+          <label class="form-check-label small" for="growth-div">배당 포함</label>
+        </div>
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="growth-fx" checked>
+          <label class="form-check-label small" for="growth-fx">환차손익 포함</label>
+        </div>
+      </div>
       <select id="growth-ticker" class="form-select form-select-sm" style="width:auto">
         <option value="">전체 자산(합산)</option>
         {% for t in tickers %}<option value="{{ t }}">{{ name_map.get(t, t) }} ({{ t }})</option>{% endfor %}
@@ -134,14 +143,14 @@
   <div class="tab-content">
     <div class="tab-pane fade show active" id="t-hold">
       <div class="table-scroll"><table class="table table-hover align-middle">
-        <thead><tr><th>종목</th><th>티커</th><th>상태</th><th class="text-end">보유수량</th><th class="text-end">현재주가</th><th class="text-end">투자원금</th><th class="text-end">실현손익</th><th class="text-end">평가손익</th><th class="text-end">수익률(%)</th><th class="text-end">S&P500대비(%p)</th><th class="text-end">알파(연%)</th><th class="text-end">베타</th><th class="text-end">알파기여(%)</th><th class="text-end">베타기여(%)</th></tr></thead>
+        <thead><tr><th>종목</th><th>티커</th><th>상태</th><th class="text-end">보유수량</th><th class="text-end">현재주가</th><th class="text-end">투자원금(원)</th><th class="text-end">실현손익</th><th class="text-end">평가손익</th><th class="text-end">수익률(%)</th><th class="text-end">S&P500대비(%p)</th><th class="text-end">알파(연%)</th><th class="text-end">베타</th><th class="text-end">알파기여(%)</th><th class="text-end">베타기여(%)</th></tr></thead>
         <tbody>{% for r in breakdown %}<tr>
           <td>{{ r['종목'] }}</td><td>{{ r['티커'] }}</td><td>{{ r['상태'] }}</td>
           <td class="text-end">{{ "{:g}".format(r['보유수량']) }}</td>
           <td class="text-end">{% if r.get('현재주가') is not none %}{{ price(r['현재주가'], r['통화']) }}{% else %}–{% endif %}</td>
-          <td class="text-end">{{ nmoney(r, '투자원금') }}</td>
-          <td class="text-end {{ 'pos' if r['실현손익(원)']>=0 else 'neg' }}">{{ nmoney(r, '실현손익') }}</td>
-          <td class="text-end {{ 'pos' if r['평가손익(원)']>=0 else 'neg' }}">{{ nmoney(r, '평가손익') }}</td>
+          <td class="text-end">{{ "{:,.0f}".format(r['투자원금(원)']) }}</td>
+          <td class="text-end {{ 'pos' if r['실현손익(원)']>=0 else 'neg' }}">{{ "{:,.0f}".format(r['실현손익(원)']) }}</td>
+          <td class="text-end {{ 'pos' if r['평가손익(원)']>=0 else 'neg' }}">{{ "{:,.0f}".format(r['평가손익(원)']) }}</td>
           <td class="text-end {{ 'pos' if r['수익률(%)']>=0 else 'neg' }}">{{ "%+.2f"|format(r['수익률(%)']) }}</td>
           <td class="text-end {% if r.get('S&P500대비(%p)') is not none %}{{ 'pos' if r['S&P500대비(%p)']>=0 else 'neg' }}{% endif %}">{% if r.get('S&P500대비(%p)') is not none %}{{ "%+.2f"|format(r['S&P500대비(%p)']) }}{% else %}–{% endif %}</td>
           <td class="text-end {% if r.get('알파(연%)') is not none %}{{ 'pos' if r['알파(연%)']>=0 else 'neg' }}{% endif %}">{% if r.get('알파(연%)') is not none %}{{ "%+.2f"|format(r['알파(연%)']) }}{% else %}–{% endif %}</td>
@@ -152,11 +161,8 @@
       </table></div>
     </div>
     <div class="tab-pane fade" id="t-tx">
-      <div class="d-flex justify-content-between align-items-center mb-2 gap-2">
-        <input type="search" class="form-control form-control-sm table-filter" data-filter="#tbl-tx" placeholder="🔍 날짜·증권사·종목·구분 검색">
-        <a class="btn btn-sm btn-outline-primary flex-shrink-0" href="/edit-data">✏️ 거래·배당 편집</a>
-      </div>
-      <div class="table-scroll"><table id="tbl-tx" class="table table-sm table-hover align-middle">
+      <div class="d-flex justify-content-end mb-2"><a class="btn btn-sm btn-outline-primary" href="/edit-data">✏️ 거래·배당 편집</a></div>
+      <div class="table-scroll"><table class="table table-sm table-hover align-middle">
         <thead><tr><th>날짜</th><th>증권사</th><th>종목명</th><th>구분</th><th class="text-end">수량</th><th class="text-end">체결단가</th><th>통화</th><th class="text-end">체결금액(원)</th></tr></thead>
         <tbody>{% for r in tx_records %}<tr>
           <td>{{ r['날짜'] }}</td><td>{{ r['증권사'] }}</td><td>{{ r['종목명'] }}</td>
@@ -167,11 +173,8 @@
       </table></div>
     </div>
     <div class="tab-pane fade" id="t-div">
-      <div class="d-flex justify-content-between align-items-center mb-2 gap-2">
-        <input type="search" class="form-control form-control-sm table-filter" data-filter="#tbl-div" placeholder="🔍 일자·종목·티커 검색">
-        <a class="btn btn-sm btn-outline-primary flex-shrink-0" href="/edit-data">✏️ 거래·배당 편집</a>
-      </div>
-      <div class="table-scroll"><table id="tbl-div" class="table table-sm table-hover align-middle">
+      <div class="d-flex justify-content-end mb-2"><a class="btn btn-sm btn-outline-primary" href="/edit-data">✏️ 거래·배당 편집</a></div>
+      <div class="table-scroll"><table class="table table-sm table-hover align-middle">
         <thead><tr><th>일자</th><th>구분</th><th>종목</th><th>티커</th><th>통화</th><th class="text-end">배당금</th><th class="text-end">원화환산</th></tr></thead>
         <tbody>{% for r in dividends %}<tr>
           <td>{{ r['일자'] }}</td><td>{{ r['구분'] }}</td><td>{{ r['종목'] }}</td><td>{{ r['티커'] }}</td>
@@ -196,8 +199,7 @@
       </div>
       <div id="dca-metrics" class="row g-3 mb-3"></div>
       <div id="dca-chart" style="height:420px" class="text-secondary">탭을 선택하면 시뮬레이션을 계산합니다…</div>
-      <input type="search" class="form-control form-control-sm table-filter mt-3 mb-2" data-filter="#dca-table" placeholder="🔍 월 검색">
-      <div class="table-scroll"><table class="table table-sm table-hover align-middle" id="dca-table">
+      <div class="table-scroll mt-3"><table class="table table-sm table-hover align-middle" id="dca-table">
         <thead><tr><th>월</th><th class="text-end">SPY($)</th><th class="text-end">S&P500 수익금(원)</th><th class="text-end">내 수익금(원)</th></tr></thead>
         <tbody></tbody>
       </table></div>
@@ -228,7 +230,11 @@ async function loadGrowth(ticker) {
   if (!gEl) return;
   gEl.innerHTML = '불러오는 중…';
   try {
-    const r = await fetch('/api/growth?ticker=' + encodeURIComponent(ticker || '') + '&mode=' + growthMode);
+    const dv = document.getElementById('growth-div');
+    const fxv = document.getElementById('growth-fx');
+    const sd = dv && dv.checked ? 1 : 0;
+    const sf = fxv && fxv.checked ? 1 : 0;
+    const r = await fetch('/api/growth?ticker=' + encodeURIComponent(ticker || '') + '&mode=' + growthMode + '&showdiv=' + sd + '&showfx=' + sf);
     if (!r.ok) { gEl.innerHTML = '<span class="text-secondary">성장 추이 데이터가 없습니다.</span>'; return; }
     const fig = await r.json();
     Plotly.newPlot('growth', fig.data, fig.layout, {responsive:true, displayModeBar:false});
@@ -240,8 +246,14 @@ document.querySelectorAll('#growth-mode button').forEach(b => b.addEventListener
   growthMode = b.dataset.mode;
   document.querySelectorAll('#growth-mode button').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
+  const opts = document.getElementById('growth-opts');
+  if (opts) opts.style.display = (growthMode === 'value') ? '' : 'none';
   loadGrowth(sel ? sel.value : '');
 }));
+['growth-div', 'growth-fx'].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('change', () => loadGrowth(sel ? sel.value : ''));
+});
 loadGrowth('');
 
 const pdfBtn = document.getElementById('pdf-download');

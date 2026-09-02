@@ -9,10 +9,10 @@ import pandas as pd
 
 from pm import (
     get_access_token, get_holdings, get_buying_power, get_exchange_rate,
-    get_order_history, get_stock_info, get_current_prices,
+    get_order_history, get_stock_info,
 )
 from analytics_engine import transform_to_mvp_json, build_transaction_detail
-from benchmark import get_usdkrw_history, set_price_overrides
+from benchmark import get_usdkrw_history
 from manual_holdings import (
     set_data_dir, load_manual_holdings, manual_to_orders,
     read_manual_csv, read_transactions_csv, read_dividends_csv,
@@ -321,16 +321,6 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True):
     if use_tx and holdings_snapshot is not None and not holdings_snapshot.empty:
         combined_orders += manual_to_orders(holdings_snapshot)
 
-    # 보유 종목 현재가: 토스 실시간 배치 시세를 주입해 최고 싱크로율 확보(연동 시). 미연동 시 pykrx·yfinance.
-    if use_toss:
-        try:
-            _syms = sorted({o.get("symbol") for o in combined_orders if o.get("symbol")})
-            _tok = get_access_token(creds.get("TOSS_CLIENT_ID"), creds.get("TOSS_CLIENT_SECRET"))
-            if _tok and _syms:
-                set_price_overrides(get_current_prices(_tok, _syms))
-        except Exception:
-            pass
-
     name_map = dict(toss_name_map)
     if has_manual:
         for _, r in manual_df.iterrows():
@@ -410,11 +400,11 @@ def _dated_div_events(orders, fx, ticker=None):
     return sorted(events, key=lambda x: x[0])
 
 
-def growth_frame(combined_orders, fx_rate, ticker=None):
-    """보유 자산가치(원금+수익금) 성장 추이 프레임(전체 또는 개별 종목). 환율·배당·차익실현 반영."""
+def growth_frame(combined_orders, fx_rate, ticker=None, include_div=True, include_fx=True):
+    """보유 자산가치(원금+수익금) 성장 추이 프레임. 배당·환차손익 반영 여부 토글."""
     tk = ticker or None
     div_events = _dated_div_events(combined_orders, fx_rate, tk)
-    return build_asset_value_growth(combined_orders, fx_rate, div_events, tk)
+    return build_asset_value_growth(combined_orders, fx_rate, div_events, tk, include_div, include_fx)
 
 
 def trade_bars(combined_orders, ticker=None, fx=1400.0):
