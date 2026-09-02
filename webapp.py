@@ -49,13 +49,16 @@ def _current_user(request: Request):
     return request.session.get("user")
 
 
-def get_portfolio(user, force=False):
+def get_portfolio(user, force=False, include_div=True, include_fx=True):
     now = time.time()
-    ent = _CACHE.get(user)
+    sub = _CACHE.get(user) or {}
+    ent = sub.get((include_div, include_fx))
     if not force and ent and now - ent[0] < 300:
         return ent[1]
-    data = pipeline.load_portfolio(user, use_toss=auth.has_toss_credentials(user), use_tx=True)
-    _CACHE[user] = (now, data)
+    data = pipeline.load_portfolio(user, use_toss=auth.has_toss_credentials(user), use_tx=True,
+                                   include_div=include_div, include_fx=include_fx)
+    sub[(include_div, include_fx)] = (now, data)
+    _CACHE[user] = sub
     return data
 
 
@@ -104,11 +107,11 @@ def logout(request: Request):
 
 # ─────────────────────────── 대시보드 ───────────────────────────
 @app.get("/", response_class=HTMLResponse)
-def dashboard(request: Request, refresh: int = 0):
+def dashboard(request: Request, refresh: int = 0, div: int = 1, fx: int = 1):
     user = _current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
-    data = get_portfolio(user, force=bool(refresh))
+    data = get_portfolio(user, force=bool(refresh), include_div=bool(div), include_fx=bool(fx))
 
     detail_df = data["detail_df"]
     tx_records = _df_records(
@@ -138,6 +141,7 @@ def dashboard(request: Request, refresh: int = 0):
         "dividends": data["dividends_rows"], "breakdown": breakdown_records, "tickers": tickers,
         "div_krw_native": data["div_krw_native"], "div_usd_native": data["div_usd_native"],
         "name_map": data["name_map"],
+        "inc_div": bool(div), "inc_fx": bool(fx),
     }
     return templates.TemplateResponse(request, "dashboard.html", ctx)
 

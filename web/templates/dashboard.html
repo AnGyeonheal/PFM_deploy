@@ -25,27 +25,46 @@
 </div>
 {% else %}
 
-<!-- 지표 -->
-<div class="row g-3 mb-2">
-  <div class="col-6 col-md-3"><div class="metric"><div class="label">총자산</div><div class="value">{{ won(summary.get('total_asset_krw')) }}</div></div></div>
-  <div class="col-6 col-md-3"><div class="metric"><div class="label">주식 평가액</div><div class="value">{{ won(summary.get('stock_eval_krw')) }}</div></div></div>
-  <div class="col-6 col-md-3"><div class="metric"><div class="label">예수금(원화)</div><div class="value">{{ won(summary.get('cash_krw_native')) }}</div></div></div>
-  <div class="col-6 col-md-3"><div class="metric"><div class="label">예수금(달러)</div><div class="value">$ {{ "{:,.2f}".format(summary.get('cash_usd_native') or 0) }}</div></div></div>
+<!-- 전역 성과 계산 기준 -->
+<div class="section py-2 mb-3">
+  <div class="d-flex align-items-center gap-3 flex-wrap">
+    <span class="small fw-bold">📊 성과 계산 기준</span>
+    <div class="form-check form-switch mb-0">
+      <input class="form-check-input" type="checkbox" id="g-div" {{ 'checked' if inc_div else '' }}>
+      <label class="form-check-label small" for="g-div">배당 반영</label>
+    </div>
+    <div class="form-check form-switch mb-0">
+      <input class="form-check-input" type="checkbox" id="g-fx" {{ 'checked' if inc_fx else '' }}>
+      <label class="form-check-label small" for="g-fx">환차손익 반영</label>
+    </div>
+    <span class="small text-secondary">아래 모든 수익률·손익·알파·베타·성장 차트에 일괄 적용됩니다.</span>
+  </div>
 </div>
-{% if ab %}
-<div class="row g-3 mb-2">
-  <div class="col-6 col-md-3"><div class="metric"><div class="label">연환산 수익률(XIRR)</div><div class="value">{{ "%+.2f"|format(ab.port_xirr_pct or 0) }} %</div></div></div>
-  <div class="col-6 col-md-3"><div class="metric"><div class="label">알파(초과수익)</div><div class="value {{ 'pos' if (ab.alpha_pct or 0)>=0 else 'neg' }}">{{ "%+.2f"|format(ab.alpha_pct or 0) }} %p</div></div></div>
-  <div class="col-6 col-md-3"><div class="metric"><div class="label">베타(시장 민감도)</div><div class="value">{{ ab.beta if ab.beta is not none else 'N/A' }}</div></div></div>
-  <div class="col-6 col-md-3"><div class="metric"><div class="label">상관계수</div><div class="value">{{ ab.corr if ab.corr is not none else 'N/A' }}</div></div></div>
-</div>
-{% endif %}
 
-<!-- 손익 구성 -->
-{% if perf %}
+<!-- ① 자산 현황 -->
 <div class="section">
-  <h5 class="mb-3">손익 구성</h5>
-  <div class="row g-3">
+  <h5 class="mb-3">① 자산 현황</h5>
+  <div class="row g-3 mb-4">
+    <div class="col-6 col-md-3"><div class="metric"><div class="label">총자산</div><div class="value">{{ won(summary.get('total_asset_krw')) }}</div></div></div>
+    <div class="col-6 col-md-3"><div class="metric"><div class="label">주식 평가액</div><div class="value">{{ won(summary.get('stock_eval_krw')) }}</div></div></div>
+    <div class="col-6 col-md-3"><div class="metric"><div class="label">예수금(원화)</div><div class="value">{{ won(summary.get('cash_krw_native')) }}</div></div></div>
+    <div class="col-6 col-md-3"><div class="metric"><div class="label">예수금(달러)</div><div class="value">$ {{ "{:,.2f}".format(summary.get('cash_usd_native') or 0) }}</div></div></div>
+  </div>
+  <h6 class="text-secondary mb-2">보유 비중</h6>
+  <div id="allocation" style="height:360px" class="text-secondary">불러오는 중…</div>
+</div>
+
+<!-- ② 성과 요약 -->
+<div class="section">
+  <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <h5 class="mb-0">② 성과 요약</h5>
+    <span class="badge rounded-pill {{ 'text-bg-primary' if (inc_div or inc_fx) else 'text-bg-secondary' }}">
+      배당 {{ '반영' if inc_div else '제외' }} · 환차손익 {{ '반영' if inc_fx else '제외' }}
+    </span>
+  </div>
+  {% if perf %}
+  <h6 class="text-secondary mb-2">수익 지표</h6>
+  <div class="row g-3 mb-4">
     <div class="col-6 col-md-3"><div class="metric"><div class="label">누적 총손익</div>
       <div class="value {{ 'pos' if (perf.all_inclusive_krw or 0)>=0 else 'neg' }}">{{ won(perf.all_inclusive_krw) }}</div>
       <div class="sub">{{ "%+.2f"|format(perf.all_inclusive_pct or 0) }}% (원금대비)</div></div></div>
@@ -57,33 +76,26 @@
       <div class="value">{{ won(perf.div_krw) }}</div>
       <div class="sub">환차 {{ won(perf.fx_total_krw) }}</div></div></div>
   </div>
-</div>
-{% endif %}
-
-<!-- 보유 비중 -->
-<div class="section">
-  <h5 class="mb-2">보유 비중</h5>
-  <div id="allocation" style="height:380px" class="text-secondary">불러오는 중…</div>
+  {% endif %}
+  {% if ab %}
+  <h6 class="text-secondary mb-2">위험 · 벤치마크 (vs S&P500)</h6>
+  <div class="row g-3">
+    <div class="col-6 col-md-3"><div class="metric"><div class="label">연환산 수익률(XIRR)</div><div class="value">{{ "%+.2f"|format(ab.port_xirr_pct or 0) }} %</div></div></div>
+    <div class="col-6 col-md-3"><div class="metric"><div class="label">알파(초과수익)</div><div class="value {{ 'pos' if (ab.alpha_pct or 0)>=0 else 'neg' }}">{{ "%+.2f"|format(ab.alpha_pct or 0) }} %p</div></div></div>
+    <div class="col-6 col-md-3"><div class="metric"><div class="label">베타(시장 민감도)</div><div class="value">{{ ab.beta if ab.beta is not none else 'N/A' }}</div></div></div>
+    <div class="col-6 col-md-3"><div class="metric"><div class="label">상관계수</div><div class="value">{{ ab.corr if ab.corr is not none else 'N/A' }}</div></div></div>
+  </div>
+  {% endif %}
 </div>
 
 <!-- 성장 추이 차트 -->
 <div class="section">
   <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
-    <h5 class="mb-0">보유 자산 성장 · S&P500 비교 · 매수/매도 금액</h5>
+    <h5 class="mb-0">③ 자산 성장 추이 · S&P500 비교</h5>
     <div class="d-flex gap-2 align-items-center flex-wrap">
       <div class="btn-group btn-group-sm" role="group" id="growth-mode">
         <button type="button" class="btn btn-outline-secondary active" data-mode="value">자산가치(원)</button>
         <button type="button" class="btn btn-outline-secondary" data-mode="return">수익률(%)</button>
-      </div>
-      <div id="growth-opts" class="d-flex gap-3 align-items-center">
-        <div class="form-check form-switch mb-0">
-          <input class="form-check-input" type="checkbox" id="growth-div" checked>
-          <label class="form-check-label small" for="growth-div">배당 포함</label>
-        </div>
-        <div class="form-check form-switch mb-0">
-          <input class="form-check-input" type="checkbox" id="growth-fx" checked>
-          <label class="form-check-label small" for="growth-fx">환차손익 포함</label>
-        </div>
       </div>
       <select id="growth-ticker" class="form-select form-select-sm" style="width:auto">
         <option value="">전체 자산(합산)</option>
@@ -131,8 +143,9 @@
   </div>
 </div>
 
-<!-- 탭: 보유/거래/배당 -->
+<!-- ④ 상세 내역 -->
 <div class="section">
+  <h5 class="mb-3">④ 상세 내역</h5>
   <ul class="nav nav-pills mb-3">
     <li class="nav-item"><button class="nav-link active" data-bs-toggle="pill" data-bs-target="#t-hold">보유 종목</button></li>
     <li class="nav-item"><button class="nav-link" data-bs-toggle="pill" data-bs-target="#t-tx">거래 내역</button></li>
@@ -226,14 +239,14 @@
 <script>
 const gEl = document.getElementById('growth');
 let growthMode = 'value';
+const gDiv = document.getElementById('g-div');
+const gFx = document.getElementById('g-fx');
 async function loadGrowth(ticker) {
   if (!gEl) return;
   gEl.innerHTML = '불러오는 중…';
   try {
-    const dv = document.getElementById('growth-div');
-    const fxv = document.getElementById('growth-fx');
-    const sd = dv && dv.checked ? 1 : 0;
-    const sf = fxv && fxv.checked ? 1 : 0;
+    const sd = gDiv && gDiv.checked ? 1 : 0;
+    const sf = gFx && gFx.checked ? 1 : 0;
     const r = await fetch('/api/growth?ticker=' + encodeURIComponent(ticker || '') + '&mode=' + growthMode + '&showdiv=' + sd + '&showfx=' + sf);
     if (!r.ok) { gEl.innerHTML = '<span class="text-secondary">성장 추이 데이터가 없습니다.</span>'; return; }
     const fig = await r.json();
@@ -246,13 +259,15 @@ document.querySelectorAll('#growth-mode button').forEach(b => b.addEventListener
   growthMode = b.dataset.mode;
   document.querySelectorAll('#growth-mode button').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
-  const opts = document.getElementById('growth-opts');
-  if (opts) opts.style.display = (growthMode === 'value') ? '' : 'none';
   loadGrowth(sel ? sel.value : '');
 }));
-['growth-div', 'growth-fx'].forEach(id => {
-  const el = document.getElementById(id);
-  if (el) el.addEventListener('change', () => loadGrowth(sel ? sel.value : ''));
+// 전역 성과 기준(배당·환차) 토글 → 페이지 리로드로 모든 지표 재계산
+[gDiv, gFx].forEach(el => {
+  if (el) el.addEventListener('change', () => {
+    const d = gDiv && gDiv.checked ? 1 : 0;
+    const f = gFx && gFx.checked ? 1 : 0;
+    window.location.href = '/?div=' + d + '&fx=' + f;
+  });
 });
 loadGrowth('');
 
