@@ -22,7 +22,7 @@ from manual_holdings import (
 from performance import compute_performance_summary, build_holdings_breakdown
 from advanced_analytics import compute_dividends, compute_dividend_events
 from pme import (
-    compute_alpha_beta, build_total_profit_growth, build_ticker_profit_growth,
+    compute_alpha_beta,
     build_trade_bars, build_asset_value_growth, build_stock_analytics, compute_rolling_beta,
     build_spy_dca, build_twr_comparison,
 )
