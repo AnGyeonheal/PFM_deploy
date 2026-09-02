@@ -37,6 +37,16 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = FastAPI(title="자산관리 대시보드")
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("WEB_SECRET_KEY", _secrets.token_hex(32)))
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "web", "static")), name="static")
+
+
+@app.middleware("http")
+async def _no_store_api(request: Request, call_next):
+    resp = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
+
+
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "web", "templates"))
 
 SOURCE_LABELS = {"tx": "거래내역 임포트", "toss": "토스증권 API", "both": "거래내역 + 토스증권 API"}
@@ -50,6 +60,7 @@ def _current_user(request: Request):
 
 
 def get_portfolio(user, force=False, include_div=True, include_fx=True):
+    pipeline.apply_credentials(user)  # 캐시 히트 시에도 사용자 데이터 경로(set_data_dir) 보장
     now = time.time()
     sub = _CACHE.get(user) or {}
     ent = sub.get((include_div, include_fx))
