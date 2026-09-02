@@ -448,6 +448,26 @@ def _avg_buy_fx_series(sym_recs, idx, fx_hist, fx_now):
     return eff
 
 
+def _holdings_value_series(recs_sorted, symbols, sym_hist, sym_cur,
+                          fx_daily, fx_hist, fx_now, idx, include_fx=True):
+    """보유수량 × 주가 × 환율 일별 평가액(원화) 합계. include_fx=False면 달러 종목을 매수평균환율로 고정(환차 제거)."""
+    my_val = pd.Series(0.0, index=idx)
+    for s in symbols:
+        if s not in sym_hist:
+            continue
+        if sym_cur[s] == "USD":
+            fx_use = fx_daily if include_fx else _avg_buy_fx_series(
+                [x for x in recs_sorted if x["symbol"] == s], idx, fx_hist, fx_now)
+        else:
+            fx_use = 1.0
+        qty = pd.Series(0.0, index=idx)
+        for r in [x for x in recs_sorted if x["symbol"] == s]:
+            sign = 1 if r["side"] == "BUY" else -1
+            qty.loc[qty.index >= r["date"]] += sign * r["qty"]
+        my_val = my_val.add(qty * sym_hist[s] * fx_use, fill_value=0)
+    return my_val
+
+
 def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None,
                              include_div=True, include_fx=True):
     """보유 자산가치(원금+수익금) 성장 추이.
@@ -485,20 +505,8 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
             sym_hist[s] = align(h)
 
     recs_sorted = sorted(recs, key=lambda r: r["date"])
-    my_val = pd.Series(0.0, index=idx)
-    for s in symbols:
-        if s not in sym_hist:
-            continue
-        if sym_cur[s] == "USD":
-            fx_use = fx_daily if include_fx else _avg_buy_fx_series(
-                [x for x in recs_sorted if x["symbol"] == s], idx, fx_hist, fx_now)
-        else:
-            fx_use = 1.0
-        qty = pd.Series(0.0, index=idx)
-        for r in [x for x in recs_sorted if x["symbol"] == s]:
-            sign = 1 if r["side"] == "BUY" else -1
-            qty.loc[qty.index >= r["date"]] += sign * r["qty"]
-        my_val = my_val.add(qty * sym_hist[s] * fx_use, fill_value=0)
+    my_val = _holdings_value_series(recs_sorted, symbols, sym_hist, sym_cur,
+                                   fx_daily, fx_hist, fx_now, idx, include_fx)
 
     # S&P500 가상펀드(Modified PME): 매수는 SPY 매입, 매도는 '판 비중만큼' SPY도 매도.
     spy_shares = pd.Series(0.0, index=idx)
@@ -664,8 +672,10 @@ def build_trade_bars(orders, ticker=None, fx_now=1400.0):
     return pd.DataFrame(buys, columns=cols), pd.DataFrame(sells, columns=cols)
 
 
-def build_stock_analytics(orders, fx_now=1400.0, name_map=None, holdings=None):
+def build_stock_analytics(orders, fx_now=1400.0, name_map=None, holdings=None,
+                          include_div=True, include_fx=True):
     """종목별 현재주가·S&P500 대비 수익률·알파(연)·베타·알파기여%·베타기여%를 계산합니다.
+    include_fx=False면 원화 대신 자국통화 기준으로 비교(환차 제거). 알파/베타·S&P대비는 주가수익률 기준이므로 배당(include_div)은 손익·XIRR·보유표에서 반영됩니다.
     베타/알파는 최초 매수 이후 일간 수익률을 S&P500(원화 환산) 대비 회귀해 산출합니다.
     반환: DataFrame(티커, 현재주가, 통화, S&P500대비(%p), 알파(연%), 베타, 알파기여(%), 베타기여(%))
     """
@@ -699,8 +709,12 @@ def build_stock_analytics(orders, fx_now=1400.0, name_map=None, holdings=None):
         sp = spy.reindex(idx.union(spy.index)).ffill().reindex(idx)
         fxd = (fx_hist.reindex(idx.union(fx_hist.index)).ffill().reindex(idx)
                if not fx_hist.empty else pd.Series(fx_now, index=idx))
-        stock_krw = px * fxd if cur == "USD" else px   # 투자자(원화) 관점 평가액
-        mkt_krw = sp * fxd                              # SPY 원화 환산
+        if include_fx:
+            stock_base = px * fxd if cur == "USD" else px  # 원화 관점(환차 포함)
+            spy_base = sp * fxd
+        else:
+            stock_base = px                                # 자국통화(환차 제거)
+            spy_base = sp
         mkt_native = sp if cur == "USD" else sp * fxd   # 베타/알파는 종목 통화 기준
         rs = px.pct_change()                            # 종목 자국통화 수익률
         rm = mkt_native.pct_change()
@@ -710,8 +724,8 @@ def build_stock_analytics(orders, fx_now=1400.0, name_map=None, holdings=None):
             continue
         beta = float(reg["s"].cov(reg["m"]) / reg["m"].var())
         alpha_ann = float((reg["s"].mean() - beta * reg["m"].mean()) * 252 * 100)
-        my_tot = float(stock_krw.iloc[-1] / stock_krw.iloc[0] - 1) * 100
-        spy_tot = float(mkt_krw.iloc[-1] / mkt_krw.iloc[0] - 1) * 100
+        my_tot = float(stock_base.iloc[-1] / stock_base.iloc[0] - 1) * 100
+        spy_tot = float(spy_base.iloc[-1] / spy_base.iloc[0] - 1) * 100
         rows.append({"티커": s, "종목": name_map.get(s, s), "통화": cur,
                      "현재주가": round(float(px.iloc[-1]), 2),
                      "S&P500대비(%p)": round(my_tot - spy_tot, 2),
@@ -918,7 +932,8 @@ def xirr(cashflows):
     return (lo + hi) / 2.0
 
 
-def compute_alpha_beta(orders, fx_now=1400.0, period="10y"):
+def compute_alpha_beta(orders, fx_now=1400.0, period="10y", div_events=None,
+                       include_div=True, include_fx=True):
     """방법 A(현금흐름 기반 S&P500 가상펀드)로 포트폴리오 전체 알파와 베타를 계산합니다.
     - 알파: 내 포트폴리오 XIRR − S&P500 가상펀드 XIRR (청산·보유 종목 모두 현금흐름으로 반영)
     - 베타: 기여금(매수·매도)을 제거한 일간 수익률의 시장(SPY 원화 환산) 대비 회귀계수
@@ -954,16 +969,8 @@ def compute_alpha_beta(orders, fx_now=1400.0, period="10y"):
     recs_sorted = sorted(recs, key=lambda r: r["date"])
 
     # 내 포트폴리오 일별 평가액(원화)
-    my_val = pd.Series(0.0, index=idx)
-    for s in symbols:
-        if s not in sym_hist:
-            continue
-        qty_steps = pd.Series(0.0, index=idx)
-        for r in [x for x in recs_sorted if x["symbol"] == s]:
-            sign = 1 if r["side"] == "BUY" else -1
-            qty_steps.loc[qty_steps.index >= r["date"]] += sign * r["qty"]
-        val = qty_steps * sym_hist[s] * (fx_daily if sym_cur[s] == "USD" else 1.0)
-        my_val = my_val.add(val, fill_value=0)
+    my_val = _holdings_value_series(recs_sorted, symbols, sym_hist, sym_cur,
+                                   fx_daily, fx_hist, fx_now, idx, include_fx)
 
     # S&P500 가상펀드(Modified PME): 매수는 SPY 매입, 매도는 '판 비중만큼' SPY 매도 → 음수 지분 방지.
     spy_shares = pd.Series(0.0, index=idx)
@@ -1007,6 +1014,14 @@ def compute_alpha_beta(orders, fx_now=1400.0, period="10y"):
     today = idx.max()
     my_final = float(my_val.iloc[-1])
     spy_final = float(spy_val.iloc[-1])
+
+    if include_div:  # 배당 수령을 내 현금흐름(유입)으로 반영 → 실제 수익률·알파에 포함
+        for ev in (div_events or []):
+            try:
+                dd = pd.to_datetime(ev[0]).tz_localize(None).normalize()
+                my_cashflows.append((dd, float(ev[1])))
+            except Exception:
+                continue
 
     port_xirr = xirr(my_cashflows + [(today, my_final)])
     spy_xirr = xirr(spy_cashflows + [(today, spy_final)])

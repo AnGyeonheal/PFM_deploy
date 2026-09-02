@@ -272,8 +272,10 @@ def _dividends(combined_orders, fx_rate, include_est=True):
     return div_krw_native, div_usd_native, by_ticker, rows
 
 
-def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True):
-    """사용자의 전체 포트폴리오 데이터를 취합해 dict로 반환합니다."""
+def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True,
+                   include_div=True, include_fx=True):
+    """사용자의 전체 포트폴리오 데이터를 취합해 dict로 반환합니다.
+    include_div/include_fx: 배당·환차손익을 성과지표(손익·알파·베타·수익률)에 반영할지."""
     creds = apply_credentials(user)
 
     portfolio_json = None
@@ -341,12 +343,17 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True):
 
     dkn, dun, div_by_ticker, div_rows = _dividends(combined_orders, fx_rate, include_div_est)
 
-    perf = compute_performance_summary(combined_orders, fx_rate, dkn, dun) if has_data else None
-    ab = compute_alpha_beta(combined_orders, fx_rate) if has_data else None
-    breakdown = (build_holdings_breakdown(combined_orders, fx_rate, name_map, dict(div_by_ticker))
+    div_events = _dated_div_events(combined_orders, fx_rate) if has_data else []
+    perf = compute_performance_summary(combined_orders, fx_rate, dkn, dun,
+                                       include_div, include_fx) if has_data else None
+    ab = compute_alpha_beta(combined_orders, fx_rate, div_events=div_events,
+                            include_div=include_div, include_fx=include_fx) if has_data else None
+    breakdown = (build_holdings_breakdown(combined_orders, fx_rate, name_map, dict(div_by_ticker),
+                                          include_div, include_fx)
                  if has_data else pd.DataFrame())
     try:
-        stock_ana = (build_stock_analytics(combined_orders, fx_rate, name_map, holdings)
+        stock_ana = (build_stock_analytics(combined_orders, fx_rate, name_map, holdings,
+                                           include_div, include_fx)
                      if has_data else pd.DataFrame())
     except Exception:
         stock_ana = pd.DataFrame()

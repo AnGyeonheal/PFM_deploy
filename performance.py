@@ -49,7 +49,8 @@ def _records(orders):
     return recs
 
 
-def compute_performance_summary(orders, fx_now=1400.0, div_krw_native=0.0, div_usd_native=0.0):
+def compute_performance_summary(orders, fx_now=1400.0, div_krw_native=0.0, div_usd_native=0.0,
+                                include_div=True, include_fx=True):
     """전체/보유/실현 성과를 원화·외화로 분해한 요약 dict를 반환합니다.
     배당은 검증된 임포트 기록(div_krw_native 원화·div_usd_native 달러)만 사용합니다.
     분해: 총손익(원) = 순수 주가손익(원) + 환차손익(원) + 배당(원).
@@ -123,12 +124,12 @@ def compute_performance_summary(orders, fx_now=1400.0, div_krw_native=0.0, div_u
             t["cost_krw_remaining"] += cost_krw
 
     # 배당은 검증된 임포트 기록만 사용 (yfinance 추정 미사용)
-    div_krw = div_krw_native + div_usd_native * fx_now  # 현재 환율 기준 합산
+    div_krw = (div_krw_native + div_usd_native * fx_now) if include_div else 0.0
 
-    realized_total_krw = t["realized_price_krw"] + t["realized_fx_krw"]
-    unreal_total_krw = t["unreal_total_krw"]
+    fx_total_krw = (t["realized_fx_krw"] + t["unreal_fx_krw"]) if include_fx else 0.0
+    realized_total_krw = t["realized_price_krw"] + (t["realized_fx_krw"] if include_fx else 0.0)
+    unreal_total_krw = t["unreal_total_krw"] if include_fx else t["unreal_price_krw"]
     pure_price_krw = t["realized_price_krw"] + t["unreal_price_krw"]
-    fx_total_krw = t["realized_fx_krw"] + t["unreal_fx_krw"]
     all_inclusive = realized_total_krw + unreal_total_krw + div_krw
     invested = t["buy_krw"]
     cost_rem = t["cost_krw_remaining"]
@@ -162,7 +163,8 @@ def compute_performance_summary(orders, fx_now=1400.0, div_krw_native=0.0, div_u
     }
 
 
-def build_holdings_breakdown(orders, fx_now=1400.0, name_map=None, div_krw_by_ticker=None):
+def build_holdings_breakdown(orders, fx_now=1400.0, name_map=None, div_krw_by_ticker=None,
+                             include_div=True, include_fx=True):
     """종목별로 분할매도를 반영한 평균단가 회계 표를 만듭니다.
     청산 종목은 '매도 시점 실현' 기준(현재가 아님), 보유 종목은 잔여수량 평가 기준으로 계산합니다.
     미국(USD) 종목은 달러 네이티브 컬럼과 환차 제거된 달러 기준 수익률(%)을 함께 제공합니다.
@@ -233,15 +235,22 @@ def build_holdings_breakdown(orders, fx_now=1400.0, name_map=None, div_krw_by_ti
             unreal_pnl_native = pn * held_qty - cost_native  # 달러 기준 미실현손익(환차 제외)
 
         # 투자원금 = 현재 보유분의 매입원가(청산 종목은 실현된 총 매수원가).
-        # 수익률(%)은 네이티브(미국=달러) 기준 → 환차 제거된 순수 주가 수익률.
+        # include_fx=True면 원화(환차 포함)+배당 기준, False면 네이티브(환차 제거·배당 제외) 기준 수익률.
+        div_amt = div_krw_map.get(s, 0.0) if include_div else 0.0
         if held_qty > 0:
             principal_krw = cost_krw
             principal_native = cost_native
-            ret_pct = (unreal_pnl_native / cost_native * 100) if cost_native else 0.0
+            if include_fx:
+                ret_pct = ((unreal_pnl_krw + div_amt) / cost_krw * 100) if cost_krw else 0.0
+            else:
+                ret_pct = (unreal_pnl_native / cost_native * 100) if cost_native else 0.0
         else:
             principal_krw = buy_krw
             principal_native = buy_native
-            ret_pct = (realized_pnl_native / buy_native * 100) if buy_native else 0.0
+            if include_fx:
+                ret_pct = ((realized_pnl_krw + div_amt) / buy_krw * 100) if buy_krw else 0.0
+            else:
+                ret_pct = (realized_pnl_native / buy_native * 100) if buy_native else 0.0
 
         is_usd = cur == "USD"
         rows.append({
@@ -259,7 +268,7 @@ def build_holdings_breakdown(orders, fx_now=1400.0, name_map=None, div_krw_by_ti
             "실현손익(원)": round(realized_pnl_krw),
             "평가손익(달러)": round(unreal_pnl_native, 2) if is_usd else None,
             "평가손익(원)": round(unreal_pnl_krw),
-            "누적배당금(원)": round(div_krw_map.get(s, 0.0)),
+            "누적배당금(원)": round(div_amt),
             "수익률(%)": round(ret_pct, 2),
         })
 
