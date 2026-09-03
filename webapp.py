@@ -22,6 +22,7 @@ import pipeline
 from manual_holdings import (
     read_transactions_csv, read_manual_csv, read_dividends_csv,
     write_transactions_csv, write_dividends_csv, TX_COLUMNS, DIV_COLUMNS,
+    read_splits_csv, write_splits_csv, SPLIT_COLUMNS,
     clear_all_imports, delete_broker_imports, imported_brokers,
     snapshot_imports, list_snapshots, restore_snapshot,
 )
@@ -542,9 +543,12 @@ def edit_data_page(request: Request, msg: str = ""):
                              "종목명": r.get("종목"), "통화": r.get("통화"), "배당금": r.get("배당금"),
                              "_src": "추정"})
 
+    sp = read_splits_csv()
+    split_rows = sp.fillna("").to_dict("records") if (sp is not None and not sp.empty) else []
+
     ctx = {"request": request, "user": user, "msg": msg,
-           "tx_rows": tx_rows, "div_rows": div_rows,
-           "tx_cols": TX_COLUMNS, "div_cols": DIV_COLUMNS}
+           "tx_rows": tx_rows, "div_rows": div_rows, "split_rows": split_rows,
+           "tx_cols": TX_COLUMNS, "div_cols": DIV_COLUMNS, "split_cols": SPLIT_COLUMNS}
     return templates.TemplateResponse(request, "edit_data.html", ctx)
 
 
@@ -598,6 +602,21 @@ async def edit_data_div(request: Request):
     snapshot_imports("배당 편집 전")
     df = pd.DataFrame([{c: r.get(c, "") for c in DIV_COLUMNS} for r in rows], columns=DIV_COLUMNS) if rows else pd.DataFrame(columns=DIV_COLUMNS)
     n = write_dividends_csv(df)
+    _CACHE.pop(user, None)
+    return JSONResponse({"ok": True, "count": n})
+
+
+@app.post("/edit-data/split")
+async def edit_data_split(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    pipeline.apply_credentials(user)
+    payload = await request.json()
+    rows = payload.get("rows", [])
+    df = pd.DataFrame([{c: r.get(c, "") for c in SPLIT_COLUMNS} for r in rows],
+                      columns=SPLIT_COLUMNS) if rows else pd.DataFrame(columns=SPLIT_COLUMNS)
+    n = write_splits_csv(df)
     _CACHE.pop(user, None)
     return JSONResponse({"ok": True, "count": n})
 

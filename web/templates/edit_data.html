@@ -42,16 +42,37 @@
     <tbody id="div-body"></tbody>
   </table></div>
 </div>
+
+<div class="section">
+  <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+    <h5 class="mb-0">주식 분할 (수동 보완)</h5>
+    <div class="d-flex gap-2 align-items-center">
+      <span id="split-msg" class="text-success small"></span>
+      <button class="btn btn-sm btn-outline-primary" onclick="addRow('split')">+ 행 추가</button>
+      <button class="btn btn-sm btn-toss-green" onclick="save('split')">💾 저장</button>
+    </div>
+  </div>
+  <div class="small text-secondary mb-2">
+    yfinance에 분할 정보가 없는 종목만 입력하세요. <b>비율</b>은 정방향 1주→2주는 <b>2</b>, 역방향 5주→1주는 <b>0.2</b>로 씁니다.
+    <b>분할일</b>은 YYYY-MM-DD 형식. (yfinance가 제공하는 종목은 자동 반영되므로 입력 불필요)
+  </div>
+  <div class="table-scroll"><table id="tbl-edit-split" class="table table-sm align-middle">
+    <thead><tr id="split-head"></tr></thead>
+    <tbody id="split-body"></tbody>
+  </table></div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 const TX_COLS = {{ tx_cols|tojson }};
 const DIV_COLS = {{ div_cols|tojson }};
+const SPLIT_COLS = {{ split_cols|tojson }};
 const txData = {{ tx_rows|tojson }};
 const divData = {{ div_rows|tojson }};
+const splitData = {{ split_rows|tojson }};
 const SELECTS = {"구분": ["매수", "매도"], "통화": ["KRW", "USD"]};
-const NUMS = ["수량", "단가", "배당금"];
+const NUMS = ["수량", "단가", "배당금", "비율"];
 
 function cell(col, val) {
   val = (val === null || val === undefined) ? "" : val;
@@ -79,8 +100,8 @@ function build(headId, bodyId, cols, data) {
   document.getElementById(bodyId).innerHTML = data.map(d => rowHtml(cols, d)).join('') || '';
 }
 function addRow(kind) {
-  const cols = kind === 'tx' ? TX_COLS : DIV_COLS;
-  const src = kind === 'tx' ? '임포트' : '검증';
+  const cols = kind === 'tx' ? TX_COLS : (kind === 'div' ? DIV_COLS : SPLIT_COLS);
+  const src = kind === 'tx' ? '임포트' : (kind === 'div' ? '검증' : '수동');
   document.getElementById(kind + '-body').insertAdjacentHTML('beforeend', rowHtml(cols, {_src: src}));
 }
 function collect(bodyId) {
@@ -118,6 +139,7 @@ async function save(kind) {
 }
 build('tx-head', 'tx-body', TX_COLS, txData);
 build('div-head', 'div-body', DIV_COLS, divData);
+build('split-head', 'split-body', SPLIT_COLS, splitData);
 if (window.initTableFilters) window.initTableFilters();
 </script>
 {% endblock %}

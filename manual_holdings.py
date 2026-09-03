@@ -14,20 +14,23 @@ from benchmark import to_yf_ticker, get_history
 MANUAL_CSV = os.path.join(os.path.dirname(__file__), "manual_holdings.csv")
 TX_CSV = os.path.join(os.path.dirname(__file__), "manual_transactions.csv")
 DIV_CSV = os.path.join(os.path.dirname(__file__), "manual_dividends.csv")
+SPLIT_CSV = os.path.join(os.path.dirname(__file__), "manual_splits.csv")
 TOSS_OVR_JSON = os.path.join(os.path.dirname(__file__), "toss_overrides.json")
 TRASH_DIR = os.path.join(os.path.dirname(__file__), "trash")
 
 COLUMNS = ["증권사", "티커", "종목명", "시장", "수량", "평균매수가", "통화", "매수일"]
 TX_COLUMNS = ["증권사", "일자", "티커", "종목명", "시장", "구분", "수량", "단가", "통화"]
 DIV_COLUMNS = ["증권사", "일자", "티커", "종목명", "통화", "배당금"]
+SPLIT_COLUMNS = ["티커", "종목명", "분할일", "비율"]
 
 
 def set_data_dir(directory):
     """사용자별 데이터 폴더로 CSV 저장 경로를 변경합니다(로그인 시 호출)."""
-    global MANUAL_CSV, TX_CSV, DIV_CSV, TOSS_OVR_JSON, TRASH_DIR
+    global MANUAL_CSV, TX_CSV, DIV_CSV, SPLIT_CSV, TOSS_OVR_JSON, TRASH_DIR
     MANUAL_CSV = os.path.join(directory, "manual_holdings.csv")
     TX_CSV = os.path.join(directory, "manual_transactions.csv")
     DIV_CSV = os.path.join(directory, "manual_dividends.csv")
+    SPLIT_CSV = os.path.join(directory, "manual_splits.csv")
     TOSS_OVR_JSON = os.path.join(directory, "toss_overrides.json")
     TRASH_DIR = os.path.join(directory, "trash")
 
@@ -310,6 +313,41 @@ def write_dividends_csv(df):
     out = out[DIV_COLUMNS]
     out = out[out["티커"].astype(str).str.strip() != ""]
     out.to_csv(DIV_CSV, index=False, encoding="utf-8-sig")
+    return len(out)
+
+
+def read_splits_csv():
+    """수동 입력 주식 분할 CSV를 읽어 반환합니다. (yfinance에 분할 데이터가 없는 종목 보완용)"""
+    if not os.path.exists(SPLIT_CSV):
+        return pd.DataFrame(columns=SPLIT_COLUMNS)
+    try:
+        df = pd.read_csv(SPLIT_CSV, encoding="utf-8-sig", dtype={"티커": str})
+        for c in SPLIT_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+        df["비율"] = pd.to_numeric(df["비율"], errors="coerce")
+        for c in ("티커", "종목명", "분할일"):
+            df[c] = df[c].fillna("").astype(str)
+        df["티커"] = df["티커"].map(normalize_ticker)
+        return df[SPLIT_COLUMNS]
+    except Exception as e:
+        print(f"[경고] 분할 CSV 읽기 실패: {e}")
+        return pd.DataFrame(columns=SPLIT_COLUMNS)
+
+
+def write_splits_csv(df):
+    """편집된 분할 기록 DataFrame을 CSV로 저장합니다. (빈 티커 또는 0 이하 비율 제외)"""
+    if df is None or df.empty:
+        pd.DataFrame(columns=SPLIT_COLUMNS).to_csv(SPLIT_CSV, index=False, encoding="utf-8-sig")
+        return 0
+    out = df.copy()
+    for c in SPLIT_COLUMNS:
+        if c not in out.columns:
+            out[c] = ""
+    out = out[SPLIT_COLUMNS]
+    ratio = pd.to_numeric(out["비율"], errors="coerce").fillna(0)
+    out = out[(out["티커"].astype(str).str.strip() != "") & (ratio > 0)]
+    out.to_csv(SPLIT_CSV, index=False, encoding="utf-8-sig")
     return len(out)
 
 

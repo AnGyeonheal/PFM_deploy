@@ -12,10 +12,10 @@ from pm import (
     get_order_history, get_stock_info,
 )
 from analytics_engine import transform_to_mvp_json, build_transaction_detail
-from benchmark import get_usdkrw_history
+from benchmark import get_usdkrw_history, get_splits, to_yf_ticker
 from manual_holdings import (
     set_data_dir, load_manual_holdings, manual_to_orders,
-    read_manual_csv, read_transactions_csv, read_dividends_csv,
+    read_manual_csv, read_transactions_csv, read_dividends_csv, read_splits_csv,
     transactions_to_orders, derive_holdings_from_tx,
     read_toss_overrides, write_toss_overrides,
 )
@@ -322,6 +322,7 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True,
         combined_orders += transactions_to_orders(tx_df)
     if use_tx and holdings_snapshot is not None and not holdings_snapshot.empty:
         combined_orders += manual_to_orders(holdings_snapshot)
+    combined_orders = apply_split_adjustments(combined_orders)  # 분할/역분할을 현재 주식 수 기준으로 통일
 
     name_map = dict(toss_name_map)
     if has_manual:
@@ -405,6 +406,72 @@ def _dated_div_events(orders, fx, ticker=None):
             continue
         events.append((ed, krw, sym))
     return sorted(events, key=lambda x: x[0])
+
+
+def _split_map(symbol, currency, manual_df=None):
+    """종목의 분할 이벤트 {분할일: 비율}. yfinance + 수동 입력 병합(수동이 우선)."""
+    m = {}
+    try:
+        yft = to_yf_ticker(symbol, "KR" if currency == "KRW" else "US")
+        for d, r in get_splits(yft).items():
+            m[pd.Timestamp(d).tz_localize(None).normalize()] = float(r)
+    except Exception:
+        pass
+    if manual_df is not None and not manual_df.empty:
+        for _, row in manual_df.iterrows():
+            if str(row.get("티커")) != str(symbol):
+                continue
+            try:
+                d = pd.to_datetime(row.get("분할일")).tz_localize(None).normalize()
+                r = float(row.get("비율"))
+            except Exception:
+                continue
+            if r > 0:
+                m[d] = r  # 수동이 yfinance 값을 덮어씀
+    return m
+
+
+def apply_split_adjustments(orders):
+    """거래를 현재 주식 수 기준으로 통일. 거래일 이후 분할계수 R을 곱해 수량×R, 단가÷R (투자원금 불변).
+    정방향(비율>1)·역방향(비율<1) 모두 처리. yfinance 분할 + 수동 분할(manual_splits.csv) 반영.
+    """
+    if not orders:
+        return orders
+    try:
+        manual_df = read_splits_csv()
+    except Exception:
+        manual_df = None
+    cache = {}
+    out = []
+    for o in orders:
+        ex = dict(o.get("execution") or {})
+        sym = o.get("symbol")
+        raw = ex.get("filledAt") or o.get("orderedAt")
+        try:
+            d = pd.to_datetime(raw).tz_localize(None).normalize()
+        except Exception:
+            try:
+                d = pd.to_datetime(raw, utc=True).tz_localize(None).normalize()
+            except Exception:
+                out.append(o)
+                continue
+        if sym not in cache:
+            cache[sym] = _split_map(sym, o.get("currency", "KRW"), manual_df)
+        R = 1.0
+        for sd, ratio in cache[sym].items():
+            if sd > d:  # 거래일 이후 분할만 반영
+                R *= ratio
+        if R != 1.0:
+            qty = float(ex.get("filledQuantity") or 0)
+            avg = float(ex.get("averageFilledPrice") or 0)
+            if qty:
+                ex["filledQuantity"] = qty * R
+            if avg:
+                ex["averageFilledPrice"] = avg / R
+            o = dict(o)
+            o["execution"] = ex  # filledAmount(투자원금)는 불변
+        out.append(o)
+    return out
 
 
 def growth_frame(combined_orders, fx_rate, ticker=None, include_div=True, include_fx=True):

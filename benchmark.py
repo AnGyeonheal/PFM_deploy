@@ -84,6 +84,24 @@ def _get_dividends_uncached(yf_ticker):
         return pd.Series(dtype=float)
 
 
+def get_splits(yf_ticker):
+    """주식 분할 이력(pandas Series, 분할일 인덱스, 값=비율). 정방향>1(1→2=2.0), 역방향<1(5→1=0.2). (tz 제거)"""
+    return _memo(("splits", yf_ticker), lambda: _get_splits_uncached(yf_ticker))
+
+
+def _get_splits_uncached(yf_ticker):
+    try:
+        sp = yf.Ticker(yf_ticker).splits
+        if sp is None or sp.empty:
+            return pd.Series(dtype=float)
+        sp = sp.copy()
+        sp.index = pd.to_datetime(sp.index).tz_localize(None).normalize()
+        return sp[sp > 0]
+    except Exception as e:
+        print(f"[경고] yfinance {yf_ticker} 분할 조회 실패: {e}")
+        return pd.Series(dtype=float)
+
+
 def get_usdkrw_history(period="2y"):
     """USD/KRW 환율 일별 종가 시계열을 반환합니다. (yfinance 'KRW=X')"""
     return get_history("KRW=X", period=period)
