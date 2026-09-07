@@ -54,6 +54,15 @@ def _safe_asof(series, date, fallback):
         return fallback
 
 
+def _held_symbols(recs):
+    """순보유수량>0(현재 보유) & 티커 있는 종목 집합.
+    전량/초과매도·티커누락 종목은 평가 불가 → 원금엔 잡히고 평가액엔 빠져 수익률이 음수로 왜곡되므로 제외."""
+    net = {}
+    for r in recs:
+        net[r["symbol"]] = net.get(r["symbol"], 0) + (1 if r["side"] == "BUY" else -1) * r["qty"]
+    return {s for s, n in net.items() if s and n > 0}
+
+
 def compute_rolling_beta(orders, fx_now=1400.0, ticker=None, window=60, period="10y"):
     """대상(전체 또는 특정 종목)의 시장(S&P500) 대비 롤링 베타 시계열을 계산합니다.
     - 종목: 해당 종목 주가 수익률 vs S&P500 수익률(통화 일치)
@@ -148,6 +157,29 @@ def _avg_buy_fx_series(sym_recs, idx, fx_hist, fx_now):
     return eff
 
 
+def _cost_native_avg_fx_series(sym_recs, idx, fx_hist, fx_now):
+    """USD 종목의 보유 매수원가(달러)·가중평균 매수환율 시계열(평균법)."""
+    cost_native = pd.Series(0.0, index=idx)
+    avg_fx = pd.Series(fx_now, index=idx)
+    cn = cost_fx = hold_q = 0.0
+    cur = fx_now
+    for r in sorted(sym_recs, key=lambda x: x["date"]):
+        fx_b = _safe_asof(fx_hist, r["date"], fx_now)
+        if r["side"] == "BUY":
+            cn += r["amount"]
+            cost_fx += r["qty"] * fx_b
+            hold_q += r["qty"]
+        elif hold_q > 0:
+            sell = min(r["qty"], hold_q)
+            cn -= sell * (cn / hold_q)
+            cost_fx -= sell * (cost_fx / hold_q)
+            hold_q -= sell
+        cur = (cost_fx / hold_q) if hold_q > 1e-9 else cur
+        cost_native.loc[cost_native.index >= r["date"]] = cn
+        avg_fx.loc[avg_fx.index >= r["date"]] = cur
+    return cost_native, avg_fx
+
+
 def _holdings_value_series(recs_sorted, symbols, sym_hist, sym_cur,
                           fx_daily, fx_hist, fx_now, idx, include_fx=True):
     """보유수량 × 주가 × 환율 일별 평가액(원화) 합계. include_fx=False면 달러 종목을 매수평균환율로 고정(환차 제거)."""
@@ -155,16 +187,21 @@ def _holdings_value_series(recs_sorted, symbols, sym_hist, sym_cur,
     for s in symbols:
         if s not in sym_hist:
             continue
-        if sym_cur[s] == "USD":
-            fx_use = fx_daily if include_fx else _avg_buy_fx_series(
-                [x for x in recs_sorted if x["symbol"] == s], idx, fx_hist, fx_now)
-        else:
-            fx_use = 1.0
+        sym_recs = [x for x in recs_sorted if x["symbol"] == s]
         qty = pd.Series(0.0, index=idx)
-        for r in [x for x in recs_sorted if x["symbol"] == s]:
+        for r in sym_recs:
             sign = 1 if r["side"] == "BUY" else -1
             qty.loc[qty.index >= r["date"]] += sign * r["qty"]
-        my_val = my_val.add(qty * sym_hist[s] * fx_use, fill_value=0)
+        if sym_cur[s] != "USD":
+            my_val = my_val.add(qty * sym_hist[s], fill_value=0)
+        elif include_fx:
+            my_val = my_val.add(qty * sym_hist[s] * fx_daily, fill_value=0)
+        else:
+            # 환차 제거(매수원금 기준): 평가액(현재환율) − 원금×(현재환율−매수평균환율).
+            # 평가액 전체가 아니라 매수원금에만 환율차를 적용해 실현손익 환차 계산과 일치시킨다.
+            cost_native, avg_fx = _cost_native_avg_fx_series(sym_recs, idx, fx_hist, fx_now)
+            gross = qty * sym_hist[s] * fx_daily
+            my_val = my_val.add(gross - cost_native * (fx_daily - avg_fx), fill_value=0)
     return my_val
 
 
@@ -183,6 +220,12 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
         recs = [r for r in recs if r["symbol"] == ticker]
     if not recs:
         return pd.DataFrame()
+    # 전체(ticker=None) 분석만 보유 종목 필터 — 개별 종목 분석은 청산(전량매도) 종목도 전체 이력을 표시해야 한다.
+    if not ticker:
+        _held = _held_symbols(recs)
+        recs = [r for r in recs if r["symbol"] in _held]
+        if not recs:
+            return pd.DataFrame()
     symbols = sorted(set(r["symbol"] for r in recs))
     spy_hist = get_history(BENCHMARK_TICKER, period="10y")
     fx_hist = get_usdkrw_history("10y")
@@ -262,7 +305,7 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
     return out
 
 
-def build_twr_comparison(orders, fx_now=1400.0, ticker=None, period="10y"):
+def build_twr_comparison(orders, fx_now=1400.0, ticker=None, period="10y", include_fx=True):
     """투자금(현금흐름) 효과를 제거한 시간가중수익률(TWR) 비교.
     월급 등 추가 투입과 무관하게 '1원당 성과'로 내 포트폴리오 vs S&P500(원화)을 비교합니다.
     둘 다 시작 0%에서 출발. 반환: DataFrame[내 수익률(%), S&P500 수익률(%)]
@@ -304,7 +347,7 @@ def build_twr_comparison(orders, fx_now=1400.0, ticker=None, period="10y"):
 
     invested = pd.Series(0.0, index=idx)
     for r in recs_sorted:
-        fx_d = _safe_asof(fx_hist, r["date"], fx_now)
+        fx_d = _safe_asof(fx_hist, r["date"], fx_now) if include_fx else float(fx_daily.iloc[0])
         cf = r["amount"] * fx_d if r["currency"] == "USD" else r["amount"]
         invested.loc[invested.index >= r["date"]] += (1 if r["side"] == "BUY" else -1) * cf
 
@@ -430,7 +473,9 @@ def build_spy_dca(orders, fx_now=1400.0, start_ym=None):
     반환: (ts[S&P500 일시투자, 내 포트폴리오, 시작 금액], monthly_df, summary)
     """
     recs = _trade_records(orders)
-    buys = [r for r in recs if r["side"] == "BUY"]
+    # 순보유수량>0인 종목만 시뮬 대상 — 전량/초과매도·티커누락 종목은 평가 불가라 제외(원금·평가 대칭).
+    held_syms = _held_symbols(recs)
+    buys = [r for r in recs if r["side"] == "BUY" and r["symbol"] in held_syms]
     empty = (pd.DataFrame(), pd.DataFrame(), {})
     if not buys:
         return empty
@@ -457,14 +502,16 @@ def build_spy_dca(orders, fx_now=1400.0, start_ym=None):
     spy_daily = align(spy)
     fx_daily = align(fx_hist) if not fx_hist.empty else pd.Series(fx_now, index=idx)
 
-    # 내 실제 보유 평가액(전체 매매 반영) — 시작금액 산출 & 비교용
-    symbols = sorted(set(r["symbol"] for r in recs))
+    # 내 실제 보유 평가액(보유 종목만) — 시작금액 산출 & 비교용. 가격조회 실패 종목은 valid에서 제외.
+    symbols = sorted(held_syms)
     sym_cur = {s: next(r["currency"] for r in recs if r["symbol"] == s) for s in symbols}
+    valid_syms = set()
     my_hold = pd.Series(0.0, index=idx)
     for s in symbols:
         h = get_history(to_yf_ticker(s, "KR" if sym_cur[s] == "KRW" else "US"), period="10y")
         if h.empty:
             continue
+        valid_syms.add(s)
         px = align(h)
         qty = pd.Series(0.0, index=idx)
         for r in [x for x in recs if x["symbol"] == s]:
@@ -486,10 +533,13 @@ def build_spy_dca(orders, fx_now=1400.0, start_ym=None):
     sim.loc[mask] = start_shares * spy_daily.loc[mask] * fx_daily.loc[mask]
 
     # 내 투자원금(수익금 계산용): 시작월 시점 자산 + 이후 순투입(추가 매수 − 매도 회수)
+    # 시작월 당일(T0_eff) 거래는 이미 start_krw(그 시점 평가액)에 반영되므로 순투입에서 제외(이중계상 방지).
     my_principal = pd.Series(0.0, index=idx)
     my_principal.loc[mask] = start_krw
     for r in recs:
-        if r["date"] >= T0_eff:
+        if r["symbol"] not in valid_syms:
+            continue
+        if r["date"] > T0_eff:
             cf = r["amount"] * _safe_asof(fx_hist, r["date"], fx_last) if r["currency"] == "USD" else r["amount"]
             my_principal.loc[my_principal.index >= r["date"]] += (1 if r["side"] == "BUY" else -1) * cf
 
@@ -620,6 +670,11 @@ def compute_alpha_beta(orders, fx_now=1400.0, period="10y", div_events=None,
     반환: dict 또는 None
     """
     recs = _trade_records(orders)
+    if not recs:
+        return None
+    # 보유 종목(순수량>0·티커有)만 — 전량/초과매도·티커누락 종목이 원금엔 잡히고 평가엔 빠져 XIRR이 음수로 왜곡되는 것 방지.
+    _held = _held_symbols(recs)
+    recs = [r for r in recs if r["symbol"] in _held]
     if not recs:
         return None
 

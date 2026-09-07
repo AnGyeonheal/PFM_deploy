@@ -39,6 +39,11 @@ app = FastAPI(title="자산관리 대시보드")
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("WEB_SECRET_KEY", _secrets.token_hex(32)))
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "web", "static")), name="static")
 
+# Figma 기반 React SPA(빌드 산출물)를 /app 에서 서빙
+_FIGMA_DIST = os.path.join(BASE_DIR, "Asset Portfolio Performance Analysis", "dist")
+if os.path.isdir(_FIGMA_DIST):
+    app.mount("/app", StaticFiles(directory=_FIGMA_DIST, html=True), name="figma")
+
 
 @app.middleware("http")
 async def _no_store_api(request: Request, call_next):
@@ -81,6 +86,36 @@ def _df_records(df, limit=None):
     return d.to_dict(orient="records")
 
 
+_PERIOD_MONTHS = {"1M": 1, "3M": 3, "6M": 6, "1Y": 12, "5Y": 60}
+
+
+def _twr_growth_series(twr, period=""):
+    """TWR 비교 DF를 기간 필터 후 시작=100 기준으로 월별 rebase한 (portfolio, sp500) 시리즈."""
+    if twr is None or twr.empty:
+        return None, None
+    n = _PERIOD_MONTHS.get((period or "").upper())
+    if n:
+        cut = pd.Timestamp.now().normalize() - pd.DateOffset(months=n)
+        twr = twr[twr.index >= cut]
+    if twr.empty:
+        return None, None
+    p = twr["내 수익률(%)"]
+    s = twr["S&P500 수익률(%)"]
+    p0, s0 = p.iloc[0], s.iloc[0]
+    pl = 100 * (1 + p / 100) / (1 + p0 / 100)
+    sl = 100 * (1 + s / 100) / (1 + s0 / 100)
+    return pl.resample("ME").last().dropna(), sl.resample("ME").last().dropna()
+
+
+def _pdf_to_text(content: bytes) -> str:
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(content))
+        return "\n".join((p.extract_text() or "") for p in reader.pages)
+    except Exception:
+        return ""
+
+
 def _fig_json(fig):
     import plotly.utils
     import json as _json
@@ -102,6 +137,486 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
         request.session["user"] = username.strip()
         return RedirectResponse("/", status_code=302)
     return templates.TemplateResponse(request, "login.html", {"err": message, "msg": ""})
+
+
+# React 앱(/app) 전용 JSON API
+@app.post("/api/app/login")
+async def api_app_login(request: Request):
+    body = await request.json()
+    username = str(body.get("username", "")).strip()
+    password = str(body.get("password", ""))
+    ok, message = auth.verify_user(username, password)
+    if ok:
+        request.session["user"] = username
+        return JSONResponse({"ok": True, "user": username})
+    return JSONResponse({"ok": False, "error": message or "로그인 실패"}, status_code=401)
+
+
+@app.post("/api/app/register")
+async def api_app_register(request: Request):
+    body = await request.json()
+    username = str(body.get("username", "")).strip()
+    password = str(body.get("password", ""))
+    ok, message = auth.register_user(username, password)
+    if ok:
+        request.session["user"] = username  # 가입 즉시 자동 로그인
+        return JSONResponse({"ok": True, "user": username})
+    return JSONResponse({"ok": False, "error": message or "회원가입 실패"}, status_code=400)
+
+
+@app.post("/api/app/logout")
+def api_app_logout(request: Request):
+    request.session.clear()
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/app/me")
+def api_app_me(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"ok": False}, status_code=401)
+    return JSONResponse({"ok": True, "user": user})
+
+
+@app.get("/api/app/dashboard")
+def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str = "", period: str = ""):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    data = get_portfolio(user, include_div=bool(div), include_fx=bool(fx))
+    summary = data["summary"] or {}
+    perf = data["perf"] or {}
+    fx_rate = data["fx_rate"]
+    name_map = data["name_map"]
+    sa = data.get("stock_analytics")
+    sa_map = {str(r["티커"]): r for r in sa.to_dict("records")} if (sa is not None and not sa.empty) else {}
+    stocks = []
+    per_fx = _per_ticker_fx(data["combined_orders"], fx_rate) if data["combined_orders"] else {}
+    for r in _df_records(data["breakdown"]):
+        tk = str(r.get("티커"))
+        a = sa_map.get(tk)
+        buy = float(r.get("투자원금(원)") or 0)
+        upnl = float(r.get("평가손익(원)") or 0)
+        cur = r.get("통화", "KRW")
+        _pf = per_fx.get(tk)
+        avg_fx = _pf["avg_fx"] if (cur == "USD" and _pf) else None
+        if cur == "USD":
+            avg_price = float(r.get("평단가(달러)") or 0)
+            avg_price_krw = float(r.get("평단가(원화)") or 0)
+        else:
+            avg_price = float(r.get("평단가(원화)") or 0)
+            avg_price_krw = avg_price
+        # 순수 주가손익(원, 환차 제외) = 달러 평가손익 × 매수평균환율 → 달러 수익률과 일관
+        upnl_native = float(r.get("평가손익(달러)") or 0)
+        if cur == "USD" and avg_fx:
+            pure_krw = upnl_native * avg_fx
+            fx_pnl_stock = upnl - pure_krw
+        else:
+            pure_krw = upnl
+            fx_pnl_stock = 0.0
+        display_upnl = pure_krw if (cur == "USD" and not bool(fx)) else upnl  # 환차 토글 반영
+        stocks.append({
+            "ticker": tk, "name": name_map.get(tk) or r.get("종목") or tk,
+            "currency": cur, "quantity": float(r.get("보유수량") or 0),
+            "currentPrice": (a.get("현재주가") if a else None),
+            "avgPrice": avg_price, "avgPriceKrw": avg_price_krw,
+            "avgBuyFx": (round(avg_fx, 1) if avg_fx else None),
+            "buyTotal": buy, "currentTotal": buy + display_upnl, "unrealizedPnL": display_upnl,
+            "pureStockKrw": round(pure_krw), "fxPnLStock": round(fx_pnl_stock if bool(fx) else 0),
+            "realizedPnL": float(r.get("실현손익(원)") or 0),
+            "dividend": float(r.get("누적배당금(원)") or 0),
+            "returnPct": float(r.get("수익률(%)") or 0), "status": r.get("상태", ""),
+        })
+    holdings = data["holdings"]
+    allocation = [{"name": (h.get("name") or h.get("ticker")), "value": round(float(h.get("weight_pct") or 0), 1)}
+                  for h in holdings if float(h.get("weight_pct") or 0) > 0]
+    metrics = {
+        "totalAsset": summary.get("total_asset_krw") or 0,
+        "totalCurrent": summary.get("stock_eval_krw") or 0,
+        "cash": (summary.get("cash_krw_native") or 0) + (summary.get("cash_usd_native") or 0) * fx_rate,
+        "totalBuy": perf.get("invested_krw") or 0,
+        "unrealizedPnL": perf.get("unreal_total_krw") or 0,
+        "realizedPnL": perf.get("realized_total_krw") or 0,
+        "dividendPnL": perf.get("div_krw") or 0,
+        "fxPnL": perf.get("fx_total_krw") or 0,
+        "pureStockPnL": perf.get("pure_price_krw") or 0,
+        "totalPnL": perf.get("all_inclusive_krw") or 0,
+        "returnPct": perf.get("all_inclusive_pct") or 0,
+    }
+    all_tickers = [{"ticker": s["ticker"], "name": s["name"]} for s in stocks]
+    if ticker:
+        sel = [x for x in stocks if x["ticker"] == ticker]
+        if sel:
+            s0 = sel[0]
+            _tp = s0["unrealizedPnL"] + s0["realizedPnL"] + s0["dividend"]  # unrealizedPnL은 이미 환차 토글 반영
+            metrics = {
+                "totalAsset": s0["currentTotal"], "totalCurrent": s0["currentTotal"], "cash": 0,
+                "totalBuy": s0["buyTotal"], "unrealizedPnL": s0["unrealizedPnL"],
+                "realizedPnL": s0["realizedPnL"], "dividendPnL": s0["dividend"], "fxPnL": s0["fxPnLStock"],
+                "pureStockPnL": s0["pureStockKrw"], "totalPnL": _tp,
+                "returnPct": s0["returnPct"],
+            }
+            stocks = sel
+            allocation = [{"name": s0["name"], "value": 100.0}]
+    growth = []
+    try:
+        twr = pipeline.twr_comparison(data["combined_orders"], fx_rate, ticker or None, include_fx=bool(fx))
+        _pm, _sm = _twr_growth_series(twr, period)
+        if _pm is not None:
+            for _dt in _pm.index:
+                growth.append({"month": _dt.strftime("%y/%m"),
+                               "portfolio": round(float(_pm.loc[_dt]), 1),
+                               "sp500": round(float(_sm.loc[_dt]) if _dt in _sm.index else 0.0, 1)})
+    except Exception:
+        growth = []
+    return JSONResponse({"metrics": metrics, "stocks": stocks, "allocation": allocation, "fx": fx_rate, "growth": growth, "tickers": all_tickers})
+
+
+@app.get("/api/app/tickers")
+def api_app_tickers(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    data = get_portfolio(user)
+    bd = data["breakdown"]
+    nm = data["name_map"]
+    out = []
+    if bd is not None and not bd.empty:
+        for r in bd.to_dict("records"):
+            tk = str(r.get("티커"))
+            out.append({"ticker": tk, "name": nm.get(tk) or r.get("종목") or tk})
+    return JSONResponse({"tickers": out})
+
+
+@app.get("/api/app/transactions")
+def api_app_transactions(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    data = get_portfolio(user)
+    detail_df = data["detail_df"]
+    src = (detail_df.sort_values("체결일시", ascending=False)
+           if (detail_df is not None and not detail_df.empty) else detail_df)
+    txs = []
+    for r in _df_records(src, limit=500):
+        gubun = str(r.get("구분") or "")
+        txs.append({
+            "date": r.get("날짜"), "ticker": str(r.get("티커") or ""),
+            "name": r.get("종목명") or "", "type": "buy" if gubun == "매수" else "sell",
+            "quantity": float(r.get("수량") or 0), "price": float(r.get("체결단가") or 0),
+            "currency": r.get("통화") or "KRW", "amount": float(r.get("체결금액(원)") or 0),
+            "broker": r.get("증권사") or "",
+        })
+    divs = []
+    _nm = data["name_map"]
+    for d in (data["dividends_rows"] or []):
+        gubun = str(d.get("구분") or "")
+        _tk = str(d.get("티커") or "")
+        _dnm = d.get("종목") or ""
+        if not _dnm or _dnm == _tk:
+            _dnm = _nm.get(_tk) or _dnm or _tk
+        divs.append({
+            "date": d.get("일자") or "", "ticker": _tk,
+            "name": _dnm, "amount": float(d.get("배당금") or 0),
+            "currency": d.get("통화") or "KRW", "amountKRW": float(d.get("원화환산") or 0),
+            "verified": gubun.startswith("검증"), "status": gubun,
+        })
+    return JSONResponse({"transactions": txs, "dividends": divs})
+
+
+def _per_ticker_fx(orders, fx):
+    tickers = {o.get("symbol") for o in orders if o.get("currency") == "USD"}
+    out = {}
+    for tk in tickers:
+        sub = [o for o in orders if o.get("symbol") == tk]
+        r = compute_usd_avg_cost(sub, fx)
+        if r:
+            out[tk] = r
+    return out
+
+
+@app.get("/api/app/fx")
+def api_app_fx(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    data = get_portfolio(user)
+    orders = data["combined_orders"]
+    fx = data["fx_rate"]
+    usd = compute_usd_avg_cost(orders, fx) if orders else None
+    avg_buy_fx = (usd or {}).get("avg_fx")
+    history = []
+    frame = build_usdkrw_history_frame("5y")
+    if frame is not None and not frame.empty:
+        monthly = frame["원/달러"].resample("ME").last().dropna()
+        for dt, v in monthly.items():
+            row = {"month": dt.strftime("%y/%m"), "fx": round(float(v), 1)}
+            if avg_buy_fx:
+                row["avgBuy"] = round(float(avg_buy_fx), 1)
+            history.append(row)
+    per_fx = _per_ticker_fx(orders, fx) if orders else {}
+    fx_stocks = []
+    for h in data["holdings"]:
+        if h.get("currency") == "USD":
+            r = per_fx.get(h.get("ticker"))
+            eval_krw = float(h.get("eval_krw") or 0)
+            fx_stocks.append({
+                "ticker": h.get("ticker"), "name": h.get("name"),
+                "avgBuyFx": round(r["avg_fx"], 1) if r else None,
+                "evalKrw": eval_krw, "fxPnL": (r["fx_pnl_krw"] if r else 0.0),
+            })
+    return JSONResponse({
+        "currentFx": fx, "avgBuyFx": avg_buy_fx,
+        "fxPnlTotal": (usd or {}).get("fx_pnl_krw") or 0,
+        "history": history, "stocks": fx_stocks,
+    })
+
+
+@app.get("/api/app/benchmark")
+def api_app_benchmark(request: Request, div: int = 1, fx: int = 1, start: str = "", ticker: str = "", period: str = ""):
+    import numpy as np
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    data = get_portfolio(user, include_div=bool(div), include_fx=bool(fx))
+    orders = data["combined_orders"]
+    fxr = data["fx_rate"]
+    if not orders:
+        return JSONResponse({"error": "no_data"}, status_code=404)
+    ab = data["ab"] or {}
+    tkr = ticker or None
+
+    twr = pipeline.twr_comparison(orders, fxr, tkr, include_fx=bool(fx))
+    growth, rolling_beta, monthly_alpha = [], [], []
+    sharpe = twr_final = None
+    if twr is not None and not twr.empty:
+        pcol, scol = "내 수익률(%)", "S&P500 수익률(%)"
+        twr_final = round(float(twr[pcol].iloc[-1]), 1)
+        pr = (1 + twr[pcol] / 100).pct_change()
+        sr = (1 + twr[scol] / 100).pct_change()
+        j = pd.concat([pr, sr], axis=1, keys=["p", "s"]).replace([np.inf, -np.inf], np.nan).dropna()
+        j = j[j["s"] != 0]
+        if len(j) > 0:
+            pmo = (1 + j["p"]).resample("ME").prod() - 1
+            smo = (1 + j["s"]).resample("ME").prod() - 1
+            for dt in pmo.index:
+                monthly_alpha.append({"month": dt.strftime("%y/%m"),
+                                      "alpha": round(float((pmo.loc[dt] - smo.loc[dt]) * 100), 2)})
+            if float(j["p"].std()) > 0:
+                sharpe = round(float((j["p"].mean() * 252 - 0.035) / (j["p"].std() * np.sqrt(252))), 2)
+
+    rb_series = None
+    try:
+        rb_series = pipeline.rolling_beta(orders, fxr, tkr)
+        if rb_series is not None and not rb_series.empty:
+            for _dt, _v in rb_series.resample("ME").last().dropna().items():
+                rolling_beta.append({"month": _dt.strftime("%y/%m"), "beta": round(float(_v), 2)})
+    except Exception:
+        pass
+
+    # 자산가치 성장(금액): 내가 산 종목 대신 같은 시점·금액으로 S&P500을 매매했다면의 변화
+    try:
+        gdf = pipeline.growth_frame(orders, fxr, tkr, include_div=bool(div), include_fx=bool(fx))
+        if gdf is not None and not gdf.empty:
+            g = gdf
+            _n = _PERIOD_MONTHS.get((period or "").upper())
+            if _n:
+                _cut = pd.Timestamp.now().normalize() - pd.DateOffset(months=_n)
+                g = g[g.index >= _cut]
+            _mine = g["내 자산가치"].resample("ME").last().dropna()
+            _spy = g["S&P500 자산가치"].resample("ME").last().dropna()
+            _prin = g["순투자원금"].resample("ME").last().dropna()
+            _bser = None
+            if rb_series is not None and not rb_series.empty:
+                _rb = rb_series[rb_series.index >= _cut] if _n else rb_series
+                _bser = _rb.resample("ME").last()
+            # 수익률/알파는 자산가치(순투자원금 대비) 기준 — 그래프 금액 모드와 일치하고 배당·환차 반영.
+            # 기간 지정 시 기간초 자산 대비 순손익률(기간 내 추가 순투자 제외)로 환산.
+            _ts = _mine.index[0]
+            _m0 = float(_mine.loc[_ts])
+            _s0 = float(_spy.loc[_ts]) if _ts in _spy.index else _m0
+            _pp0 = float(_prin.loc[_ts]) if _ts in _prin.index else 0.0
+            for _dt in _mine.index:
+                _m = float(_mine.loc[_dt])
+                _s = float(_spy.loc[_dt]) if _dt in _spy.index else 0.0
+                _p = float(_prin.loc[_dt]) if _dt in _prin.index else 0.0
+                if _n:  # 기간 지정: 기간 투입자본(기간초 자산 + 기간 순투자) 대비 순손익률 — 기간초 자산이 작아도 안정
+                    _dp = _p - _pp0
+                    _base_m = _m0 + _dp
+                    _base_s = _s0 + _dp
+                    _pr = ((_m - _m0 - _dp) / _base_m * 100) if _base_m > 1 else None
+                    _sr = ((_s - _s0 - _dp) / _base_s * 100) if _base_s > 1 else None
+                else:  # 전체: 순투자원금 대비 누적 수익률
+                    _pr = ((_m - _p) / _p * 100) if _p > 1 else None
+                    _sr = ((_s - _p) / _p * 100) if _p > 1 else None
+                _bt = float(_bser.loc[_dt]) if (_bser is not None and _dt in _bser.index and pd.notna(_bser.loc[_dt])) else None
+                growth.append({"month": _dt.strftime("%y/%m"),
+                               "portfolio": round(_m),
+                               "sp500": round(_s),
+                               "principal": round(_p),
+                               "portfolioPct": round(_pr, 1) if _pr is not None else None,
+                               "sp500Pct": round(_sr, 1) if _sr is not None else None,
+                               "alpha": round(_pr - _sr, 1) if (_pr is not None and _sr is not None) else None,
+                               "beta": round(_bt, 2) if _bt is not None else None})
+    except Exception:
+        pass
+
+    ret_map = {}
+    if data["breakdown"] is not None and not data["breakdown"].empty:
+        for r in data["breakdown"].to_dict("records"):
+            ret_map[str(r.get("티커"))] = float(r.get("수익률(%)") or 0)
+    per_stock = []
+    sa = data.get("stock_analytics")
+    if sa is not None and not sa.empty:
+        for r in sa.to_dict("records"):
+            tk = str(r.get("티커"))
+            per_stock.append({
+                "ticker": tk, "name": r.get("종목") or tk,
+                "returnPct": ret_map.get(tk, 0.0),
+                "alpha": float(r.get("알파(연%)") or 0), "beta": float(r.get("베타") or 0),
+                "alphaContrib": float(r.get("알파기여(%)") or 0),
+                "betaContrib": float(r.get("베타기여(%)") or 0),
+            })
+
+    simulation = None
+    try:
+        _ts, _monthly, sim_summary = pipeline.spy_dca(orders, fxr, start or None)
+        if sim_summary:
+            simulation = {
+                "startYm": sim_summary.get("시작월"), "startKrw": sim_summary.get("시작금액"),
+                "myProfit": sim_summary.get("내수익금"), "spyProfit": sim_summary.get("S&P500수익금"),
+                "diff": sim_summary.get("차이"),
+            }
+    except Exception:
+        simulation = None
+
+    summary = {
+        "portfolioReturn": ab.get("port_xirr_pct"), "sp500Return": ab.get("spy_xirr_pct"),
+        "alpha": ab.get("alpha_pct"), "beta": ab.get("beta"),
+        "corr": ab.get("corr"), "sharpe": sharpe, "twrReturn": twr_final,
+    }
+    if ticker:
+        sa_row = None
+        if sa is not None and not sa.empty:
+            _mm = [r for r in sa.to_dict("records") if str(r.get("티커")) == ticker]
+            sa_row = _mm[0] if _mm else None
+        _sp_final = round(float(twr["S&P500 수익률(%)"].iloc[-1]), 2) if (twr is not None and not twr.empty) else None
+        summary = {
+            "portfolioReturn": ret_map.get(ticker), "sp500Return": _sp_final,
+            "alpha": (sa_row.get("알파(연%)") if sa_row else None),
+            "beta": (sa_row.get("베타") if sa_row else None),
+            "corr": None, "sharpe": sharpe, "twrReturn": twr_final,
+        }
+    # 요약 카드를 성장차트(TWR·기간·배당·환차·종목 옵션이 모두 반영된) 최종 시점값과 일치시켜
+    # 그래프 툴팁과 요약 알파/수익률/베타가 어긋나지 않도록 한다.
+    if growth:
+        _l = growth[-1]
+        if _l.get("portfolioPct") is not None:
+            summary["portfolioReturn"] = _l["portfolioPct"]
+        if _l.get("sp500Pct") is not None:
+            summary["sp500Return"] = _l["sp500Pct"]
+        if _l.get("alpha") is not None:
+            summary["alpha"] = _l["alpha"]
+        # beta는 성장차트 롤링베타의 마지막 1점(최근 구간이라 불안정)이 아니라 전체 회귀 베타(CAPM)를 사용
+    all_tickers = []
+    _bd = data["breakdown"]
+    if _bd is not None and not _bd.empty:
+        _nm = data["name_map"] or {}
+        for _r in _bd.to_dict("records"):
+            _tk = str(_r.get("티커"))
+            all_tickers.append({"ticker": _tk, "name": _nm.get(_tk) or _r.get("종목") or _tk})
+    return JSONResponse({
+        "summary": summary, "growth": growth, "rollingBeta": rolling_beta,
+        "monthlyAlpha": monthly_alpha, "perStock": per_stock, "simulation": simulation,
+        "tickers": all_tickers,
+    })
+
+
+@app.get("/api/app/datasources")
+def api_app_datasources(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    data = get_portfolio(user)
+    detail_df = data["detail_df"]
+    tx_count = int(len(detail_df)) if (detail_df is not None and not detail_df.empty) else 0
+    div_count = len(data["dividends_rows"] or [])
+    name_map = data["name_map"] or {}
+    bd = data["breakdown"]
+    tickers = [str(t) for t in bd["티커"].unique()] if (bd is not None and not bd.empty) else []
+    mapped = sum(1 for t in tickers if name_map.get(t) and name_map.get(t) != t)
+    sources = []
+    if detail_df is not None and not detail_df.empty and "증권사" in detail_df.columns:
+        vc = detail_df["증권사"].value_counts()
+        sources = [{"name": str(k), "count": int(v)} for k, v in vc.items()]
+    return JSONResponse({
+        "tossConnected": auth.has_toss_credentials(user),
+        "txCount": tx_count, "divCount": div_count,
+        "tickerCount": len(tickers), "mappedCount": mapped,
+        "unmappedCount": len(tickers) - mapped, "sources": sources,
+    })
+
+
+@app.post("/api/app/import")
+async def api_app_import(request: Request, broker: str = Form("증권사"),
+                        files: list[UploadFile] = File(default=[])):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from ai_copilot import parse_brokerage_full_transactions, parse_brokerage_dividends
+    from manual_holdings import save_parsed_transactions, save_parsed_dividends
+    pipeline.apply_credentials(user)
+    raw_texts = []
+    for up in (files or []):
+        try:
+            content = await up.read()
+            fn = (up.filename or "").lower()
+            if fn.endswith((".xlsx", ".xls")):
+                raw_texts.append(pd.read_excel(io.BytesIO(content)).to_csv(index=False))
+            elif fn.endswith(".pdf"):
+                t = _pdf_to_text(content)
+                if t.strip():
+                    raw_texts.append(t)
+            else:
+                raw_texts.append(content.decode("utf-8", errors="ignore"))
+        except Exception:
+            continue
+    if not raw_texts:
+        return JSONResponse({"ok": False, "error": "업로드한 파일에서 내용을 읽지 못했습니다."}, status_code=400)
+    rows, divs, errors = [], [], []
+    for rt in raw_texts:
+        parsed, err = parse_brokerage_full_transactions(rt, broker)
+        if parsed:
+            rows.extend(parsed)
+        elif err:
+            errors.append(err)
+        dparsed, _derr = parse_brokerage_dividends(rt, broker)
+        if dparsed:
+            divs.extend(dparsed)
+    if not rows and not divs:
+        return JSONResponse({"ok": False, "error": (errors[0] if errors else "거래·배당 내역을 찾지 못했습니다.")}, status_code=502)
+    n = save_parsed_transactions(rows, replace_broker=broker) if rows else 0
+    dn = save_parsed_dividends(divs, replace_broker=broker) if divs else 0
+    _CACHE.pop(user, None)
+    return JSONResponse({"ok": True, "transactions": n, "dividends": dn,
+                         "txPreview": rows[:30], "divPreview": divs[:30]})
+
+
+@app.post("/api/app/datasources/clear")
+def api_app_datasources_clear(request: Request, broker: str = Form("")):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    pipeline.apply_credentials(user)
+    b = (broker or "").strip()
+    if b:
+        snapshot_imports(f"{b} 삭제 전")
+        n = delete_broker_imports(b)
+    else:
+        snapshot_imports("전체 초기화 전")
+        n = clear_all_imports()
+    _CACHE.pop(user, None)
+    return JSONResponse({"ok": True, "removed": n, "broker": b})
 
 
 @app.post("/register")

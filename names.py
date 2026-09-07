@@ -3,37 +3,155 @@
 FinanceDataReader의 KRX 상장목록을 1회 로드해 캐시합니다. 실패 시 원본(티커) 유지.
 """
 from functools import lru_cache
+import os
+import json
+
+
+_KR_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".kr_names_cache.json")
 
 
 @lru_cache(maxsize=1)
 def _krx_map():
+    """국내 종목코드→종목명(KRX 주식 + ETF). 디스크 캐시→없으면 fdr 로드 후 저장."""
+    try:
+        if os.path.exists(_KR_CACHE_FILE):
+            with open(_KR_CACHE_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+            if d:
+                return d
+    except Exception:
+        pass
+    out = {}
     try:
         import FinanceDataReader as fdr
-        df = fdr.StockListing("KRX")
-        cols = list(df.columns)
-        code_col = next((c for c in ("Code", "Symbol", "종목코드") if c in cols), cols[0])
-        name_col = next((c for c in ("Name", "종목명") if c in cols), cols[1])
-        return {str(c).zfill(6): str(n) for c, n in zip(df[code_col], df[name_col]) if n}
+        for listing in ("KRX", "ETF/KR"):
+            try:
+                df = fdr.StockListing(listing)
+                cols = list(df.columns)
+                code_col = next((c for c in ("Code", "Symbol", "종목코드") if c in cols), cols[0])
+                name_col = next((c for c in ("Name", "종목명") if c in cols), cols[1])
+                for c, n in zip(df[code_col], df[name_col]):
+                    if n:
+                        out.setdefault(str(c).zfill(6), str(n))
+            except Exception:
+                continue
     except Exception:
         return {}
+    try:
+        if out:
+            with open(_KR_CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(out, f, ensure_ascii=False)
+    except Exception:
+        pass
+    return out
+
+
+def _kr_code(ticker):
+    """국내 종목코드로 정규화. 6자리 숫자·A접두사·.KS/.KQ 접미사, 그리고
+    KRX 목록에 있는 6자리 영숫자 코드(ETN/ETF 신형: 0183J0 등)까지 국내로 인정. 아니면 None."""
+    t = str(ticker or "").strip().upper()
+    for suf in (".KS", ".KQ", ".KRX", ".KOSPI", ".KOSDAQ"):
+        if t.endswith(suf):
+            t = t[:-len(suf)]
+            break
+    if len(t) >= 2 and t[0] == "A" and t[1:].isdigit():
+        t = t[1:]
+    if t.isdigit() and len(t) <= 6:
+        return t.zfill(6)
+    if len(t) == 6 and t in _krx_map():
+        return t
+    return None
 
 
 def resolve_kr_name(ticker, fallback=None):
-    """국내 6자리 코드면 한글 종목명으로, 아니면 fallback(또는 티커) 반환."""
-    t = str(ticker or "").strip()
-    if t.isdigit() and len(t) <= 6:
-        nm = _krx_map().get(t.zfill(6))
+    """국내 종목코드(6자리, A접두사·.KS 등 허용)면 한글 종목명으로, 아니면 fallback(또는 티커) 반환."""
+    code = _kr_code(ticker)
+    if code:
+        nm = _krx_map().get(code)
         if nm:
             return nm
     return fallback if fallback is not None else ticker
 
 
+_US_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".us_names_cache.json")
+
+
+@lru_cache(maxsize=1)
+def _us_map():
+    """미국 상장 티커→회사명 매핑(NASDAQ/NYSE/AMEX). 디스크 캐시→없으면 fdr 로드 후 저장."""
+    try:
+        if os.path.exists(_US_CACHE_FILE):
+            with open(_US_CACHE_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+            if d:
+                return d
+    except Exception:
+        pass
+    out = {}
+    try:
+        import FinanceDataReader as fdr
+        for market in ("NASDAQ", "NYSE", "AMEX"):
+            try:
+                df = fdr.StockListing(market)
+                cols = list(df.columns)
+                sym_col = next((c for c in ("Symbol", "Code", "Ticker") if c in cols), cols[0])
+                name_col = next((c for c in ("Name", "종목명") if c in cols), cols[1])
+                for sym, nm in zip(df[sym_col], df[name_col]):
+                    if sym and nm:
+                        out.setdefault(str(sym).strip().upper(), str(nm).strip())
+            except Exception:
+                continue
+    except Exception:
+        return {}
+    try:
+        if out:
+            with open(_US_CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(out, f, ensure_ascii=False)
+    except Exception:
+        pass
+    return out
+
+
+def resolve_us_name(ticker, fallback=None):
+    """미국 티커면 회사명으로, 아니면 fallback(또는 티커) 반환."""
+    t = str(ticker or "").strip().upper()
+    nm = _us_map().get(t)
+    if nm:
+        return nm
+    return fallback if fallback is not None else ticker
+
+
 def enrich_name_map(name_map, tickers):
-    """국내 종목 중 이름이 비어있거나 티커와 같은 경우 한글명으로 보강한 dict를 반환."""
+    """이름이 비었거나 티커와 같은 경우 한글명(국내)·회사명(미국)으로 보강한 dict를 반환."""
     out = dict(name_map or {})
     for t in tickers:
         t = str(t)
         cur = out.get(t)
-        if (not cur or str(cur) == t) and t.isdigit():
-            out[t] = resolve_kr_name(t, cur or t)
+        if not cur or str(cur) == t:
+            out[t] = resolve_kr_name(t, cur or t) if _kr_code(t) else resolve_us_name(t, cur or t)
     return out
+
+
+def _norm_name(s):
+    """종목명 비교용 정규화: 공백 제거 + 대문자."""
+    return "".join(str(s or "").split()).upper()
+
+
+@lru_cache(maxsize=1)
+def _krx_name_to_code():
+    """국내 종목명→코드 역매핑(KRX 주식+ETF). 정확 키와 정규화(공백·대소문자 무시) 키를 함께 담는다."""
+    m = {}
+    for code, name in _krx_map().items():
+        c = str(code)
+        for key in (str(name).strip(), _norm_name(name)):
+            if key:
+                m.setdefault(key, c)
+    return m
+
+
+def resolve_kr_code(name):
+    """국내 종목명으로 코드를 찾습니다(정확 일치 → 공백·대소문자 무시 정규화 순). 없으면 None."""
+    if not name:
+        return None
+    idx = _krx_name_to_code()
+    return idx.get(str(name).strip()) or idx.get(_norm_name(name))

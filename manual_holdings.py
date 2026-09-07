@@ -10,6 +10,7 @@ from datetime import datetime
 import pandas as pd
 
 from benchmark import to_yf_ticker, get_history
+from names import resolve_kr_code
 
 MANUAL_CSV = os.path.join(os.path.dirname(__file__), "manual_holdings.csv")
 TX_CSV = os.path.join(os.path.dirname(__file__), "manual_transactions.csv")
@@ -399,8 +400,12 @@ def transactions_to_orders(tx_df):
                 d = today
             side = "SELL" if str(r.get("구분", "")).strip() in ("매도", "SELL", "sell") else "BUY"
             filled_at = f"{d}T00:00:00+09:00"
+            tk_raw = r.get("티커")
+            sym = str(tk_raw).strip() if tk_raw is not None else ""
+            if not sym or sym.lower() == "nan":  # 티커 누락 시 종목명으로 국내 코드 보완(현재가 조회 가능하도록)
+                sym = resolve_kr_code(r.get("종목명")) or sym
             orders.append({
-                "symbol": str(r.get("티커")),
+                "symbol": sym,
                 "currency": str(r.get("통화", "KRW")).upper(),
                 "side": side,
                 "status": "FILLED",

@@ -497,5 +497,5 @@ def spy_dca(combined_orders, fx, start_ym=None):
     return build_spy_dca(combined_orders, fx, start_ym)
 
 
-def twr_comparison(combined_orders, fx, ticker=None):
-    return build_twr_comparison(combined_orders, fx, ticker)
+def twr_comparison(combined_orders, fx, ticker=None, include_fx=True):
+    return build_twr_comparison(combined_orders, fx, ticker, include_fx=include_fx)
