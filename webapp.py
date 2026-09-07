@@ -325,6 +325,119 @@ def api_app_transactions(request: Request):
     return JSONResponse({"transactions": txs, "dividends": divs})
 
 
+# ─── React 앱 전용: 임포트(수동) 거래·배당 편집 (토스 원본은 읽기전용) ───
+@app.get("/api/app/edit/data")
+def api_app_edit_data(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    pipeline.apply_credentials(user)
+    data = get_portfolio(user)
+
+    def _num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    tx = read_transactions_csv()
+    tx_rows = []
+    if tx is not None and not tx.empty:
+        for r in tx.fillna("").to_dict("records"):
+            tx_rows.append({
+                "date": str(r.get("일자") or ""), "ticker": str(r.get("티커") or ""),
+                "name": str(r.get("종목명") or ""), "market": str(r.get("시장") or ""),
+                "type": "sell" if str(r.get("구분")) == "매도" else "buy",
+                "quantity": _num(r.get("수량")), "price": _num(r.get("단가")),
+                "currency": str(r.get("통화") or "KRW"), "broker": str(r.get("증권사") or ""),
+            })
+    dv = read_dividends_csv()
+    div_rows = []
+    if dv is not None and not dv.empty:
+        for r in dv.fillna("").to_dict("records"):
+            div_rows.append({
+                "date": str(r.get("일자") or ""), "ticker": str(r.get("티커") or ""),
+                "name": str(r.get("종목명") or ""), "currency": str(r.get("통화") or "KRW"),
+                "amount": _num(r.get("배당금")), "broker": str(r.get("증권사") or ""),
+            })
+    est = []
+    for r in (data.get("dividends_rows") or []):
+        if str(r.get("구분", "")).startswith("추정"):
+            est.append({
+                "date": str(r.get("일자") or ""), "ticker": str(r.get("티커") or ""),
+                "name": r.get("종목") or "", "currency": r.get("통화") or "KRW",
+                "amount": _num(r.get("배당금")),
+            })
+    snaps = [{"id": s["id"], "label": s.get("label") or "", "time": s.get("time") or "",
+              "tx": s.get("counts", {}).get("manual_transactions.csv", 0),
+              "div": s.get("counts", {}).get("manual_dividends.csv", 0)}
+             for s in list_snapshots()]
+    return JSONResponse({"transactions": tx_rows, "dividends": div_rows,
+                         "estimatedDividends": est, "snapshots": snaps})
+
+
+@app.post("/api/app/edit/transactions")
+async def api_app_edit_transactions(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    pipeline.apply_credentials(user)
+    payload = await request.json()
+    rows = payload.get("rows", [])
+    snapshot_imports("거래 편집 전")
+    out = [{
+        "증권사": str(r.get("broker") or "").strip(),
+        "일자": str(r.get("date") or "").strip(),
+        "티커": str(r.get("ticker") or "").strip(),
+        "종목명": str(r.get("name") or "").strip(),
+        "시장": str(r.get("market") or "").strip(),
+        "구분": "매도" if str(r.get("type")) == "sell" else "매수",
+        "수량": r.get("quantity") or 0,
+        "단가": r.get("price") or 0,
+        "통화": str(r.get("currency") or "KRW").upper(),
+    } for r in rows]
+    df = pd.DataFrame(out, columns=TX_COLUMNS) if out else pd.DataFrame(columns=TX_COLUMNS)
+    n = write_transactions_csv(df)
+    _CACHE.pop(user, None)
+    return JSONResponse({"ok": True, "count": n})
+
+
+@app.post("/api/app/edit/dividends")
+async def api_app_edit_dividends(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    pipeline.apply_credentials(user)
+    payload = await request.json()
+    rows = payload.get("rows", [])
+    snapshot_imports("배당 편집 전")
+    out = [{
+        "증권사": str(r.get("broker") or "").strip(),
+        "일자": str(r.get("date") or "").strip(),
+        "티커": str(r.get("ticker") or "").strip(),
+        "종목명": str(r.get("name") or "").strip(),
+        "통화": str(r.get("currency") or "KRW").upper(),
+        "배당금": r.get("amount") or 0,
+    } for r in rows]
+    df = pd.DataFrame(out, columns=DIV_COLUMNS) if out else pd.DataFrame(columns=DIV_COLUMNS)
+    n = write_dividends_csv(df)
+    _CACHE.pop(user, None)
+    return JSONResponse({"ok": True, "count": n})
+
+
+@app.post("/api/app/edit/restore")
+async def api_app_edit_restore(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    pipeline.apply_credentials(user)
+    payload = await request.json()
+    snap_id = str(payload.get("snapId") or "").strip()
+    n = restore_snapshot(snap_id)
+    _CACHE.pop(user, None)
+    return JSONResponse({"ok": bool(n)})
+
+
 def _per_ticker_fx(orders, fx):
     tickers = {o.get("symbol") for o in orders if o.get("currency") == "USD"}
     out = {}
