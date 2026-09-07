@@ -89,9 +89,10 @@ def write_holdings_overrides(overrides):
 
 
 def clear_all_imports():
-    """현재 사용자 폴더의 임포트 데이터(거래내역·잔고·배당)를 모두 삭제합니다."""
+    """현재 사용자 폴더의 임포트 데이터(거래·잔고·배당)와 보유·토스 수정 오버라이드까지 모두 삭제합니다.
+    (오버라이드를 남기면 apply_holdings_overrides가 종목을 되살려 삭제가 안 먹히므로 함께 제거)"""
     removed = 0
-    for p in (MANUAL_CSV, TX_CSV, DIV_CSV):
+    for p in (MANUAL_CSV, TX_CSV, DIV_CSV, HOLDINGS_OVR_JSON, TOSS_OVR_JSON):
         if os.path.exists(p):
             try:
                 os.remove(p)
@@ -116,12 +117,35 @@ def imported_brokers():
     return sorted(brokers)
 
 
+def _prune_holdings_overrides(tickers):
+    """주어진 티커(및 A접두사 정규화형)의 보유 표 수정 오버라이드를 제거합니다.
+    거래·잔고를 지웠는데 오버라이드가 남으면 종목이 되살아나므로 함께 정리합니다."""
+    if not tickers:
+        return
+    ov = read_holdings_overrides()
+    if not ov:
+        return
+    from names import normalize_kr_ticker
+    drop = set()
+    for t in tickers:
+        s = str(t).strip()
+        if s:
+            drop.add(s)
+            drop.add(normalize_kr_ticker(s))
+    new = {k: v for k, v in ov.items()
+           if str(k).strip() not in drop and normalize_kr_ticker(str(k)) not in drop}
+    if len(new) != len(ov):
+        write_holdings_overrides(new)
+
+
 def delete_broker_imports(broker):
-    """특정 증권사의 임포트 거래·배당·잔고 행만 삭제합니다. 반환: 삭제된 행 수."""
+    """특정 증권사의 임포트 거래·배당·잔고 행을 삭제하고, 완전히 사라진 종목의 보유 오버라이드도 정리합니다.
+    반환: 삭제된 행 수."""
     broker = str(broker or "").strip()
     if not broker:
         return 0
     removed = 0
+    gone, remaining = set(), set()
     for path in (TX_CSV, DIV_CSV, MANUAL_CSV):
         if not os.path.exists(path):
             continue
@@ -132,10 +156,16 @@ def delete_broker_imports(broker):
         if "증권사" not in df.columns or df.empty:
             continue
         before = len(df)
-        kept = df[df["증권사"].astype(str).str.strip() != broker]
+        mask = df["증권사"].astype(str).str.strip() == broker
+        if "티커" in df.columns:
+            gone |= {str(t).strip() for t in df.loc[mask, "티커"].dropna() if str(t).strip()}
+        kept = df[~mask]
+        if "티커" in kept.columns:
+            remaining |= {str(t).strip() for t in kept["티커"].dropna() if str(t).strip()}
         if len(kept) < before:
             kept.to_csv(path, index=False, encoding="utf-8-sig")
             removed += before - len(kept)
+    _prune_holdings_overrides(gone - remaining)  # 다른 증권사에도 없는 종목만 보유 수정 정리
     return removed
 
 
