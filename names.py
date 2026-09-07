@@ -212,3 +212,14 @@ def resolve_ticker_map(names):
                 out[n] = t
     _save_name_ticker_cache(cache)
     return out
+
+
+def normalize_kr_ticker(t):
+    """국내 종목코드의 A 접두사를 제거해 6자리로 통일합니다(A360750 → 360750).
+    'A+숫자' 형태가 아닌 티커(AAPL 등)는 그대로 유지합니다."""
+    if t is None:
+        return t
+    s = str(t).strip()
+    if len(s) >= 2 and s[0] in ("A", "a") and s[1:].isdigit():
+        return s[1:].zfill(6)
+    return s

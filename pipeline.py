@@ -28,7 +28,7 @@ from pme import (
     build_spy_dca, build_twr_comparison,
 )
 import auth
-from names import enrich_name_map, resolve_ticker_map
+from names import enrich_name_map, resolve_ticker_map, normalize_kr_ticker
 
 
 def current_usdkrw():
@@ -333,6 +333,8 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True,
         combined_orders += transactions_to_orders(tx_df)
     if use_tx and holdings_snapshot is not None and not holdings_snapshot.empty:
         combined_orders += manual_to_orders(holdings_snapshot)
+    for _o in combined_orders:  # 국내 A접두사 통일(A360750→360750): 중복 집계·시세 조회 실패 방지
+        _o["symbol"] = normalize_kr_ticker(_o.get("symbol"))
     combined_orders = apply_split_adjustments(combined_orders)  # 분할/역분할을 현재 주식 수 기준으로 통일
     combined_orders = apply_holdings_overrides(combined_orders)  # 대시보드 보유 표 수정을 거래로 대체 반영
     set_price_overrides(holdings_price_overrides(), replace=True)  # 보유 표 현재가 수정 주입
@@ -494,6 +496,7 @@ def apply_holdings_overrides(orders, overrides=None):
     overrides = read_holdings_overrides() if overrides is None else overrides
     if not overrides:
         return orders
+    overrides = {normalize_kr_ticker(k): v for k, v in overrides.items()}  # A360750→360750 키 통일
     first_dt = {}
     for o in orders:
         sym = o.get("symbol")
@@ -558,7 +561,7 @@ def holdings_price_overrides(overrides=None):
         except (TypeError, ValueError):
             continue
         if p > 0:
-            out[str(sym)] = p
+            out[normalize_kr_ticker(sym)] = p
     return out
 
 
