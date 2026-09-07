@@ -1,0 +1,10 @@
+{
+  "description": "Analyze and track asset portfolio performance with detailed insights to help investors optimize their investment strategies effectively.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

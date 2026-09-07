@@ -1,0 +1,138 @@
+export type AnalysisOptions = {
+  includeDividend: boolean;
+  includeFx: boolean;
+  period: "1M" | "3M" | "6M" | "1Y" | "5Y" | "ALL";
+  scope: "total" | "stock";
+  ticker: string;
+};
+
+export const PERIODS: { key: AnalysisOptions["period"]; label: string }[] = [
+  { key: "1M", label: "1개월" },
+  { key: "3M", label: "3개월" },
+  { key: "6M", label: "6개월" },
+  { key: "1Y", label: "1년" },
+  { key: "5Y", label: "5년" },
+  { key: "ALL", label: "전체" },
+];
+
+export function formatKRW(n: number, compact = false): string {
+  if (compact) {
+    if (Math.abs(n) >= 100_000_000) return `${(n / 100_000_000).toFixed(1)}억`;
+    if (Math.abs(n) >= 10_000) return `${(n / 10_000).toFixed(0)}만`;
+    return n.toLocaleString();
+  }
+  if (Math.abs(n) >= 100_000_000) return `${(n / 100_000_000).toFixed(2)}억원`;
+  if (Math.abs(n) >= 10_000) return `${(n / 10_000).toFixed(0)}만원`;
+  return `${n.toLocaleString()}원`;
+}
+
+export function ReturnBadge({ value, size = "sm" }: { value: number; size?: "sm" | "md" | "lg" }) {
+  const isPos = value >= 0;
+  const sizes = { sm: "text-xs px-1.5 py-0.5", md: "text-sm px-2 py-1", lg: "text-base px-3 py-1.5" };
+  return (
+    <span className={`font-mono font-medium rounded-sm inline-flex items-center gap-0.5 ${sizes[size]} ${isPos ? "text-[#00d4a1] bg-[#00d4a1]/10" : "text-[#ff5c6a] bg-[#ff5c6a]/10"}`}>
+      {isPos ? "▲" : "▼"} {Math.abs(value).toFixed(2)}%
+    </span>
+  );
+}
+
+export function PnLText({ value }: { value: number }) {
+  const isPos = value >= 0;
+  return (
+    <span className={`font-mono text-sm ${isPos ? "text-[#00d4a1]" : "text-[#ff5c6a]"}`}>
+      {isPos ? "+" : ""}{formatKRW(value)}
+    </span>
+  );
+}
+
+export function Card({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+  return (
+    <div className={`bg-[#111520] border border-white/7 rounded-sm ${className}`}>
+      {children}
+    </div>
+  );
+}
+
+export function CardHeader({ title, sub }: { title: string; sub?: string }) {
+  return (
+    <div className="px-5 pt-5 pb-4 border-b border-white/7">
+      <div className="text-xs text-[#6b7494] uppercase tracking-widest font-mono">{title}</div>
+      {sub && <div className="text-xs text-[#6b7494]/60 font-mono mt-0.5">{sub}</div>}
+    </div>
+  );
+}
+
+export const CustomTooltip = ({ active, payload, label }: any) => {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="bg-[#161c2d] border border-white/10 rounded p-3 text-xs font-mono shadow-xl">
+      <div className="text-[#6b7494] mb-2">{label}</div>
+      {payload.map((p: any) => (
+        <div key={p.dataKey} className="flex items-center gap-2 mb-1 last:mb-0">
+          <span className="w-2 h-2 rounded-full inline-block flex-shrink-0" style={{ background: p.color }} />
+          <span className="text-[#a0a8c0]">{p.name}</span>
+          <span className="text-[#e8eaf0] ml-auto pl-4">
+            {typeof p.value === "number" ? p.value.toFixed(2) : p.value}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+export function AnalysisBar({
+  opts, setOpts, tickers = [], showPeriod = true,
+}: {
+  opts: AnalysisOptions;
+  setOpts: (o: AnalysisOptions) => void;
+  tickers?: { ticker: string; name: string }[];
+  showPeriod?: boolean;
+}) {
+  const toggle = (key: keyof Pick<AnalysisOptions, "includeDividend" | "includeFx">) =>
+    setOpts({ ...opts, [key]: !opts[key] });
+
+  return (
+    <div className="flex flex-wrap items-center gap-3 bg-[#111520] border border-white/7 rounded-sm px-4 py-2.5">
+      <span className="text-xs text-[#6b7494] font-mono uppercase tracking-wider mr-1">분석 옵션</span>
+      {/* G1 dividend */}
+      <button
+        onClick={() => toggle("includeDividend")}
+        title="배당·분배금 수령액을 손익·수익률·알파에 반영(포함)하거나 제외합니다"
+        className={`text-xs font-mono px-3 py-1.5 rounded-sm border transition-colors ${opts.includeDividend ? "border-[#00d4a1]/40 bg-[#00d4a1]/10 text-[#00d4a1]" : "border-white/10 text-[#6b7494] hover:text-[#a0a8c0]"}`}>
+        배당 {opts.includeDividend ? "포함" : "제외"}
+      </button>
+      {/* G2 fx */}
+      <button
+        onClick={() => toggle("includeFx")}
+        title="미국 주식의 원/달러 환율 변동 손익을 반영(포함)하거나 제외합니다"
+        className={`text-xs font-mono px-3 py-1.5 rounded-sm border transition-colors ${opts.includeFx ? "border-[#4f8cff]/40 bg-[#4f8cff]/10 text-[#4f8cff]" : "border-white/10 text-[#6b7494] hover:text-[#a0a8c0]"}`}>
+        환차손익 {opts.includeFx ? "포함" : "제외"}
+      </button>
+      {showPeriod && <div className="w-px h-4 bg-white/10" />}
+      {/* G3 period (성장 차트가 있는 페이지에서만) */}
+      {showPeriod && PERIODS.map(p => (
+        <button key={p.key} onClick={() => setOpts({ ...opts, period: p.key })}
+          className={`text-xs font-mono px-2.5 py-1.5 rounded-sm transition-colors ${opts.period === p.key ? "bg-white/10 text-[#e8eaf0]" : "text-[#6b7494] hover:text-[#a0a8c0]"}`}>
+          {p.label}
+        </button>
+      ))}
+      <div className="w-px h-4 bg-white/10" />
+      {/* G5 scope */}
+      <div className="flex gap-0 border border-white/10 rounded-sm overflow-hidden">
+        {(["total", "stock"] as const).map(s => (
+          <button key={s} onClick={() => setOpts({ ...opts, scope: s, ticker: s === "stock" ? (opts.ticker || tickers[0]?.ticker || "") : "" })}
+            className={`text-xs font-mono px-2.5 py-1.5 transition-colors ${opts.scope === s ? "bg-white/10 text-[#e8eaf0]" : "text-[#6b7494] hover:text-[#a0a8c0]"}`}>
+            {s === "total" ? "전체" : "종목별"}
+          </button>
+        ))}
+      </div>
+      {opts.scope === "stock" && (
+        <select value={opts.ticker} onChange={e => setOpts({ ...opts, ticker: e.target.value })}
+          className="text-xs font-mono bg-[#0a0d14] border border-white/10 rounded-sm px-2 py-1.5 text-[#e8eaf0] focus:outline-none focus:border-[#00d4a1]/50">
+          {tickers.length === 0 && <option value="">종목 없음</option>}
+          {tickers.map(t => <option key={t.ticker} value={t.ticker}>{t.name || t.ticker}</option>)}
+        </select>
+      )}
+    </div>
+  );
+}

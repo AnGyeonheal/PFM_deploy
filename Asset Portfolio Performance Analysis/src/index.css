@@ -1,0 +1,58 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import 'tailwindcss';
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-border: var(--border);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 4px);
+  --font-sans: 'Outfit', sans-serif;
+  --font-serif: 'DM Serif Display', serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+:root {
+  --background: #0a0d14;
+  --foreground: #e8eaf0;
+  --card: #111520;
+  --card-foreground: #e8eaf0;
+  --primary: #00d4a1;
+  --primary-foreground: #0a0d14;
+  --secondary: #161c2d;
+  --secondary-foreground: #a0a8c0;
+  --muted: #1a2035;
+  --muted-foreground: #6b7494;
+  --accent: #4f8cff;
+  --accent-foreground: #ffffff;
+  --border: rgba(255,255,255,0.07);
+  --ring: #00d4a1;
+  --radius: 4px;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+* {
+  scrollbar-width: none;
+}
+*::-webkit-scrollbar {
+  display: none;
+}
+*:hover {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.1) transparent;
+}

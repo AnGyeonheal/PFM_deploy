@@ -1,0 +1,55 @@
+Retrieving notices: ...working... done
+Channels:
+ - conda-forge
+ - defaults
+Platform: win-64
+Collecting package metadata (repodata.json): ...working... done
+Solving environment: ...working... done
+
+## Package Plan ##
+
+  environment location: C:\Users\hilla\miniconda3
+
+  added / updated specs:
+    - nodejs
+
+
+The following packages will be downloaded:
+
+    package                    |            build
+    ---------------------------|-----------------
+    ca-certificates-2026.7.22  |       h4c7d964_0         129 KB  conda-forge
+    certifi-2026.7.22          |     pyhd8ed1ab_0         134 KB  conda-forge
+    conda-24.11.3              |  py312h2e8e312_0         1.1 MB  conda-forge
+    nodejs-26.8.0              |       h80d1838_1        32.7 MB  conda-forge
+    openssl-3.6.4              |       hf411b9b_0         9.0 MB  conda-forge
+    python_abi-3.12            |          4_cp312           5 KB
+    ucrt-10.0.26100.0          |       h57928b3_0         678 KB  conda-forge
+    vc14_runtime-14.51.36247   |      habf1de7_41         750 KB  conda-forge
+    vcomp14-14.51.36247        |      habf1de7_41         152 KB  conda-forge
+    vs2015_runtime-14.51.36247 |      h633cb9f_41          21 KB  conda-forge
+    ------------------------------------------------------------
+                                           Total:        44.6 MB
+
+The following NEW packages will be INSTALLED:
+
+  nodejs             conda-forge/win-64::nodejs-26.8.0-h80d1838_1 
+  python_abi         pkgs/main/win-64::python_abi-3.12-4_cp312 
+  ucrt               conda-forge/win-64::ucrt-10.0.26100.0-h57928b3_0 
+  vc14_runtime       conda-forge/win-64::vc14_runtime-14.51.36247-habf1de7_41 
+  vcomp14            conda-forge/win-64::vcomp14-14.51.36247-habf1de7_41 
+
+The following packages will be UPDATED:
+
+  ca-certificates    pkgs/main/win-64::ca-certificates-202~ --> conda-forge/noarch::ca-certificates-2026.7.22-h4c7d964_0 
+  certifi            pkgs/main/win-64::certifi-2024.8.30-p~ --> conda-forge/noarch::certifi-2026.7.22-pyhd8ed1ab_0 
+  conda              pkgs/main::conda-24.9.2-py312haa95532~ --> conda-forge::conda-24.11.3-py312h2e8e312_0 
+  openssl              pkgs/main::openssl-3.0.15-h827c3e9_0 --> conda-forge::openssl-3.6.4-hf411b9b_0 
+  vs2015_runtime     pkgs/main::vs2015_runtime-14.40.33807~ --> conda-forge::vs2015_runtime-14.51.36247-h633cb9f_41 
+
+
+
+Downloading and Extracting Packages: ...working... done
+Preparing transaction: ...working... done
+Verifying transaction: ...working... done
+Executing transaction: ...working... done
