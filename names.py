@@ -155,3 +155,60 @@ def resolve_kr_code(name):
         return None
     idx = _krx_name_to_code()
     return idx.get(str(name).strip()) or idx.get(_norm_name(name))
+
+
+_NAME_TICKER_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".name_ticker_cache.json")
+
+
+def _load_name_ticker_cache():
+    try:
+        if os.path.exists(_NAME_TICKER_CACHE_FILE):
+            with open(_NAME_TICKER_CACHE_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _save_name_ticker_cache(d):
+    try:
+        with open(_NAME_TICKER_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def resolve_ticker_map(names):
+    """종목명 리스트 → {종목명: 티커}. 캐시 → KRX 국내매칭 → Gemini(미매칭만 배치) 순.
+    Gemini 조회 결과는 캐시에 저장해 이후 재조회하지 않습니다(빈 결과도 캐시해 반복 호출 방지)."""
+    uniq = sorted({str(n).strip() for n in (names or []) if str(n).strip()})
+    if not uniq:
+        return {}
+    cache = _load_name_ticker_cache()
+    out = {}
+    missing = []
+    for n in uniq:
+        if n in cache:
+            if cache[n]:
+                out[n] = cache[n]
+            continue
+        code = resolve_kr_code(n)  # KRX 국내 종목명 정확/정규화 매칭이 먼저(무료·즉시)
+        if code:
+            out[n] = code
+            cache[n] = code
+        else:
+            missing.append(n)
+    if missing:
+        try:
+            from ai_copilot import ai_resolve_tickers
+            ai = ai_resolve_tickers(missing)
+        except Exception:
+            ai = {}
+        for n in missing:
+            t = str(ai.get(n, "") or "").strip()
+            cache[n] = t  # 빈 값도 저장 → 다음부터 Gemini 재호출 안 함
+            if t:
+                out[n] = t
+    _save_name_ticker_cache(cache)
+    return out

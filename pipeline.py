@@ -28,7 +28,7 @@ from pme import (
     build_spy_dca, build_twr_comparison,
 )
 import auth
-from names import enrich_name_map
+from names import enrich_name_map, resolve_ticker_map
 
 
 def current_usdkrw():
@@ -307,6 +307,16 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True,
     if use_tx:
         tx_df = read_transactions_csv()
         has_tx = tx_df is not None and not tx_df.empty
+        # 종목명만 있고 티커가 비면 KRX·Gemini로 보강(캐시로 1회만 조회)
+        if has_tx:
+            _blank = ((tx_df["티커"].astype(str).str.strip() == "")
+                      & (tx_df["종목명"].astype(str).str.strip() != ""))
+            if _blank.any():
+                _tmap = resolve_ticker_map(tx_df.loc[_blank, "종목명"].tolist())
+                for _i in tx_df.index[_blank]:
+                    _t = _tmap.get(str(tx_df.at[_i, "종목명"]).strip())
+                    if _t:
+                        tx_df.at[_i, "티커"] = _t
         tx_brokers = set(tx_df["증권사"].unique()) if has_tx else set()
         holdings_snapshot = load_manual_holdings(fx_rate)
         if holdings_snapshot is not None and not holdings_snapshot.empty:

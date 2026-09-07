@@ -48,6 +48,42 @@ def _generate_with_fallback(prompt, system_instruction=None, tools=None, max_ret
                 break  # 한도 외 에러는 다음 모델로
     return None, last_err
 
+
+def ai_resolve_tickers(names):
+    """종목명 리스트를 Gemini로 조회해 거래소 티커를 채웁니다.
+    국내=6자리 코드, 미국=영문 심볼. 반환: {종목명: 티커}. 불확실/실패는 제외."""
+    load_dotenv()
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    uniq = sorted({str(n).strip() for n in (names or []) if str(n).strip()})
+    if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요" or not uniq:
+        return {}
+    genai.configure(api_key=gemini_key, transport="rest")
+    prompt = (
+        "다음 주식/ETF 종목명의 거래소 티커를 알려주세요.\n"
+        "- 한국 상장: 6자리 숫자 코드 (삼성전자→005930, TIGER 미국S&P500→360750)\n"
+        "- 미국 상장: 영문 심볼 (애플→AAPL, 엔비디아→NVDA)\n"
+        "- 확실하지 않으면 빈 문자열.\n"
+        "JSON 객체만 출력: {\"종목명\":\"티커\"}\n\n"
+        "종목명: " + json.dumps(uniq, ensure_ascii=False)
+    )
+    response, err = _generate_with_fallback(prompt)
+    if response is None:
+        return {}
+    try:
+        txt = (response.text or "").strip()
+        if "```" in txt:
+            txt = txt.split("```")[1]
+            if txt.lstrip().lower().startswith("json"):
+                txt = txt.lstrip()[4:]
+        i, j = txt.find("{"), txt.rfind("}")
+        if i >= 0 and j > i:
+            txt = txt[i:j + 1]
+        data = json.loads(txt)
+        return {str(k): str(v).strip() for k, v in data.items() if v and str(v).strip()}
+    except Exception:
+        return {}
+
+
 def generate_portfolio_report(portfolio_json):
     """
     Gemini API를 호출하여 입력된 JSON 포트폴리오 데이터를 바탕으로 
