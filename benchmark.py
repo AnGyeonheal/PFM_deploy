@@ -37,9 +37,13 @@ def to_yf_ticker(symbol, market_country="US", market=None):
     country = (market_country or "US").upper()
 
     if country in ("KR", "KOR", "KOREA"):
+        if symbol.endswith((".KS", ".KQ")):
+            return symbol
+        # A 접두사(예: A360750) 제거 후 6자리 코드로 통일
+        if len(symbol) >= 2 and symbol[0] == "A" and symbol[1:].isdigit():
+            symbol = symbol[1:]
         suffix = ".KQ" if (market or "").upper() in ("KOSDAQ", "KQ") else ".KS"
-        # 이미 접미사가 있으면 그대로
-        return symbol if symbol.endswith((".KS", ".KQ")) else f"{symbol.zfill(6)}{suffix}"
+        return f"{symbol.zfill(6)}{suffix}"
     # 미국 등 해외
     return symbol.replace(".", "-")
 
@@ -129,7 +133,10 @@ def _pykrx_close(symbol):
         from pykrx import stock
     except Exception:
         return None
-    code = str(symbol).zfill(6)
+    code = str(symbol).strip().upper()
+    if len(code) >= 2 and code[0] == "A" and code[1:].isdigit():
+        code = code[1:]  # A360750 → 360750
+    code = code.zfill(6)
     today = _dt.datetime.now().strftime("%Y%m%d")
     frm = (_dt.datetime.now() - _dt.timedelta(days=14)).strftime("%Y%m%d")
     try:
