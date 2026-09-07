@@ -747,6 +747,8 @@ def compute_alpha_beta(orders, fx_now=1400.0, period="10y", div_events=None,
 
     spy_val = spy_shares * spy_daily * fx_daily
     today = idx.max()
+    if my_val is None or len(my_val) == 0 or len(spy_val) == 0:  # 시세 없는 단일 종목 등 → 지표 계산 불가
+        return None
     my_final = float(my_val.iloc[-1])
     spy_final = float(spy_val.iloc[-1])
 
