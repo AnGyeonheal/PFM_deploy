@@ -965,6 +965,45 @@ async def import_save(request: Request, broker: str = Form("한화투자증권")
     return RedirectResponse(f"/import?msg={n}건 거래·{dn}건 배당 저장됨", status_code=302)
 
 
+@app.get("/import/template.xlsx")
+def import_template(request: Request):
+    user = _current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    from exporter import build_import_template_xlsx
+    xlsx = build_import_template_xlsx()
+    return StreamingResponse(
+        io.BytesIO(xlsx),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="import_template.xlsx"'})
+
+
+@app.post("/import/direct")
+async def import_direct(request: Request, files: list[UploadFile] = File(default=[])):
+    user = _current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    from manual_holdings import import_template_xlsx
+    pipeline.apply_credentials(user)
+    snapshot_imports("직접 임포트 전")
+    tx = dv = 0
+    errs = []
+    for up in files or []:
+        if not (up.filename or "").lower().endswith((".xlsx", ".xls")):
+            errs.append(f"{up.filename}: 엑셀(.xlsx) 파일만 지원합니다")
+            continue
+        content = await up.read()
+        res = import_template_xlsx(content)
+        tx += res["tx"]
+        dv += res["div"]
+        errs += res["errors"]
+    _CACHE.pop(user, None)
+    msg = f"직접 임포트 완료: 거래 {tx}건·배당 {dv}건 저장"
+    if errs:
+        msg += f" (경고 {len(errs)}건: " + "; ".join(errs[:3]) + ("…" if len(errs) > 3 else "") + ")"
+    return RedirectResponse(f"/import?msg={msg}", status_code=302)
+
+
 @app.post("/import/clear")
 def import_clear(request: Request):
     user = _current_user(request)

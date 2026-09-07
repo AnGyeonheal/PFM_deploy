@@ -374,6 +374,97 @@ def save_parsed_dividends(rows, replace_broker=None):
     return len(new_df)
 
 
+def _norm_side(v):
+    return "매도" if str(v or "").strip() in ("매도", "SELL", "sell", "Sell") else "매수"
+
+
+def _fmt_date(v):
+    try:
+        return pd.to_datetime(v).strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+
+def import_template_xlsx(file_bytes, replace_broker=None):
+    """표준 템플릿 엑셀('거래내역'·'배당내역' 시트)을 AI 없이 컬럼 그대로 반영합니다.
+    반환: {"tx": 저장수, "div": 저장수, "errors": [메시지…]}."""
+    import io
+    errors = []
+    try:
+        sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None, dtype={"티커": str})
+    except Exception as e:
+        return {"tx": 0, "div": 0, "errors": [f"엑셀을 읽지 못했습니다: {e}"]}
+
+    def _find(names):
+        for key, df in sheets.items():
+            if str(key).strip() in names:
+                return df
+        return None
+
+    tx_rows = []
+    tx_sheet = _find({"거래내역", "거래", "transactions"})
+    if tx_sheet is not None:
+        for i, r in tx_sheet.iterrows():
+            tk = str(r.get("티커", "") or "").strip()
+            nm = str(r.get("종목명", "") or "").strip()
+            if not tk and not nm:
+                continue  # 빈 행 건너뜀
+            try:
+                qty = float(r.get("수량", 0) or 0)
+                price = float(r.get("단가", 0) or 0)
+            except (TypeError, ValueError):
+                errors.append(f"거래내역 {i + 2}행: 수량/단가 숫자 오류")
+                continue
+            if qty <= 0 or price <= 0:
+                errors.append(f"거래내역 {i + 2}행: 수량·단가는 0보다 커야 합니다")
+                continue
+            mk = str(r.get("시장", "") or "").strip()
+            if not mk and tk.isdigit() and len(tk) <= 6:
+                mk = "KOSPI"  # 시장 미입력 국내코드는 KOSPI로 가정(KOSDAQ은 사용자가 명시)
+            tx_rows.append({
+                "증권사": str(r.get("증권사", "") or "").strip() or "직접입력",
+                "일자": _fmt_date(r.get("일자")),
+                "티커": normalize_ticker(tk),
+                "종목명": nm or tk,
+                "시장": mk,
+                "구분": _norm_side(r.get("구분")),
+                "수량": qty,
+                "단가": price,
+                "통화": str(r.get("통화", "KRW") or "KRW").strip().upper() or "KRW",
+            })
+
+    div_rows = []
+    div_sheet = _find({"배당내역", "배당", "dividends"})
+    if div_sheet is not None:
+        for i, r in div_sheet.iterrows():
+            tk = str(r.get("티커", "") or "").strip()
+            nm = str(r.get("종목명", "") or "").strip()
+            if not tk and not nm:
+                continue
+            try:
+                amt = float(r.get("배당금", 0) or 0)
+            except (TypeError, ValueError):
+                errors.append(f"배당내역 {i + 2}행: 배당금 숫자 오류")
+                continue
+            if amt <= 0:
+                errors.append(f"배당내역 {i + 2}행: 배당금은 0보다 커야 합니다")
+                continue
+            div_rows.append({
+                "증권사": str(r.get("증권사", "") or "").strip() or "직접입력",
+                "일자": _fmt_date(r.get("일자")),
+                "티커": normalize_ticker(tk),
+                "종목명": nm or tk,
+                "통화": str(r.get("통화", "KRW") or "KRW").strip().upper() or "KRW",
+                "배당금": amt,
+            })
+
+    if tx_sheet is None and div_sheet is None:
+        errors.append("'거래내역' 또는 '배당내역' 시트를 찾지 못했습니다. 템플릿 시트명을 확인하세요.")
+    tx_n = save_parsed_transactions(tx_rows, replace_broker=replace_broker) if tx_rows else 0
+    div_n = save_parsed_dividends(div_rows, replace_broker=replace_broker) if div_rows else 0
+    return {"tx": tx_n, "div": div_n, "errors": errors}
+
+
 def transactions_to_orders(tx_df):
     """거래내역 DataFrame을 토스 주문(체결) 형태의 합성 주문 리스트로 변환합니다.
     매수/매도 모두 포함하므로 청산 종목도 분석에 반영됩니다."""

@@ -194,3 +194,81 @@ def _autofit(writer):
                 ws.column_dimensions[letter].width = length
     except Exception:
         pass
+
+
+def build_import_template_xlsx():
+    """직접 임포트용 표준 입력 템플릿 엑셀(작성규칙·거래내역·배당내역)을 바이트로 반환합니다.
+    티커·시장·통화를 정확히 입력하도록 드롭다운(데이터 검증)과 예시 행을 포함합니다.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    hdr_font = Font(bold=True, color="FFFFFF")
+    hdr_fill = PatternFill("solid", fgColor="4472C4")
+
+    def _style_header(ws, ncol):
+        for c in range(1, ncol + 1):
+            cell = ws.cell(row=1, column=c)
+            cell.font = hdr_font
+            cell.fill = hdr_fill
+            cell.alignment = Alignment(horizontal="center")
+        ws.freeze_panes = "A2"
+
+    wb = Workbook()
+
+    # 1) 작성 규칙
+    ws0 = wb.active
+    ws0.title = "작성규칙"
+    for row in [
+        ["항목", "규칙", "예시"],
+        ["입력 시트", "'거래내역'·'배당내역' 시트에만 입력. 시트명과 첫 행 헤더는 바꾸지 마세요.", ""],
+        ["일자", "YYYY-MM-DD", "2024-03-15"],
+        ["티커(국내)", "6자리 종목코드(앞자리 0 포함), 통화 KRW", "005930"],
+        ["티커(미국)", "영문 심볼(점 그대로: BRK.B), 통화 USD", "AAPL"],
+        ["시장", "국내=KOSPI/KOSDAQ, 미국=US (드롭다운)", "KOSPI"],
+        ["구분", "매수 / 매도 (드롭다운)", "매수"],
+        ["통화", "KRW / USD (드롭다운)", "KRW"],
+        ["수량·단가", "0보다 큰 숫자. 단가는 통화 기준 체결단가", "10 / 71500"],
+        ["배당금", "0보다 큰 숫자(통화 기준, 실수령액 권장)", "1500"],
+        ["증권사", "비우면 '직접입력'으로 저장", "한화투자증권"],
+        ["※ 핵심", "시장·통화를 정확히 넣어야 현재가·티커가 제대로 조회됩니다.", ""],
+    ]:
+        ws0.append(row)
+    _style_header(ws0, 3)
+    ws0.column_dimensions["A"].width = 14
+    ws0.column_dimensions["B"].width = 60
+    ws0.column_dimensions["C"].width = 16
+
+    # 2) 거래내역
+    ws1 = wb.create_sheet("거래내역")
+    tx_cols = ["증권사", "일자", "티커", "종목명", "시장", "구분", "수량", "단가", "통화"]
+    ws1.append(tx_cols)
+    ws1.append(["한화투자증권", "2024-03-15", "005930", "삼성전자", "KOSPI", "매수", 10, 71500, "KRW"])
+    ws1.append(["한화투자증권", "2024-05-02", "AAPL", "Apple", "US", "매수", 5, 185.2, "USD"])
+    _style_header(ws1, len(tx_cols))
+    for i, w in enumerate([14, 12, 10, 16, 10, 8, 8, 12, 8], start=1):
+        ws1.column_dimensions[chr(64 + i)].width = w
+    dv_mk = DataValidation(type="list", formula1='"KOSPI,KOSDAQ,US"', allow_blank=True)
+    dv_sd = DataValidation(type="list", formula1='"매수,매도"', allow_blank=True)
+    dv_cur = DataValidation(type="list", formula1='"KRW,USD"', allow_blank=True)
+    ws1.add_data_validation(dv_mk); dv_mk.add("E2:E1000")
+    ws1.add_data_validation(dv_sd); dv_sd.add("F2:F1000")
+    ws1.add_data_validation(dv_cur); dv_cur.add("I2:I1000")
+
+    # 3) 배당내역
+    ws2 = wb.create_sheet("배당내역")
+    div_cols = ["증권사", "일자", "티커", "종목명", "통화", "배당금"]
+    ws2.append(div_cols)
+    ws2.append(["한화투자증권", "2024-04-20", "005930", "삼성전자", "KRW", 1500])
+    ws2.append(["한화투자증권", "2024-06-10", "AAPL", "Apple", "USD", 2.4])
+    _style_header(ws2, len(div_cols))
+    for i, w in enumerate([14, 12, 10, 16, 8, 12], start=1):
+        ws2.column_dimensions[chr(64 + i)].width = w
+    dv_cur2 = DataValidation(type="list", formula1='"KRW,USD"', allow_blank=True)
+    ws2.add_data_validation(dv_cur2); dv_cur2.add("E2:E1000")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()

@@ -20,6 +20,19 @@
 </div>
 
 <div class="section" style="max-width:720px">
+  <h5 class="mb-2">⚡ 표준 템플릿 직접 임포트 <span class="badge bg-success">AI 없이 정확 반영</span></h5>
+  <p class="text-secondary small">티커·시장·통화를 정확히 넣은 <b>표준 엑셀</b>을 올리면 AI 파싱 없이 컬럼 그대로 저장됩니다.
+    티커·현재가가 안 잡히는 문제를 예방합니다. 먼저 템플릿을 내려받아 형식(<code>거래내역</code>·<code>배당내역</code> 시트)에 맞춰 작성하세요.</p>
+  <a class="btn btn-outline-primary mb-3" href="/import/template.xlsx">📄 템플릿 엑셀 내려받기</a>
+  <form method="post" action="/import/direct" enctype="multipart/form-data">
+    <div class="mb-3"><label class="form-label">작성한 템플릿 업로드 (.xlsx, 복수 가능)</label>
+      <input class="form-control" type="file" name="files" multiple accept=".xlsx,.xls" required></div>
+    <button class="btn btn-primary" type="submit">직접 임포트</button>
+  </form>
+  <p class="text-secondary small mt-3 mb-0">시장(KOSPI/KOSDAQ/US)·통화(KRW/USD)는 드롭다운으로 선택하세요. 국내는 6자리 코드, 미국은 영문 심볼.</p>
+</div>
+
+<div class="section" style="max-width:720px">
   <h5 class="mb-2">임포트 데이터 삭제 · 초기화</h5>
   <p class="text-secondary small">임포트(수기 입력)한 거래·배당·잔고만 삭제됩니다. <b>토스 API 데이터는 영향받지 않습니다.</b>
     개별 건은 <a href="/edit-data">데이터 편집</a>에서 지울 수 있습니다.</p>
