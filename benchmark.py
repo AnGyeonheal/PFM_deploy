@@ -113,8 +113,11 @@ def get_usdkrw_history(period="2y"):
 _PRICE_OVERRIDE = {}
 
 
-def set_price_overrides(price_map):
-    """토스 실시간 배치 현재가 {symbol: price}를 주입(병합)합니다. 시세는 사용자 무관이라 병합해도 안전."""
+def set_price_overrides(price_map, replace=False):
+    """현재가 {symbol: price}를 주입합니다. replace=True면 기존 오버라이드를 먼저 비웁니다
+    (보유 표 현재가 수정처럼 삭제분까지 정확히 반영해야 할 때 사용)."""
+    if replace:
+        _PRICE_OVERRIDE.clear()
     if price_map:
         _PRICE_OVERRIDE.update({str(k): v for k, v in price_map.items() if v})
 

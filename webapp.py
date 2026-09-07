@@ -25,6 +25,7 @@ from manual_holdings import (
     read_splits_csv, write_splits_csv, SPLIT_COLUMNS,
     clear_all_imports, delete_broker_imports, imported_brokers,
     snapshot_imports, list_snapshots, restore_snapshot,
+    read_holdings_overrides, write_holdings_overrides,
 )
 from exporter import build_full_excel
 from report import build_portfolio_pdf
@@ -652,6 +653,7 @@ def dashboard(request: Request, refresh: int = 0, div: int = 1, fx: int = 1):
     sa = data.get("stock_analytics")
     sa_map = {str(r["티커"]): r for r in sa.to_dict("records")} if (sa is not None and not sa.empty) else {}
     _ana_cols = ["현재주가", "S&P500대비(%p)", "알파(연%)", "베타", "알파기여(%)", "베타기여(%)"]
+    hov = read_holdings_overrides()
     for rec in breakdown_records:
         tkey = str(rec.get("티커"))
         if name_map.get(tkey):
@@ -659,6 +661,13 @@ def dashboard(request: Request, refresh: int = 0, div: int = 1, fx: int = 1):
         a = sa_map.get(tkey)
         for c in _ana_cols:
             rec[c] = (a.get(c) if a else None)
+        ov = hov.get(tkey)
+        if ov and not ov.get("deleted"):
+            rec["_ovr"] = True
+            if ov.get("종목명"):
+                rec["종목"] = ov["종목명"]
+            if ov.get("현재가") not in (None, ""):
+                rec["현재주가"] = float(ov["현재가"])
 
     ctx = {
         "request": request, "user": user, "fx_rate": data["fx_rate"],
@@ -1173,6 +1182,70 @@ async def edit_data_split(request: Request):
     n = write_splits_csv(df)
     _CACHE.pop(user, None)
     return JSONResponse({"ok": True, "count": n})
+
+
+@app.post("/holdings/override")
+async def holdings_override(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    pipeline.apply_credentials(user)
+    payload = await request.json()
+    rows = payload.get("rows", [])
+    ovr = read_holdings_overrides()
+    snapshot_imports("보유 수정 전")
+    changed = 0
+    for r in rows:
+        tk = str(r.get("티커") or "").strip()
+        if not tk:
+            continue
+        if r.get("_delete"):
+            ovr[tk] = {"deleted": True}
+            changed += 1
+            continue
+        try:
+            qty = float(r.get("수량") or 0)
+            price = float(r.get("평단가") or 0)
+        except (TypeError, ValueError):
+            continue
+        if qty <= 0 or price <= 0:
+            continue
+        entry = {"종목명": str(r.get("종목명") or "").strip(),
+                 "수량": qty, "평단가": price,
+                 "통화": str(r.get("통화") or "KRW").upper()}
+        cur_price = r.get("현재가")
+        if cur_price not in (None, ""):
+            try:
+                entry["현재가"] = float(cur_price)
+            except (TypeError, ValueError):
+                pass
+        ovr[tk] = entry
+        changed += 1
+    write_holdings_overrides(ovr)
+    _CACHE.pop(user, None)
+    return JSONResponse({"ok": True, "count": changed})
+
+
+@app.post("/holdings/override/reset")
+async def holdings_override_reset(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    pipeline.apply_credentials(user)
+    payload = await request.json()
+    tk = str(payload.get("티커") or "").strip()
+    ovr = read_holdings_overrides()
+    if tk:
+        if tk in ovr:
+            snapshot_imports("보유 수정 되돌리기 전")
+            del ovr[tk]
+            write_holdings_overrides(ovr)
+            _CACHE.pop(user, None)
+        return JSONResponse({"ok": True})
+    snapshot_imports("보유 수정 전체 초기화 전")
+    write_holdings_overrides({})
+    _CACHE.pop(user, None)
+    return JSONResponse({"ok": True})
 
 
 # ─────────────────────────── 내보내기(엑셀/PDF) ───────────────────────────

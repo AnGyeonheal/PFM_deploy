@@ -12,12 +12,13 @@ from pm import (
     get_order_history, get_stock_info,
 )
 from analytics_engine import transform_to_mvp_json, build_transaction_detail
-from benchmark import get_usdkrw_history, get_splits, to_yf_ticker
+from benchmark import get_usdkrw_history, get_splits, to_yf_ticker, set_price_overrides
 from manual_holdings import (
     set_data_dir, load_manual_holdings, manual_to_orders,
     read_manual_csv, read_transactions_csv, read_dividends_csv, read_splits_csv,
     transactions_to_orders, derive_holdings_from_tx,
     read_toss_overrides, write_toss_overrides,
+    read_holdings_overrides, write_holdings_overrides,
 )
 from performance import compute_performance_summary, build_holdings_breakdown
 from advanced_analytics import compute_dividends, compute_dividend_events
@@ -323,6 +324,8 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True,
     if use_tx and holdings_snapshot is not None and not holdings_snapshot.empty:
         combined_orders += manual_to_orders(holdings_snapshot)
     combined_orders = apply_split_adjustments(combined_orders)  # 분할/역분할을 현재 주식 수 기준으로 통일
+    combined_orders = apply_holdings_overrides(combined_orders)  # 대시보드 보유 표 수정을 거래로 대체 반영
+    set_price_overrides(holdings_price_overrides(), replace=True)  # 보유 표 현재가 수정 주입
 
     name_map = dict(toss_name_map)
     if has_manual:
@@ -471,6 +474,81 @@ def apply_split_adjustments(orders):
             o = dict(o)
             o["execution"] = ex  # filledAmount(투자원금)는 불변
         out.append(o)
+    return out
+
+
+def apply_holdings_overrides(orders, overrides=None):
+    """대시보드 보유 표 수정을 반영합니다. 오버라이드된 티커의 기존 주문을 제거하고,
+    사용자가 지정한 수량·평단가로 1건의 합성 매수로 대체합니다(삭제 표시 종목은 제외).
+    합성 주문 날짜는 기존 최초 매수일을 유지해 보유기간·알파/베타가 자연스럽게 이어집니다."""
+    overrides = read_holdings_overrides() if overrides is None else overrides
+    if not overrides:
+        return orders
+    first_dt = {}
+    for o in orders:
+        sym = o.get("symbol")
+        if sym not in overrides:
+            continue
+        ex = o.get("execution") or {}
+        raw = ex.get("filledAt") or o.get("orderedAt")
+        try:
+            d = pd.to_datetime(raw).tz_localize(None)
+        except Exception:
+            try:
+                d = pd.to_datetime(raw, utc=True).tz_localize(None)
+            except Exception:
+                continue
+        if pd.isna(d):
+            continue
+        if sym not in first_dt or d < first_dt[sym]:
+            first_dt[sym] = d
+    out = [o for o in orders if o.get("symbol") not in overrides]
+    today = pd.Timestamp.now().strftime("%Y-%m-%d")
+    for sym, e in overrides.items():
+        if e.get("deleted"):
+            continue
+        try:
+            qty = float(e.get("수량") or 0)
+            price = float(e.get("평단가") or 0)
+        except (TypeError, ValueError):
+            continue
+        if qty <= 0 or price <= 0:
+            continue
+        dt = first_dt.get(sym)
+        buy_date = dt.strftime("%Y-%m-%d") if dt is not None else today
+        filled_at = f"{buy_date}T00:00:00+09:00"
+        out.append({
+            "symbol": str(sym),
+            "currency": str(e.get("통화", "KRW")).upper(),
+            "side": "BUY",
+            "status": "FILLED",
+            "orderedAt": filled_at,
+            "broker": e.get("증권사", "직접수정"),
+            "_holdings_override": True,
+            "execution": {
+                "filledQuantity": qty,
+                "averageFilledPrice": price,
+                "filledAmount": qty * price,
+                "commission": 0, "tax": 0,
+                "filledAt": filled_at,
+            },
+        })
+    return out
+
+
+def holdings_price_overrides(overrides=None):
+    """보유 오버라이드 중 현재가가 지정된 항목을 {티커: 현재가}로 반환합니다."""
+    overrides = read_holdings_overrides() if overrides is None else overrides
+    out = {}
+    for sym, e in (overrides or {}).items():
+        if e.get("deleted"):
+            continue
+        try:
+            p = float(e.get("현재가") or 0)
+        except (TypeError, ValueError):
+            continue
+        if p > 0:
+            out[str(sym)] = p
     return out
 
 

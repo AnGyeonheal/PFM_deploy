@@ -173,12 +173,23 @@
   </ul>
   <div class="tab-content">
     <div class="tab-pane fade show active" id="t-hold">
-      <div class="table-scroll"><table class="table table-hover align-middle">
-        <thead><tr><th>종목</th><th>티커</th><th>상태</th><th class="text-end">보유수량</th><th class="text-end">현재주가</th><th class="text-end">투자원금(원)</th><th class="text-end">실현손익</th><th class="text-end">평가손익</th><th class="text-end">수익률(%)</th><th class="text-end">S&P500대비(%p)</th><th class="text-end">알파(연%)</th><th class="text-end">베타</th><th class="text-end">알파기여(%)</th><th class="text-end">베타기여(%)</th></tr></thead>
-        <tbody>{% for r in breakdown %}<tr>
-          <td>{{ r['종목'] }}</td><td>{{ r['티커'] }}</td><td>{{ r['상태'] }}</td>
-          <td class="text-end">{{ "{:g}".format(r['보유수량']) }}</td>
-          <td class="text-end">{% if r.get('현재주가') is not none %}{{ price(r['현재주가'], r['통화']) }}{% else %}–{% endif %}</td>
+      <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+        <span class="small text-secondary">보유 종목의 수량·평단가·현재가·종목명을 직접 수정하면 전체 성과 지표가 재계산됩니다.
+          <span class="badge bg-warning text-dark">수정됨</span> 표시는 사용자 정정값입니다.</span>
+        <div class="btn-group btn-group-sm">
+          <button id="hold-edit" class="btn btn-outline-primary">✏️ 보유 수정</button>
+          <button id="hold-save" class="btn btn-primary" style="display:none">💾 저장</button>
+          <button id="hold-cancel" class="btn btn-outline-secondary" style="display:none">취소</button>
+        </div>
+      </div>
+      <div class="table-scroll"><table class="table table-hover align-middle" id="hold-table">
+        <thead><tr><th>종목</th><th>티커</th><th>상태</th><th class="text-end">보유수량</th><th class="text-end">평단가</th><th class="text-end">현재주가</th><th class="text-end">투자원금(원)</th><th class="text-end">실현손익</th><th class="text-end">평가손익</th><th class="text-end">수익률(%)</th><th class="text-end">S&P500대비(%p)</th><th class="text-end">알파(연%)</th><th class="text-end">베타</th><th class="text-end">알파기여(%)</th><th class="text-end">베타기여(%)</th><th class="hold-admin" style="display:none"></th></tr></thead>
+        <tbody>{% for r in breakdown %}<tr data-ticker="{{ r['티커'] }}" data-currency="{{ r['통화'] }}"{% if r.get('_ovr') %} class="table-warning"{% endif %}>
+          <td class="hold-edit-cell" data-field="종목명" data-raw="{{ r['종목'] }}">{{ r['종목'] }}{% if r.get('_ovr') %} <span class="badge bg-warning text-dark">수정됨</span>{% endif %}</td>
+          <td>{{ r['티커'] }}</td><td>{{ r['상태'] }}</td>
+          <td class="text-end hold-edit-cell" data-field="수량" data-raw="{{ r['보유수량'] }}">{{ "{:g}".format(r['보유수량']) }}</td>
+          <td class="text-end hold-edit-cell" data-field="평단가" data-raw="{{ (r['평단가(달러)'] if r['통화']=='USD' else r['평단가(원화)']) or 0 }}">{% if r['통화']=='USD' %}{{ "{:,.2f}".format(r['평단가(달러)'] or 0) }}{% else %}{{ "{:,.0f}".format(r['평단가(원화)'] or 0) }}{% endif %}</td>
+          <td class="text-end hold-edit-cell" data-field="현재가" data-raw="{{ r['현재주가'] if r.get('현재주가') is not none else '' }}">{% if r.get('현재주가') is not none %}{{ price(r['현재주가'], r['통화']) }}{% else %}–{% endif %}</td>
           <td class="text-end">{{ "{:,.0f}".format(r['투자원금(원)']) }}</td>
           <td class="text-end {{ 'pos' if r['실현손익(원)']>=0 else 'neg' }}">{{ "{:,.0f}".format(r['실현손익(원)']) }}</td>
           <td class="text-end {{ 'pos' if r['평가손익(원)']>=0 else 'neg' }}">{{ "{:,.0f}".format(r['평가손익(원)']) }}</td>
@@ -188,6 +199,7 @@
           <td class="text-end">{% if r.get('베타') is not none %}{{ "%.2f"|format(r['베타']) }}{% else %}–{% endif %}</td>
           <td class="text-end">{% if r.get('알파기여(%)') is not none %}{{ "%.1f"|format(r['알파기여(%)']) }}{% else %}–{% endif %}</td>
           <td class="text-end">{% if r.get('베타기여(%)') is not none %}{{ "%.1f"|format(r['베타기여(%)']) }}{% else %}–{% endif %}</td>
+          <td class="hold-admin text-end" style="display:none">{% if r.get('_ovr') %}<button class="btn btn-sm btn-outline-danger hold-reset" data-ticker="{{ r['티커'] }}">되돌리기</button>{% endif %}</td>
         </tr>{% endfor %}</tbody>
       </table></div>
     </div>
@@ -411,5 +423,68 @@ if (chatSend) {
   chatSend.addEventListener('click', send);
   input.addEventListener('keydown', e => { if (e.key==='Enter') send(); });
 }
+
+// 보유 종목 인라인 편집 → 저장 시 거래로 대체되어 전체 성과 재계산
+(function(){
+  const table = document.getElementById('hold-table');
+  if (!table) return;
+  const btnEdit = document.getElementById('hold-edit');
+  const btnSave = document.getElementById('hold-save');
+  const btnCancel = document.getElementById('hold-cancel');
+  const setMode = (on) => {
+    btnEdit.style.display = on ? 'none' : '';
+    btnSave.style.display = on ? '' : 'none';
+    btnCancel.style.display = on ? '' : 'none';
+    table.querySelectorAll('.hold-admin').forEach(el => el.style.display = on ? '' : 'none');
+    table.querySelectorAll('.hold-edit-cell').forEach(td => {
+      const f = td.dataset.field;
+      const raw = td.dataset.raw || '';
+      const isText = (f === '종목명');
+      const inp = document.createElement('input');
+      inp.className = 'form-control form-control-sm' + (isText ? '' : ' text-end');
+      inp.type = isText ? 'text' : 'number';
+      if (!isText) inp.step = 'any';
+      inp.value = raw;
+      td.dataset.orig = raw;
+      td.innerHTML = '';
+      td.appendChild(inp);
+    });
+  };
+  btnEdit.addEventListener('click', () => setMode(true));
+  btnCancel.addEventListener('click', () => window.location.reload());
+  btnSave.addEventListener('click', async () => {
+    const rows = [];
+    table.querySelectorAll('tbody tr').forEach(tr => {
+      const tk = tr.dataset.ticker;
+      if (!tk) return;
+      const cur = tr.dataset.currency || 'KRW';
+      const vals = {}; let dirty = false;
+      tr.querySelectorAll('.hold-edit-cell').forEach(td => {
+        const inp = td.querySelector('input');
+        if (!inp) return;
+        vals[td.dataset.field] = inp.value.trim();
+        if (String(inp.value.trim()) !== String(td.dataset.orig || '')) dirty = true;
+      });
+      if (dirty) rows.push({티커: tk, 통화: cur, 종목명: vals['종목명'] || '',
+                            수량: vals['수량'] || 0, 평단가: vals['평단가'] || 0, 현재가: vals['현재가'] || ''});
+    });
+    if (!rows.length) { window.location.reload(); return; }
+    btnSave.disabled = true; btnSave.textContent = '저장 중…';
+    try {
+      const r = await fetch('/holdings/override', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({rows})});
+      const j = await r.json();
+      if (!j.ok) throw new Error();
+      window.location.reload();
+    } catch(e) { btnSave.disabled = false; btnSave.textContent = '💾 저장'; alert('저장에 실패했습니다.'); }
+  });
+  table.querySelectorAll('.hold-reset').forEach(btn => btn.addEventListener('click', async () => {
+    if (!confirm('이 종목의 수정을 되돌리고 원래 거래내역 기준으로 복원할까요?')) return;
+    try {
+      const r = await fetch('/holdings/override/reset', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({티커: btn.dataset.ticker})});
+      const j = await r.json();
+      if (j.ok) window.location.reload();
+    } catch(e) { alert('되돌리기 실패'); }
+  }));
+})();
 </script>
 {% endblock %}

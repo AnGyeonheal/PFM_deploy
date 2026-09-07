@@ -17,6 +17,7 @@ TX_CSV = os.path.join(os.path.dirname(__file__), "manual_transactions.csv")
 DIV_CSV = os.path.join(os.path.dirname(__file__), "manual_dividends.csv")
 SPLIT_CSV = os.path.join(os.path.dirname(__file__), "manual_splits.csv")
 TOSS_OVR_JSON = os.path.join(os.path.dirname(__file__), "toss_overrides.json")
+HOLDINGS_OVR_JSON = os.path.join(os.path.dirname(__file__), "holdings_overrides.json")
 TRASH_DIR = os.path.join(os.path.dirname(__file__), "trash")
 
 COLUMNS = ["증권사", "티커", "종목명", "시장", "수량", "평균매수가", "통화", "매수일"]
@@ -27,12 +28,13 @@ SPLIT_COLUMNS = ["티커", "종목명", "분할일", "비율"]
 
 def set_data_dir(directory):
     """사용자별 데이터 폴더로 CSV 저장 경로를 변경합니다(로그인 시 호출)."""
-    global MANUAL_CSV, TX_CSV, DIV_CSV, SPLIT_CSV, TOSS_OVR_JSON, TRASH_DIR
+    global MANUAL_CSV, TX_CSV, DIV_CSV, SPLIT_CSV, TOSS_OVR_JSON, HOLDINGS_OVR_JSON, TRASH_DIR
     MANUAL_CSV = os.path.join(directory, "manual_holdings.csv")
     TX_CSV = os.path.join(directory, "manual_transactions.csv")
     DIV_CSV = os.path.join(directory, "manual_dividends.csv")
     SPLIT_CSV = os.path.join(directory, "manual_splits.csv")
     TOSS_OVR_JSON = os.path.join(directory, "toss_overrides.json")
+    HOLDINGS_OVR_JSON = os.path.join(directory, "holdings_overrides.json")
     TRASH_DIR = os.path.join(directory, "trash")
 
 
@@ -59,6 +61,30 @@ def write_toss_overrides(overrides):
         return len(overrides or {})
     except Exception as e:
         print(f"[경고] 토스 오버라이드 저장 실패: {e}")
+        return 0
+
+
+def read_holdings_overrides():
+    """대시보드 보유 표 수정 오버라이드 {티커: {종목명,수량,평단가,현재가,통화,deleted}} 를 반환합니다."""
+    if not os.path.exists(HOLDINGS_OVR_JSON):
+        return {}
+    try:
+        with open(HOLDINGS_OVR_JSON, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print(f"[경고] 보유 오버라이드 읽기 실패: {e}")
+        return {}
+
+
+def write_holdings_overrides(overrides):
+    """보유 표 수정 오버라이드 dict를 JSON으로 저장합니다."""
+    try:
+        with open(HOLDINGS_OVR_JSON, "w", encoding="utf-8") as f:
+            json.dump(overrides or {}, f, ensure_ascii=False, indent=2)
+        return len(overrides or {})
+    except Exception as e:
+        print(f"[경고] 보유 오버라이드 저장 실패: {e}")
         return 0
 
 
@@ -116,7 +142,8 @@ def delete_broker_imports(broker):
 def _import_files():
     """백업/복원 대상 파일 (실경로, 스냅샷 내 파일명) 목록."""
     return [(TX_CSV, "manual_transactions.csv"), (DIV_CSV, "manual_dividends.csv"),
-            (MANUAL_CSV, "manual_holdings.csv"), (TOSS_OVR_JSON, "toss_overrides.json")]
+            (MANUAL_CSV, "manual_holdings.csv"), (TOSS_OVR_JSON, "toss_overrides.json"),
+            (HOLDINGS_OVR_JSON, "holdings_overrides.json")]
 
 
 def _csv_rows(path):
