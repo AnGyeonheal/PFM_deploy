@@ -64,7 +64,7 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
   return (
     <div className="space-y-6">
       {/* KPI Row - D1 */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         {[
           {
             label: "총 자산", value: formatKRW(m.totalAsset),
@@ -77,6 +77,11 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
             label: "총 손익", value: (effectivePnL >= 0 ? "+" : "") + formatKRW(effectivePnL),
             sub: `수익률 ${effectiveReturn >= 0 ? "+" : ""}${effectiveReturn.toFixed(2)}%`,
             highlight: true, positive: effectivePnL >= 0,
+          },
+          {
+            label: "연평균 수익률", value: m.xirr != null ? `${m.xirr >= 0 ? "+" : ""}${m.xirr.toFixed(2)}%` : "—",
+            sub: "XIRR · 투자원금 흐름 반영",
+            highlight: true, positive: (m.xirr || 0) >= 0,
           },
           {
             label: "주식 평가액", value: formatKRW(m.totalCurrent),

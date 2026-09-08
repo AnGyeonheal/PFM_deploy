@@ -275,6 +275,7 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
         "pureStockPnL": perf.get("pure_price_krw") or 0,
         "totalPnL": perf.get("all_inclusive_krw") or 0,
         "returnPct": perf.get("all_inclusive_pct") or 0,
+        "xirr": (data.get("ab") or {}).get("port_xirr_pct"),  # 연평균 수익률(현금흐름 기반 XIRR)
     }
     all_tickers = [{"ticker": s["ticker"], "name": s["name"]} for s in stocks]
     if ticker:
