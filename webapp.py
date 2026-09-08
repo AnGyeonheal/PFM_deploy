@@ -211,6 +211,43 @@ def _save_daily_metrics(user, date_str, snapshot):
         pass
 
 
+def _calc_xirr(orders, fx_rate, stocks, ticker=None, period=None):
+    """현금흐름(매수·매도)과 현재 보유 평가액으로 XIRR(%)을 직접 계산. 종목(ticker)·기간(period) 필터 지원.
+    기간 지정 시 기간 내 매매만 반영하는 근사치(기간초 보유분 유출 제외)."""
+    from pme import xirr as _xirr
+    now = pd.Timestamp.now().normalize()
+    n = _PERIOD_MONTHS.get((period or "").upper())
+    cutoff = (now - pd.DateOffset(months=n)) if n else None
+    cfs = []
+    for o in (orders or []):
+        if ticker and o.get("symbol") != ticker:
+            continue
+        ex = o.get("execution") or {}
+        amt = float(ex.get("filledAmount") or 0)
+        if amt <= 0:
+            continue
+        amt_krw = amt * (fx_rate if o.get("currency") == "USD" else 1.0)
+        raw = ex.get("filledAt") or o.get("orderedAt")
+        try:
+            dt = pd.to_datetime(raw).tz_localize(None)
+        except Exception:
+            try:
+                dt = pd.to_datetime(raw, utc=True).tz_localize(None)
+            except Exception:
+                continue
+        if cutoff is not None and dt < cutoff:
+            continue
+        cfs.append((dt, -amt_krw if o.get("side") == "BUY" else amt_krw))
+    cur_val = sum(float(s.get("currentTotal") or 0) for s in (stocks or [])
+                  if s.get("status") == "보유중" and (not ticker or s.get("ticker") == ticker))
+    if cur_val > 0:
+        cfs.append((now, cur_val))
+    if len(cfs) < 2:
+        return None
+    r = _xirr(cfs)
+    return round(r * 100, 2) if r is not None else None
+
+
 @app.get("/api/app/dashboard")
 def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str = "", period: str = ""):
     user = _current_user(request)
@@ -275,7 +312,6 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
         "pureStockPnL": perf.get("pure_price_krw") or 0,
         "totalPnL": perf.get("all_inclusive_krw") or 0,
         "returnPct": perf.get("all_inclusive_pct") or 0,
-        "xirr": (data.get("ab") or {}).get("port_xirr_pct"),  # 연평균 수익률(현금흐름 기반 XIRR)
     }
     all_tickers = [{"ticker": s["ticker"], "name": s["name"]} for s in stocks]
     if ticker:
@@ -292,6 +328,11 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
             }
             stocks = sel
             allocation = [{"name": s0["name"], "value": 100.0}]
+    # 연평균 수익률(XIRR): 전체·전체기간은 정확한 ab(배당·환율시점 반영), 종목/기간 지정 시 현금흐름으로 직접 계산
+    if not ticker and not _PERIOD_MONTHS.get((period or "").upper()):
+        metrics["xirr"] = (data.get("ab") or {}).get("port_xirr_pct")
+    else:
+        metrics["xirr"] = _calc_xirr(data["combined_orders"], fx_rate, stocks, ticker, period)
     growth = []
     try:
         twr = pipeline.twr_comparison(data["combined_orders"], fx_rate, ticker or None, include_fx=bool(fx))
