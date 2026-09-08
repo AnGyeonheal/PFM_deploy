@@ -5,8 +5,10 @@
 """
 import io
 import os
+import json
 import time
 import secrets as _secrets
+from datetime import datetime
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Form, UploadFile, File
@@ -179,6 +181,36 @@ def api_app_me(request: Request):
     return JSONResponse({"ok": True, "user": user})
 
 
+def _daily_metrics_path(user):
+    return os.path.join(auth.user_dir(user), "daily_metrics.json")
+
+
+def _load_daily_metrics(user):
+    p = _daily_metrics_path(user)
+    if os.path.exists(p):
+        try:
+            with open(p, encoding="utf-8") as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_daily_metrics(user, date_str, snapshot):
+    """오늘 지표 스냅샷을 저장(날짜별 upsert, 최근 120일치 보관)."""
+    data = _load_daily_metrics(user)
+    data[date_str] = snapshot
+    if len(data) > 120:
+        for k in sorted(data.keys())[:-120]:
+            data.pop(k, None)
+    try:
+        with open(_daily_metrics_path(user), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 @app.get("/api/app/dashboard")
 def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str = "", period: str = ""):
     user = _current_user(request)
@@ -270,7 +302,45 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
                                "sp500": round(float(_sm.loc[_dt]) if _dt in _sm.index else 0.0, 1)})
     except Exception:
         growth = []
-    return JSONResponse({"metrics": metrics, "stocks": stocks, "allocation": allocation, "fx": fx_rate, "growth": growth, "tickers": all_tickers})
+    # 전일 대비 변동(전체 포트 기준): 오늘 값을 저장하고 직전 저장일과 비교
+    changes = None
+    if not ticker:
+        try:
+            sa2 = data.get("stock_analytics")
+            stocks_ab = {}
+            if sa2 is not None and not sa2.empty:
+                for _r in sa2.to_dict("records"):
+                    stocks_ab[str(_r.get("티커"))] = {
+                        "alpha": round(float(_r.get("알파(연%)") or 0), 2),
+                        "beta": round(float(_r.get("베타") or 0), 3),
+                    }
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            dm = _load_daily_metrics(user)
+            prev_dates = [dd for dd in dm.keys() if dd < today_str]
+            prev = dm.get(max(prev_dates)) if prev_dates else None
+            _save_daily_metrics(user, today_str, {"totalAsset": metrics["totalAsset"], "stocks": stocks_ab})
+            if prev:
+                ta_prev = float(prev.get("totalAsset") or 0)
+                st = []
+                for _tk, _ab in stocks_ab.items():
+                    _pab = (prev.get("stocks") or {}).get(_tk)
+                    if not _pab:
+                        continue
+                    st.append({
+                        "ticker": _tk, "name": name_map.get(_tk) or _tk,
+                        "alpha": _ab["alpha"], "beta": _ab["beta"],
+                        "alphaDelta": round(_ab["alpha"] - float(_pab.get("alpha") or 0), 2),
+                        "betaDelta": round(_ab["beta"] - float(_pab.get("beta") or 0), 3),
+                    })
+                changes = {
+                    "asOf": max(prev_dates),
+                    "totalAssetDelta": round(metrics["totalAsset"] - ta_prev),
+                    "totalAssetDeltaPct": round((metrics["totalAsset"] - ta_prev) / ta_prev * 100, 2) if ta_prev else None,
+                    "stocks": st,
+                }
+        except Exception:
+            changes = None
+    return JSONResponse({"metrics": metrics, "stocks": stocks, "allocation": allocation, "fx": fx_rate, "growth": growth, "tickers": all_tickers, "changes": changes})
 
 
 @app.get("/api/app/tickers")

@@ -4,6 +4,12 @@ import { Card, CardHeader, formatKRW, ReturnBadge, PnLText, CustomTooltip, type 
 
 const ALLOC_COLORS = ["#00d4a1", "#4f8cff", "#6b7494", "#a78bfa", "#f0a500", "#ff5c6a", "#12b981", "#ff9f40"];
 
+const DeltaText = ({ value, digits }: { value: number; digits: number }) => {
+  if (!value) return <span className="font-mono text-xs text-[#6b7494]">±0</span>;
+  const pos = value > 0;
+  return <span className={`font-mono text-xs ${pos ? "text-[#00d4a1]" : "text-[#ff5c6a]"}`}>{pos ? "▲" : "▼"} {Math.abs(value).toFixed(digits)}</span>;
+};
+
 export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; onTickers?: (t: { ticker: string; name: string }[]) => void }) {
   const [d, setD] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -62,7 +68,10 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
         {[
           {
             label: "총 자산", value: formatKRW(m.totalAsset),
-            sub: `현금 ${formatKRW(m.cash, true)} 포함`, highlight: false,
+            sub: d.changes && d.changes.totalAssetDelta != null
+              ? `전일 대비 ${d.changes.totalAssetDelta >= 0 ? "+" : ""}${formatKRW(d.changes.totalAssetDelta, true)}${d.changes.totalAssetDeltaPct != null ? ` (${d.changes.totalAssetDeltaPct >= 0 ? "+" : ""}${d.changes.totalAssetDeltaPct}%)` : ""}`
+              : `현금 ${formatKRW(m.cash, true)} 포함`,
+            highlight: false,
           },
           {
             label: "총 손익", value: (effectivePnL >= 0 ? "+" : "") + formatKRW(effectivePnL),
@@ -88,6 +97,51 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
           </Card>
         ))}
       </div>
+
+      {/* 전일 대비 변동 */}
+      {d.changes && (
+        <Card>
+          <CardHeader title="전일 대비 변동" sub={`${d.changes.asOf} 기준 대비`} />
+          <div className="p-5 space-y-4">
+            <div className="flex items-center justify-between bg-[#0a0d14] border border-white/5 rounded-sm px-4 py-3">
+              <span className="text-sm text-[#a0a8c0]">전체 자산</span>
+              <span className={`font-mono text-sm ${d.changes.totalAssetDelta >= 0 ? "text-[#00d4a1]" : "text-[#ff5c6a]"}`}>
+                {d.changes.totalAssetDelta >= 0 ? "▲ +" : "▼ "}{formatKRW(d.changes.totalAssetDelta)}
+                {d.changes.totalAssetDeltaPct != null && ` (${d.changes.totalAssetDeltaPct >= 0 ? "+" : ""}${d.changes.totalAssetDeltaPct}%)`}
+              </span>
+            </div>
+            {d.changes.stocks.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-white/7">
+                      {["종목", "알파(연%)", "Δ 알파", "베타", "Δ 베타"].map(h => (
+                        <th key={h} className="px-3 py-2 text-left text-[11px] text-[#6b7494] font-mono uppercase tracking-wider">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {d.changes.stocks.map((s: any) => (
+                      <tr key={s.ticker} className="border-b border-white/4">
+                        <td className="px-3 py-2">
+                          <div className="font-mono text-xs text-[#00d4a1]">{s.ticker}</div>
+                          <div className="text-xs text-[#6b7494]">{s.name}</div>
+                        </td>
+                        <td className="px-3 py-2 font-mono text-xs text-[#e8eaf0]">{s.alpha.toFixed(2)}</td>
+                        <td className="px-3 py-2"><DeltaText value={s.alphaDelta} digits={2} /></td>
+                        <td className="px-3 py-2 font-mono text-xs text-[#e8eaf0]">{s.beta.toFixed(3)}</td>
+                        <td className="px-3 py-2"><DeltaText value={s.betaDelta} digits={3} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-xs text-[#6b7494] font-mono">종목별 비교 데이터가 아직 없습니다.</p>
+            )}
+          </div>
+        </Card>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Performance Chart */}
