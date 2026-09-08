@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { PieChart, Pie, Cell, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
+import { PieChart, Pie, Cell, AreaChart, Area, BarChart, Bar, LabelList, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { Card, CardHeader, formatKRW, ReturnBadge, PnLText, CustomTooltip, type AnalysisOptions } from "../components/Shared";
 
 const ALLOC_COLORS = ["#00d4a1", "#4f8cff", "#6b7494", "#a78bfa", "#f0a500", "#ff5c6a", "#12b981", "#ff9f40"];
@@ -8,6 +8,7 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
   const [d, setD] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  const [projRate, setProjRate] = useState<number | null>(null);  // 장기 예측 연성장률(%), null이면 과거 CAGR 사용
 
   useEffect(() => {
     setLoading(true);
@@ -29,6 +30,18 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
   const allocationData = (d.allocation || []).map((a: any, i: number) => ({ ...a, color: ALLOC_COLORS[i % ALLOC_COLORS.length] }));
   const effectivePnL = m.totalPnL;
   const effectiveReturn = m.returnPct;
+
+  // 장기 자산 예측: 현재 총자산에 과거 연평균 성장률(CAGR)을 복리 적용
+  const parseYm = (s: string) => { const p = String(s).split("/"); return (+p[0]) * 12 + (+p[1]); };
+  const gArr = d.growth || [];
+  const projYears = gArr.length >= 2 ? Math.max((parseYm(gArr[gArr.length - 1].month) - parseYm(gArr[0].month)) / 12, 0.25) : 1;
+  const cagr = Math.pow(1 + Math.max(effectiveReturn / 100, -0.99), 1 / projYears) - 1;
+  const projRatePct = projRate != null ? projRate : +(cagr * 100).toFixed(2);
+  const rate = projRatePct / 100;
+  const projData = [0, 5, 10, 20, 30, 40].map(y => ({
+    label: y === 0 ? "현재" : `${y}년`, year: y,
+    asset: Math.round(m.totalAsset * Math.pow(1 + rate, y)),
+  }));
 
   return (
     <div className="space-y-6">
@@ -116,6 +129,50 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
           </div>
         </Card>
       </div>
+
+      {/* 장기 자산 예측 */}
+      <Card>
+        <CardHeader title="장기 자산 예측" sub={`현재 자산 ${formatKRW(m.totalAsset, true)} · 연 ${projRatePct.toFixed(1)}% 복리 가정`} />
+        <div className="p-5 space-y-5">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-xs text-[#6b7494] font-mono uppercase tracking-wider">연평균 성장률</span>
+            <input type="number" step="0.1" value={projRatePct}
+              onChange={e => setProjRate(parseFloat(e.target.value))}
+              className="w-24 bg-[#0a0d14] border border-white/10 rounded-sm px-2 py-1 text-sm text-[#e8eaf0] font-mono focus:outline-none focus:border-[#00d4a1]/50" />
+            <span className="text-sm text-[#a0a8c0]">%</span>
+            <button onClick={() => setProjRate(null)}
+              className="text-xs font-mono px-2.5 py-1 rounded-sm border border-white/10 text-[#6b7494] hover:text-[#a0a8c0] transition-colors">
+              자동 {(cagr * 100).toFixed(1)}% (과거 연평균)
+            </button>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            {projData.filter(p => p.year > 0).map(p => (
+              <div key={p.year} className="bg-[#0a0d14] border border-white/5 rounded-sm p-3">
+                <div className="text-xs text-[#6b7494] font-mono mb-1">{p.year}년 후</div>
+                <div className="font-['DM_Serif_Display',serif] text-lg text-[#00d4a1]">{formatKRW(p.asset, true)}</div>
+                <div className="text-[10px] text-[#6b7494] font-mono mt-0.5">{m.totalAsset > 0 ? (p.asset / m.totalAsset).toFixed(1) : "-"}배</div>
+              </div>
+            ))}
+          </div>
+          <ResponsiveContainer width="100%" height={240}>
+            <BarChart data={projData} margin={{ top: 20, right: 4, bottom: 0, left: -10 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+              <XAxis dataKey="label" tick={{ fill: "#6b7494", fontSize: 11, fontFamily: "JetBrains Mono" }} axisLine={false} tickLine={false} />
+              <YAxis tickFormatter={(v: any) => formatKRW(Number(v), true)} tick={{ fill: "#6b7494", fontSize: 11, fontFamily: "JetBrains Mono" }} axisLine={false} tickLine={false} width={56} />
+              <Tooltip cursor={{ fill: "rgba(255,255,255,0.03)" }} formatter={(v: any) => [formatKRW(Number(v)), "예상 자산"]}
+                contentStyle={{ background: "#161c2d", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, fontSize: 12, fontFamily: "JetBrains Mono" }}
+                labelStyle={{ color: "#6b7494" }} itemStyle={{ color: "#e8eaf0" }} />
+              <Bar dataKey="asset" radius={[4, 4, 0, 0]}>
+                {projData.map((p, i) => <Cell key={i} fill={p.year === 0 ? "#4f8cff" : "#00d4a1"} />)}
+                <LabelList dataKey="asset" position="top" formatter={(v: any) => formatKRW(Number(v), true)} style={{ fill: "#a0a8c0", fontSize: 10, fontFamily: "JetBrains Mono" }} />
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+          <p className="text-xs text-[#6b7494] font-mono leading-relaxed">
+            ※ 과거 연평균 성장률(CAGR)을 그대로 복리 적용한 단순 추정입니다. 실제 수익률은 매년 달라지며, 높은 성장률을 장기 적용하면 과대추정될 수 있습니다. 성장률을 직접 바꿔 보수적 시나리오와 비교해 보세요.
+          </p>
+        </div>
+      </Card>
 
       {/* Holdings - D2, D3 */}
       <Card>
