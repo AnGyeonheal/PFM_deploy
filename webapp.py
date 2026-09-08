@@ -328,11 +328,17 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
             }
             stocks = sel
             allocation = [{"name": s0["name"], "value": 100.0}]
-    # 연평균 수익률(XIRR): 전체·전체기간은 정확한 ab(배당·환율시점 반영), 종목/기간 지정 시 현금흐름으로 직접 계산
-    if not ticker and not _PERIOD_MONTHS.get((period or "").upper()):
-        metrics["xirr"] = (data.get("ab") or {}).get("port_xirr_pct")
+    # 연평균 수익률(XIRR): 전체는 전체기간 XIRR(ab), 종목 선택 시 기간 반영 직접 계산.
+    # 어떤 경우든 값이 비지 않도록 ab→직접계산 순으로 폴백한다.
+    if ticker:
+        _xr = _calc_xirr(data["combined_orders"], fx_rate, stocks, ticker, period)
     else:
-        metrics["xirr"] = _calc_xirr(data["combined_orders"], fx_rate, stocks, ticker, period)
+        _xr = (data.get("ab") or {}).get("port_xirr_pct")
+    if _xr is None:
+        _xr = _calc_xirr(data["combined_orders"], fx_rate, stocks, ticker or None, None)
+    if _xr is None:
+        _xr = (data.get("ab") or {}).get("port_xirr_pct")
+    metrics["xirr"] = _xr
     growth = []
     try:
         twr = pipeline.twr_comparison(data["combined_orders"], fx_rate, ticker or None, include_fx=bool(fx))
