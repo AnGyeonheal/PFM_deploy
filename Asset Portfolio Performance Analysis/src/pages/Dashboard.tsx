@@ -14,19 +14,21 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
   const [d, setD] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
-  const [projRate, setProjRate] = useState<number | null>(null);  // 장기 예측 연성장률(%), null이면 과거 CAGR 사용
+  const [projRate, setProjRate] = useState<number | null>(null);
   const [monthlyManwon, setMonthlyManwon] = useState<number>(0);  // 월 추가납입액(만원)
 
   useEffect(() => {
+    const controller = new AbortController();
     setLoading(true);
     setError(false);
     const stockQ = opts.scope === "stock" && opts.ticker ? `&ticker=${encodeURIComponent(opts.ticker)}` : "";
     const q = `div=${opts.includeDividend ? 1 : 0}&fx=${opts.includeFx ? 1 : 0}${stockQ}&period=${opts.period}`;
-    fetch(`/api/app/dashboard?${q}`, { credentials: "include" })
+    fetch(`/api/app/dashboard?${q}`, { credentials: "include", signal: controller.signal })
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
       .then((data) => { setD(data); if (data?.tickers?.length && onTickers) onTickers(data.tickers); })
-      .catch(() => setError(true))
-      .finally(() => setLoading(false));
+      .catch(() => { if (!controller.signal.aborted) setError(true); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
   }, [opts.includeDividend, opts.includeFx, opts.scope, opts.ticker, opts.period]);
 
   if (loading) return <div className="text-[#6b7494] text-sm p-10 text-center font-mono">불러오는 중…</div>;
@@ -34,16 +36,12 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
 
   const m = d.metrics;
   const stocks = d.stocks || [];
-  const allocationData = (d.allocation || []).map((a: any, i: number) => ({ ...a, color: ALLOC_COLORS[i % ALLOC_COLORS.length] }));
+  const allocationData: { name: string; value: number; color: string }[] = (d.allocation || []).map((a: any, i: number) => ({ ...a, color: ALLOC_COLORS[i % ALLOC_COLORS.length] }));
   const effectivePnL = m.totalPnL;
   const effectiveReturn = m.returnPct;
 
-  // 장기 자산 예측: 현재 총자산에 과거 연평균 성장률(CAGR)을 복리 적용
-  const parseYm = (s: string) => { const p = String(s).split("/"); return (+p[0]) * 12 + (+p[1]); };
-  const gArr = d.growth || [];
-  const projYears = gArr.length >= 2 ? Math.max((parseYm(gArr[gArr.length - 1].month) - parseYm(gArr[0].month)) / 12, 0.25) : 1;
-  const cagr = Math.pow(1 + Math.max(effectiveReturn / 100, -0.99), 1 / projYears) - 1;
-  const projRatePct = projRate != null ? projRate : +(cagr * 100).toFixed(2);
+  const historicalRate = Number.isFinite(m.projectionRate) ? m.projectionRate : 0;
+  const projRatePct = projRate != null ? projRate : +historicalRate.toFixed(2);
   const rate = projRatePct / 100;
   const monthlyKRW = Math.max(0, monthlyManwon || 0) * 10000;  // 만원→원
   const rMonthly = Math.pow(1 + rate, 1 / 12) - 1;  // 연성장률의 월 환산
@@ -75,7 +73,7 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
           },
           {
             label: "총 손익", value: (effectivePnL >= 0 ? "+" : "") + formatKRW(effectivePnL),
-            sub: `수익률 ${effectiveReturn >= 0 ? "+" : ""}${effectiveReturn.toFixed(2)}%`,
+            sub: effectiveReturn == null ? "수익률 —" : `수익률 ${effectiveReturn >= 0 ? "+" : ""}${effectiveReturn.toFixed(2)}%`,
             highlight: true, positive: effectivePnL >= 0,
           },
           {
@@ -155,7 +153,7 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
             <CardHeader title="자산 성장 추이" sub="기준가 100" />
             <div className="p-5">
               <ResponsiveContainer width="100%" height={220}>
-                <AreaChart data={d.growth || []} margin={{ top: 4, right: 4, bottom: 0, left: -20 }}>
+                <AreaChart data={d.growth || []} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
                   <defs>
                     <linearGradient id="portGrad2" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="#00d4a1" stopOpacity={0.2} />
@@ -213,7 +211,7 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
             <span className="text-sm text-[#a0a8c0]">%</span>
             <button onClick={() => setProjRate(null)}
               className="text-xs font-mono px-2.5 py-1 rounded-sm border border-white/10 text-[#6b7494] hover:text-[#a0a8c0] transition-colors">
-              자동 {(cagr * 100).toFixed(1)}%
+              자동 {historicalRate.toFixed(1)}%
             </button>
             <span className="w-px h-5 bg-white/10 mx-1" />
             <span className="text-xs text-[#6b7494] font-mono uppercase tracking-wider">월 적립액</span>
@@ -256,7 +254,7 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
             </BarChart>
           </ResponsiveContainer>
           <p className="text-xs text-[#6b7494] font-mono leading-relaxed">
-            ※ 현재 자산은 연평균 성장률(CAGR)로 복리 성장하고, 매월 적립액은 같은 수익률로 재투자된다고 가정한 추정입니다(청록=현재자산 성장, 파랑=추가납입 성장). 실제 수익률은 매년 달라지며 높은 성장률을 장기 적용하면 과대추정될 수 있습니다.
+            ※ 자동 성장률은 전체 투자이력의 XIRR입니다. 매월 말 추가납입과 일정한 수익률을 가정하며, 미래 수익을 보장하지 않습니다.
           </p>
         </div>
       </Card>

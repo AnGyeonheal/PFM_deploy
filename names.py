@@ -3,6 +3,7 @@
 FinanceDataReader의 KRX 상장목록을 1회 로드해 캐시합니다. 실패 시 원본(티커) 유지.
 """
 from functools import lru_cache
+from contextvars import ContextVar
 import os
 import json
 
@@ -223,3 +224,32 @@ def normalize_kr_ticker(t):
     if len(s) >= 2 and s[0] in ("A", "a") and s[1:].isdigit():
         return s[1:].zfill(6)
     return s
+
+
+_KRW_FOREIGN_SYMBOLS = ContextVar("krw_usd_etfs", default=frozenset())
+_FOREIGN_NAME_KEYS = ("미국", "나스닥", "NASDAQ", "S&P500", "다우존스", "필라델피아", "미국달러")
+_ETF_BRANDS = ("TIGER", "KODEX", "ACE", "RISE", "KBSTAR", "SOL", "HANARO", "PLUS",
+               "ARIRANG", "KOSEF", "KIWOOM", "TIMEFOLIO", "KOACT", "1Q")
+
+
+def _looks_foreign_etf(name):
+    """종목명이 원화 상장 해외(달러 기초) ETF로 보이는지. (H) 환헤지형은 제외."""
+    nm = str(name or "").upper().replace(" ", "")
+    if "(H)" in nm or "합성H" in nm or "환헤지" in nm:
+        return False
+    return nm.startswith(_ETF_BRANDS) and any(key in nm for key in _FOREIGN_NAME_KEYS)
+
+
+def register_krw_foreign(name_map):
+    """{티커: 종목명}에서 원화 상장 해외 ETF를 판정해 등록합니다(로드 시 1회)."""
+    symbols = set()
+    for sym, name in (name_map or {}).items():
+        symbol = normalize_kr_ticker(sym)
+        if symbol and len(symbol) == 6 and symbol.isdigit() and _looks_foreign_etf(name):
+            symbols.add(symbol)
+    _KRW_FOREIGN_SYMBOLS.set(frozenset(symbols))
+
+
+def is_krw_foreign(symbol):
+    """원화 상장 해외(환노출) ETF 종목코드인지."""
+    return normalize_kr_ticker(symbol) in _KRW_FOREIGN_SYMBOLS.get()

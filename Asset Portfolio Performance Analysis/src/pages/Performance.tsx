@@ -5,7 +5,7 @@ import { Card, CardHeader, formatKRW, ReturnBadge, PnLText, CustomTooltip, type 
 type Metrics = {
   totalBuy: number; unrealizedPnL: number; realizedPnL: number;
   dividendPnL: number; fxPnL: number; pureStockPnL: number;
-  totalPnL: number; returnPct: number;
+  totalPnL: number; returnPct: number | null;
 };
 type StockRow = {
   ticker: string; name: string; buyTotal: number; unrealizedPnL: number;
@@ -19,13 +19,15 @@ export default function Performance({ opts, onTickers }: { opts: AnalysisOptions
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    const controller = new AbortController();
     setLoading(true);
     const stockQ = opts.scope === "stock" && opts.ticker ? `&ticker=${encodeURIComponent(opts.ticker)}` : "";
-    fetch(`/api/app/dashboard?div=${opts.includeDividend ? 1 : 0}&fx=${opts.includeFx ? 1 : 0}${stockQ}`, { credentials: "include" })
+    fetch(`/api/app/dashboard?div=${opts.includeDividend ? 1 : 0}&fx=${opts.includeFx ? 1 : 0}${stockQ}`, { credentials: "include", signal: controller.signal })
       .then(r => { if (!r.ok) throw new Error("데이터를 불러오지 못했습니다"); return r.json(); })
       .then(d => { setM(d.metrics); setRows(d.stocks || []); setErr(""); if (d?.tickers?.length && onTickers) onTickers(d.tickers); })
-      .catch(e => setErr(String(e.message || e)))
-      .finally(() => setLoading(false));
+      .catch(e => { if (!controller.signal.aborted) setErr(String(e.message || e)); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
   }, [opts.includeDividend, opts.includeFx, opts.scope, opts.ticker]);
 
   if (loading) return <div className="text-[#6b7494] text-sm py-20 text-center">불러오는 중…</div>;
@@ -53,14 +55,14 @@ export default function Performance({ opts, onTickers }: { opts: AnalysisOptions
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[
           { label: "총 손익", value: totalPnL, isKRW: true, positive: totalPnL >= 0 },
-          { label: "총 수익률", value: totalReturn, isKRW: false, positive: totalReturn >= 0 },
+          { label: "총 수익률", value: totalReturn, isKRW: false, positive: (totalReturn ?? 0) >= 0 },
           { label: "평가손익", value: unrealized, isKRW: true, positive: unrealized >= 0 },
           { label: "실현손익", value: realized, isKRW: true, positive: realized >= 0 },
         ].map(k => (
           <Card key={k.label} className="p-5">
             <div className="text-xs text-[#6b7494] uppercase tracking-widest font-mono mb-3">{k.label}</div>
             <div className={`font-['DM_Serif_Display',serif] text-2xl ${k.positive ? "text-[#00d4a1]" : "text-[#ff5c6a]"}`}>
-              {k.isKRW ? `${k.value >= 0 ? "+" : ""}${formatKRW(k.value)}` : `${k.value >= 0 ? "+" : ""}${k.value.toFixed(2)}%`}
+              {k.value == null ? "—" : k.isKRW ? `${k.value >= 0 ? "+" : ""}${formatKRW(k.value)}` : `${k.value >= 0 ? "+" : ""}${k.value.toFixed(2)}%`}
             </div>
           </Card>
         ))}
@@ -82,7 +84,7 @@ export default function Performance({ opts, onTickers }: { opts: AnalysisOptions
                 </div>
                 <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
                   <div className="h-full rounded-full" style={{
-                    width: `${Math.min(100, Math.abs(d.value) / Math.abs(totalPnL) * 100)}%`,
+                    width: `${Math.min(100, Math.abs(d.value) / (breakdownData.reduce((total, item) => total + Math.abs(item.value), 0) || 1) * 100)}%`,
                     background: d.color,
                     opacity: d.value < 0 ? 0.5 : 1
                   }} />
@@ -106,7 +108,7 @@ export default function Performance({ opts, onTickers }: { opts: AnalysisOptions
                 { name: "환차손익", value: m.fxPnL / 1_000_000 },
                 { name: "실현 손익", value: m.realizedPnL / 1_000_000 },
                 { name: "배당", value: m.dividendPnL / 1_000_000 },
-              ]} margin={{ top: 4, right: 4, bottom: 4, left: -20 }}>
+              ]} margin={{ top: 4, right: 4, bottom: 4, left: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
                 <XAxis dataKey="name" tick={{ fill: "#6b7494", fontSize: 10, fontFamily: "JetBrains Mono" }} axisLine={false} tickLine={false} />
                 <YAxis tick={{ fill: "#6b7494", fontSize: 10, fontFamily: "JetBrains Mono" }} axisLine={false} tickLine={false} unit="M" />

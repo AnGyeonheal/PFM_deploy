@@ -13,7 +13,7 @@ def _shares_held_on(buy_sell_events, as_of_date):
     buy_sell_events: [(date(Timestamp), signed_qty), ...]"""
     total = 0.0
     for d, q in buy_sell_events:
-        if d <= as_of_date:
+        if d < as_of_date:
             total += q
     return total
 
@@ -82,6 +82,7 @@ def compute_dividend_events(orders, current_fx=1400.0, ticker=None):
     각 배당락일의 보유수량 × 주당배당(yfinance)으로 추정. ticker 지정 시 해당 종목만.
     """
     by_symbol = _symbol_events(orders)
+    fx_history = get_usdkrw_history("10y")
     events = []
     for sym, info in by_symbol.items():
         if ticker and sym != ticker:
@@ -105,7 +106,9 @@ def compute_dividend_events(orders, current_fx=1400.0, ticker=None):
             shares = _shares_held_on(evs, ed)
             if shares > 0:
                 native = shares * float(dps)
-                krw = native * current_fx if currency == "USD" else native
+                event_fx = fx_history.asof(ed) if not fx_history.empty else current_fx
+                event_fx = float(event_fx) if pd.notna(event_fx) else current_fx
+                krw = native * event_fx if currency == "USD" else native
                 events.append((ed, krw, sym))
     return sorted(events, key=lambda x: x[0])
 

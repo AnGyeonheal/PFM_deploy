@@ -43,9 +43,16 @@ export default function App() {
   const [checking, setChecking] = useState(true);
   const [phase, setPhase] = useState<Phase>("onboard");
   const [page, setPage] = useState<Page>("dashboard");
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.matchMedia("(min-width: 768px)").matches);
   const [opts, setOpts] = useState<AnalysisOptions>({ includeDividend: true, includeFx: true, period: "1Y", scope: "total", ticker: "" });
   const [tickers, setTickers] = useState<{ ticker: string; name: string }[]>([]);
+
+  useEffect(() => {
+    const media = window.matchMedia("(min-width: 768px)");
+    const update = () => setSidebarOpen(media.matches);
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
 
   useEffect(() => {
     fetch("/api/app/me", { credentials: "include" })
@@ -109,14 +116,15 @@ export default function App() {
 
   return (
     <div className="min-h-full bg-[#0a0d14] text-[#e8eaf0] font-['Outfit',sans-serif] flex">
-      <aside className={`${sidebarOpen ? "w-56" : "w-14"} flex-shrink-0 bg-[#0d1019] border-r border-white/7 flex flex-col transition-all duration-200 overflow-hidden`}>
+      {sidebarOpen && <button aria-label="메뉴 닫기" onClick={() => setSidebarOpen(false)} className="fixed inset-0 z-20 bg-black/40 md:hidden" />}
+      <aside className={`${sidebarOpen ? "fixed inset-y-0 left-0 z-30 w-56 md:static" : "hidden md:flex md:w-14"} flex-shrink-0 bg-[#0d1019] border-r border-white/7 flex flex-col transition-all duration-200 overflow-hidden`}>
         <div className={`flex items-center gap-3 px-4 h-14 border-b border-white/7 ${!sidebarOpen && "justify-center"}`}>
           <Logo />
           {sidebarOpen && <span className="font-['DM_Serif_Display',serif] text-base tracking-tight whitespace-nowrap">PortfolioAI</span>}
         </div>
         <nav className="flex-1 py-4 space-y-0.5 px-2">
           {NAV.map(item => (
-            <button key={item.id} onClick={() => setPage(item.id)}
+            <button key={item.id} onClick={() => { setPage(item.id); if (!window.matchMedia("(min-width: 768px)").matches) setSidebarOpen(false); }}
               className={`w-full flex items-center gap-3 px-2.5 py-2.5 rounded-sm text-left transition-colors relative ${page === item.id ? "bg-white/8 text-[#e8eaf0]" : "text-[#6b7494] hover:text-[#a0a8c0] hover:bg-white/4"}`}>
               <span className={`text-base flex-shrink-0 w-5 text-center ${page === item.id ? "text-[#00d4a1]" : ""}`}>{item.icon}</span>
               {sidebarOpen && (
@@ -151,14 +159,14 @@ export default function App() {
         </div>
       </aside>
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="h-14 border-b border-white/7 flex items-center gap-4 px-6 flex-shrink-0 bg-[#0a0d14]/80 backdrop-blur-sm sticky top-0 z-10">
-          <button onClick={() => setSidebarOpen(o => !o)} className="text-[#6b7494] hover:text-[#e8eaf0] transition-colors text-lg">☰</button>
+        <header className="h-14 border-b border-white/7 flex items-center gap-4 px-3 md:px-6 flex-shrink-0 bg-[#0a0d14]/80 backdrop-blur-sm sticky top-0 z-10">
+          <button aria-label="메뉴" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(o => !o)} className="text-[#6b7494] hover:text-[#e8eaf0] transition-colors text-lg">☰</button>
           <div className="flex-1"><h1 className="text-sm font-medium text-[#e8eaf0]">{PAGE_LABELS[page]}</h1></div>
         </header>
         {ANALYSIS_PAGES.includes(page) && (
-          <div className="px-6 pt-4"><AnalysisBar opts={opts} setOpts={setOpts} tickers={tickers} showPeriod={page === "dashboard" || page === "benchmark"} /></div>
+          <div className="px-3 md:px-6 pt-4"><AnalysisBar opts={opts} setOpts={setOpts} tickers={tickers} showPeriod={page === "dashboard" || page === "benchmark"} /></div>
         )}
-        <main className="flex-1 overflow-y-auto px-6 py-6">
+        <main className="flex-1 overflow-y-auto px-3 md:px-6 py-6">
           {page === "dashboard" && <Dashboard opts={opts} onTickers={setTickers} />}
           {page === "performance" && <Performance opts={opts} onTickers={setTickers} />}
           {page === "benchmark" && <Benchmark opts={opts} onTickers={setTickers} />}

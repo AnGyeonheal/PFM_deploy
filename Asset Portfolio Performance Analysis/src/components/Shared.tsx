@@ -26,7 +26,8 @@ export function formatKRW(n: number, compact = false): string {
   return `${n.toLocaleString()}원`;
 }
 
-export function ReturnBadge({ value, size = "sm" }: { value: number; size?: "sm" | "md" | "lg" }) {
+export function ReturnBadge({ value, size = "sm" }: { value: number | null; size?: "sm" | "md" | "lg" }) {
+  if (value == null || !Number.isFinite(value)) return <span className="font-mono text-xs text-[#6b7494]">—</span>;
   const isPos = value >= 0;
   const sizes = { sm: "text-xs px-1.5 py-0.5", md: "text-sm px-2 py-1", lg: "text-base px-3 py-1.5" };
   return (
@@ -97,6 +98,7 @@ export function AnalysisBar({
       {/* G1 dividend */}
       <button
         onClick={() => toggle("includeDividend")}
+        aria-pressed={opts.includeDividend}
         title="배당·분배금 수령액을 손익·수익률·알파에 반영(포함)하거나 제외합니다"
         className={`text-xs font-mono px-3 py-1.5 rounded-sm border transition-colors ${opts.includeDividend ? "border-[#00d4a1]/40 bg-[#00d4a1]/10 text-[#00d4a1]" : "border-white/10 text-[#6b7494] hover:text-[#a0a8c0]"}`}>
         배당 {opts.includeDividend ? "포함" : "제외"}
@@ -104,7 +106,8 @@ export function AnalysisBar({
       {/* G2 fx */}
       <button
         onClick={() => toggle("includeFx")}
-        title="미국 주식의 원/달러 환율 변동 손익을 반영(포함)하거나 제외합니다"
+        aria-pressed={opts.includeFx}
+        title="달러 자산과 국내 상장 미국 ETF의 환율 변동을 포함하거나 매수환율로 고정합니다"
         className={`text-xs font-mono px-3 py-1.5 rounded-sm border transition-colors ${opts.includeFx ? "border-[#4f8cff]/40 bg-[#4f8cff]/10 text-[#4f8cff]" : "border-white/10 text-[#6b7494] hover:text-[#a0a8c0]"}`}>
         환차손익 {opts.includeFx ? "포함" : "제외"}
       </button>
@@ -112,6 +115,7 @@ export function AnalysisBar({
       {/* G3 period (성장 차트가 있는 페이지에서만) */}
       {showPeriod && PERIODS.map(p => (
         <button key={p.key} onClick={() => setOpts({ ...opts, period: p.key })}
+          aria-pressed={opts.period === p.key}
           className={`text-xs font-mono px-2.5 py-1.5 rounded-sm transition-colors ${opts.period === p.key ? "bg-white/10 text-[#e8eaf0]" : "text-[#6b7494] hover:text-[#a0a8c0]"}`}>
           {p.label}
         </button>
@@ -121,6 +125,7 @@ export function AnalysisBar({
       <div className="flex gap-0 border border-white/10 rounded-sm overflow-hidden">
         {(["total", "stock"] as const).map(s => (
           <button key={s} onClick={() => setOpts({ ...opts, scope: s, ticker: s === "stock" ? (opts.ticker || tickers[0]?.ticker || "") : "" })}
+            aria-pressed={opts.scope === s}
             className={`text-xs font-mono px-2.5 py-1.5 transition-colors ${opts.scope === s ? "bg-white/10 text-[#e8eaf0]" : "text-[#6b7494] hover:text-[#a0a8c0]"}`}>
             {s === "total" ? "전체" : "종목별"}
           </button>

@@ -57,7 +57,7 @@ def get_history(yf_ticker, start=None, period="2y"):
 def _get_history_uncached(yf_ticker, start=None, period="2y"):
     try:
         tk = yf.Ticker(yf_ticker)
-        df = tk.history(start=start, period=None if start else period, interval="1d")
+        df = tk.history(start=start, period=None if start else period, interval="1d", auto_adjust=False)
         if df.empty:
             return pd.Series(dtype=float)
         s = df["Close"].copy()

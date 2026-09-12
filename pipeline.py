@@ -28,7 +28,7 @@ from pme import (
     build_spy_dca, build_twr_comparison,
 )
 import auth
-from names import enrich_name_map, resolve_ticker_map, normalize_kr_ticker
+from names import enrich_name_map, resolve_ticker_map, normalize_kr_ticker, register_krw_foreign
 
 
 def current_usdkrw():
@@ -350,6 +350,7 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True,
         name_map = enrich_name_map(name_map, _all_tickers)
     except Exception:
         pass
+    register_krw_foreign(name_map)  # 원화 상장 해외 ETF(환노출) 등록 → 환차손익 분리 계산
 
     detail_df = build_transaction_detail(combined_orders, fx_rate, name_map)
 
@@ -369,7 +370,7 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True,
                  if has_data else pd.DataFrame())
     try:
         stock_ana = (build_stock_analytics(combined_orders, fx_rate, name_map, holdings,
-                                           include_div, include_fx)
+                                           include_div, include_fx, div_events)
                      if has_data else pd.DataFrame())
     except Exception:
         stock_ana = pd.DataFrame()
@@ -399,11 +400,12 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True,
 def _dated_div_events(orders, fx, ticker=None):
     """배당 지급 이벤트 [(date, krw, symbol)] — 검증(임포트) 날짜 우선, 없는 종목은 yfinance 추정."""
     events = []
+    fx_history = get_usdkrw_history("10y")
     verified = set()
     recs = read_dividends_csv()
     if recs is not None and not recs.empty:
         for _, r in recs.iterrows():
-            tk = str(r.get("티커"))
+            tk = normalize_kr_ticker(str(r.get("티커")))
             if ticker and tk != ticker:
                 continue
             amt = float(r.get("배당금", 0) or 0)
@@ -414,7 +416,9 @@ def _dated_div_events(orders, fx, ticker=None):
             except Exception:
                 continue
             is_usd = str(r.get("통화", "KRW")).upper() == "USD"
-            events.append((d, amt * fx if is_usd else amt, tk))
+            event_fx = fx_history.asof(d) if not fx_history.empty else fx
+            event_fx = float(event_fx) if pd.notna(event_fx) else fx
+            events.append((d, amt * event_fx if is_usd else amt, tk))
             verified.add(tk)
     for ed, krw, sym in compute_dividend_events(orders, fx, ticker):
         if sym in verified:
@@ -580,13 +584,16 @@ def stock_analytics(combined_orders, fx, name_map=None, holdings=None):
     return build_stock_analytics(combined_orders, fx, name_map, holdings)
 
 
-def rolling_beta(combined_orders, fx, ticker=None):
-    return compute_rolling_beta(combined_orders, fx, ticker)
+def rolling_beta(combined_orders, fx, ticker=None, include_div=True, include_fx=True):
+    events = _dated_div_events(combined_orders, fx, ticker) if include_div else []
+    return compute_rolling_beta(combined_orders, fx, ticker, include_div=include_div, include_fx=include_fx, div_events=events)
 
 
-def spy_dca(combined_orders, fx, start_ym=None):
-    return build_spy_dca(combined_orders, fx, start_ym)
+def spy_dca(combined_orders, fx, start_ym=None, ticker=None, include_div=True, include_fx=True):
+    events = _dated_div_events(combined_orders, fx, ticker) if include_div else []
+    return build_spy_dca(combined_orders, fx, start_ym, ticker, include_div, include_fx, events)
 
 
-def twr_comparison(combined_orders, fx, ticker=None, include_fx=True):
-    return build_twr_comparison(combined_orders, fx, ticker, include_fx=include_fx)
+def twr_comparison(combined_orders, fx, ticker=None, include_fx=True, include_div=True):
+    events = _dated_div_events(combined_orders, fx, ticker) if include_div else []
+    return build_twr_comparison(combined_orders, fx, ticker, include_fx=include_fx, include_div=include_div, div_events=events)

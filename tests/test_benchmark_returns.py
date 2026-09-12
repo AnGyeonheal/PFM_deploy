@@ -10,6 +10,7 @@ import webapp
 
 class BenchmarkReturnTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.object(pme, "get_dividends", return_value=pd.Series(dtype=float)))
         self.today = pd.Timestamp.now().normalize()
         self.index = pd.date_range(self.today - pd.Timedelta(days=70), self.today)
         self.stock = pd.Series(100.0, index=self.index)
@@ -73,7 +74,7 @@ class BenchmarkReturnTests(unittest.TestCase):
 
     def test_reinvestment_uses_gross_purchases(self):
         response = self.response(rebuy=True)
-        self.assertEqual(response["summary"]["portfolioReturn"], 6.5)
+        self.assertEqual(response["summary"]["portfolioReturn"], 6.45)
         self.assertEqual(response["summary"]["sp500Return"], 12.9)
 
     def test_realized_losses_are_preserved(self):

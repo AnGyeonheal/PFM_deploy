@@ -33,7 +33,9 @@ from exporter import build_full_excel
 from report import build_portfolio_pdf
 from ai_copilot import generate_rebalancing_report, chat_with_portfolio
 from advanced_analytics import compute_fx_pnl
-from pme import compute_usd_avg_cost, build_usdkrw_history_frame
+from names import register_krw_foreign
+from pme import (compute_usd_avg_cost, build_usdkrw_history_frame, comparison_statistics,
+                 xirr_from_growth, profit_from_growth)
 
 load_dotenv()
 
@@ -74,6 +76,7 @@ def get_portfolio(user, force=False, include_div=True, include_fx=True):
     sub = _CACHE.get(user) or {}
     ent = sub.get((include_div, include_fx))
     if not force and ent and now - ent[0] < 300:
+        register_krw_foreign(ent[1].get("name_map"))
         return ent[1]
     data = pipeline.load_portfolio(user, use_toss=auth.has_toss_credentials(user), use_tx=True,
                                    include_div=include_div, include_fx=include_fx)
@@ -211,43 +214,6 @@ def _save_daily_metrics(user, date_str, snapshot):
         pass
 
 
-def _calc_xirr(orders, fx_rate, stocks, ticker=None, period=None):
-    """현금흐름(매수·매도)과 현재 보유 평가액으로 XIRR(%)을 직접 계산. 종목(ticker)·기간(period) 필터 지원.
-    기간 지정 시 기간 내 매매만 반영하는 근사치(기간초 보유분 유출 제외)."""
-    from pme import xirr as _xirr
-    now = pd.Timestamp.now().normalize()
-    n = _PERIOD_MONTHS.get((period or "").upper())
-    cutoff = (now - pd.DateOffset(months=n)) if n else None
-    cfs = []
-    for o in (orders or []):
-        if ticker and o.get("symbol") != ticker:
-            continue
-        ex = o.get("execution") or {}
-        amt = float(ex.get("filledAmount") or 0)
-        if amt <= 0:
-            continue
-        amt_krw = amt * (fx_rate if o.get("currency") == "USD" else 1.0)
-        raw = ex.get("filledAt") or o.get("orderedAt")
-        try:
-            dt = pd.to_datetime(raw).tz_localize(None)
-        except Exception:
-            try:
-                dt = pd.to_datetime(raw, utc=True).tz_localize(None)
-            except Exception:
-                continue
-        if cutoff is not None and dt < cutoff:
-            continue
-        cfs.append((dt, -amt_krw if o.get("side") == "BUY" else amt_krw))
-    cur_val = sum(float(s.get("currentTotal") or 0) for s in (stocks or [])
-                  if s.get("status") == "보유중" and (not ticker or s.get("ticker") == ticker))
-    if cur_val > 0:
-        cfs.append((now, cur_val))
-    if len(cfs) < 2:
-        return None
-    r = _xirr(cfs)
-    return round(r * 100, 2) if r is not None else None
-
-
 @app.get("/api/app/dashboard")
 def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str = "", period: str = ""):
     user = _current_user(request)
@@ -258,6 +224,16 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
     perf = data["perf"] or {}
     fx_rate = data["fx_rate"]
     name_map = data["name_map"]
+    months = _PERIOD_MONTHS.get((period or "").upper())
+    cutoff = pd.Timestamp.now().normalize() - pd.DateOffset(months=months) if months else None
+    frames = {}
+
+    def analysis_frame(symbol, with_fx):
+        key = (symbol, with_fx)
+        if key not in frames:
+            frames[key] = pipeline.growth_frame(data["combined_orders"], fx_rate, symbol,
+                                                 include_div=bool(div), include_fx=with_fx)
+        return frames[key]
     sa = data.get("stock_analytics")
     sa_map = {str(r["티커"]): r for r in sa.to_dict("records")} if (sa is not None and not sa.empty) else {}
     stocks = []
@@ -297,6 +273,14 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
             "dividend": float(r.get("누적배당금(원)") or 0),
             "returnPct": float(r.get("수익률(%)") or 0), "status": r.get("상태", ""),
         })
+        stock_profit = profit_from_growth(analysis_frame(tk, bool(fx)), cutoff)
+        pure_profit = profit_from_growth(analysis_frame(tk, False), cutoff)
+        if stock_profit:
+            stocks[-1].update(buyTotal=stock_profit["totalBuy"], currentTotal=stock_profit["totalCurrent"],
+                              unrealizedPnL=stock_profit["unrealizedPnL"], realizedPnL=stock_profit["realizedPnL"],
+                              dividend=stock_profit["dividendPnL"], returnPct=stock_profit["returnPct"],
+                              pureStockKrw=pure_profit["unrealizedPnL"],
+                              fxPnLStock=stock_profit["unrealizedPnL"] - pure_profit["unrealizedPnL"])
     holdings = data["holdings"]
     allocation = [{"name": (h.get("name") or h.get("ticker")), "value": round(float(h.get("weight_pct") or 0), 1)}
                   for h in holdings if float(h.get("weight_pct") or 0) > 0]
@@ -328,31 +312,25 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
             }
             stocks = sel
             allocation = [{"name": s0["name"], "value": 100.0}]
-    # 연평균 수익률(XIRR): 전체는 전체기간 XIRR(ab), 종목 선택 시 기간 반영 직접 계산.
-    # 어떤 경우든 값이 비지 않도록 ab→직접계산 순으로 폴백한다.
-    if ticker:
-        _xr = _calc_xirr(data["combined_orders"], fx_rate, stocks, ticker, period)
+    frame = analysis_frame(ticker or None, bool(fx))
+    profit = profit_from_growth(frame, cutoff)
+    pure_profit = profit_from_growth(analysis_frame(ticker or None, False), cutoff)
+    if profit:
+        metrics.update(profit)
+        metrics["pureStockPnL"] = pure_profit["totalPnL"] - pure_profit["dividendPnL"]
+        metrics["fxPnL"] = profit["totalPnL"] - profit["dividendPnL"] - metrics["pureStockPnL"]
     else:
-        _xr = (data.get("ab") or {}).get("port_xirr_pct")
-    if _xr is None:
-        _xr = _calc_xirr(data["combined_orders"], fx_rate, stocks, ticker or None, None)
-    if _xr is None:
-        _xr = (data.get("ab") or {}).get("port_xirr_pct")
-    metrics["xirr"] = _xr
-    growth = []
-    try:
-        twr = pipeline.twr_comparison(data["combined_orders"], fx_rate, ticker or None, include_fx=bool(fx))
-        _pm, _sm = _twr_growth_series(twr, period)
-        if _pm is not None:
-            for _dt in _pm.index:
-                growth.append({"month": _dt.strftime("%y/%m"),
-                               "portfolio": round(float(_pm.loc[_dt]), 1),
-                               "sp500": round(float(_sm.loc[_dt]) if _dt in _sm.index else 0.0, 1)})
-    except Exception:
-        growth = []
+        metrics.update(totalPnL=0, realizedPnL=0, unrealizedPnL=0, dividendPnL=0,
+                       pureStockPnL=0, fxPnL=0, returnPct=None)
+    metrics["xirr"] = xirr_from_growth(frame, cutoff)
+    metrics["projectionRate"] = xirr_from_growth(frame)
+    stats = comparison_statistics(frame, cutoff)
+    indexed = (1.0 + stats["daily"]).cumprod() * 100
+    growth = [{"month": date.strftime("%y/%m"), "portfolio": round(float(row["portfolio"]), 2),
+               "sp500": round(float(row["sp500"]), 2)} for date, row in indexed.resample("ME").last().iterrows()] if not indexed.empty else []
     # 전일 대비 변동(전체 포트 기준): 오늘 값을 저장하고 직전 저장일과 비교
     changes = None
-    if not ticker:
+    if not ticker and bool(div) and bool(fx):
         try:
             sa2 = data.get("stock_analytics")
             stocks_ab = {}
@@ -604,9 +582,46 @@ def api_app_fx(request: Request):
     })
 
 
+def _benchmark_view(frame, period=""):
+    months = _PERIOD_MONTHS.get((period or "").upper())
+    cutoff = pd.Timestamp.now().normalize() - pd.DateOffset(months=months) if months else None
+    stats = comparison_statistics(frame, cutoff)
+    summary = {"portfolioReturn": None, "sp500Return": None, "alpha": None,
+               "beta": stats["beta"], "corr": stats["corr"], "sharpe": stats["sharpe"],
+               "regressionAlpha": stats["regression_alpha"],
+               "twrReturn": round(stats["twr"], 2) if stats["twr"] is not None else None}
+    result = {"summary": summary, "growth": [], "rollingBeta": [], "monthlyAlpha": [],
+              "warnings": frame.attrs.get("warnings", []) if frame is not None else []}
+    if stats["returns"].empty:
+        return result
+    selected = frame.loc[stats["returns"].index]
+    monthly = selected.resample("ME").last()
+    returns = stats["returns"].resample("ME").last()
+    rolling = stats["rolling_beta"].resample("ME").last()
+    for date, row in monthly.iterrows():
+        mine = returns.loc[date, "portfolio"]
+        spy = returns.loc[date, "sp500"]
+        beta = rolling.get(date)
+        result["growth"].append({
+            "month": date.strftime("%y/%m"), "portfolio": round(float(row["내 자산가치"])),
+            "sp500": round(float(row["S&P500 자산가치"])), "principal": round(float(row["순투자원금"])),
+            "portfolioPct": round(float(mine), 2) if pd.notna(mine) else None,
+            "sp500Pct": round(float(spy), 2) if pd.notna(spy) else None,
+            "alpha": round(float(mine - spy), 2) if pd.notna(mine) and pd.notna(spy) else None,
+            "beta": round(float(beta), 3) if pd.notna(beta) else None,
+        })
+    last = result["growth"][-1]
+    summary.update(portfolioReturn=last["portfolioPct"], sp500Return=last["sp500Pct"], alpha=last["alpha"])
+    result["rollingBeta"] = [{"month": date.strftime("%y/%m"), "beta": round(float(value), 3)}
+                             for date, value in rolling.dropna().items()]
+    monthly_returns = ((1.0 + stats["daily"]).resample("ME").prod() - 1.0) * 100
+    result["monthlyAlpha"] = [{"month": date.strftime("%y/%m"), "alpha": round(float(row["portfolio"] - row["sp500"]), 2)}
+                              for date, row in monthly_returns.iterrows()]
+    return result
+
+
 @app.get("/api/app/benchmark")
 def api_app_benchmark(request: Request, div: int = 1, fx: int = 1, start: str = "", ticker: str = "", period: str = ""):
-    import numpy as np
     user = _current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -615,104 +630,38 @@ def api_app_benchmark(request: Request, div: int = 1, fx: int = 1, start: str = 
     fxr = data["fx_rate"]
     if not orders:
         return JSONResponse({"error": "no_data"}, status_code=404)
-    ab = data["ab"] or {}
     tkr = ticker or None
-
-    twr = pipeline.twr_comparison(orders, fxr, tkr, include_fx=bool(fx))
-    growth, rolling_beta, monthly_alpha = [], [], []
-    sharpe = twr_final = None
-    if twr is not None and not twr.empty:
-        pcol, scol = "내 수익률(%)", "S&P500 수익률(%)"
-        twr_final = round(float(twr[pcol].iloc[-1]), 1)
-        pr = (1 + twr[pcol] / 100).pct_change()
-        sr = (1 + twr[scol] / 100).pct_change()
-        j = pd.concat([pr, sr], axis=1, keys=["p", "s"]).replace([np.inf, -np.inf], np.nan).dropna()
-        j = j[j["s"] != 0]
-        if len(j) > 0:
-            pmo = (1 + j["p"]).resample("ME").prod() - 1
-            smo = (1 + j["s"]).resample("ME").prod() - 1
-            for dt in pmo.index:
-                monthly_alpha.append({"month": dt.strftime("%y/%m"),
-                                      "alpha": round(float((pmo.loc[dt] - smo.loc[dt]) * 100), 2)})
-            if float(j["p"].std()) > 0:
-                sharpe = round(float((j["p"].mean() * 252 - 0.035) / (j["p"].std() * np.sqrt(252))), 2)
-
-    rb_series = None
-    try:
-        rb_series = pipeline.rolling_beta(orders, fxr, tkr)
-        if rb_series is not None and not rb_series.empty:
-            for _dt, _v in rb_series.resample("ME").last().dropna().items():
-                rolling_beta.append({"month": _dt.strftime("%y/%m"), "beta": round(float(_v), 2)})
-    except Exception:
-        pass
-
-    # 자산가치 성장(금액): 내가 산 종목 대신 같은 시점·금액으로 S&P500을 매매했다면의 변화
-    try:
-        gdf = pipeline.growth_frame(orders, fxr, tkr, include_div=bool(div), include_fx=bool(fx))
-        if gdf is not None and not gdf.empty:
-            g = gdf
-            _n = _PERIOD_MONTHS.get((period or "").upper())
-            opening = pd.Series(0.0, index=gdf.columns)
-            if _n:
-                _cut = pd.Timestamp.now().normalize() - pd.DateOffset(months=_n)
-                before = gdf[gdf.index < _cut]
-                if not before.empty:
-                    opening = before.iloc[-1]
-                g = g[g.index >= _cut]
-            purchases = g["누적매수금액"] - opening["누적매수금액"]
-            sales = g["누적매도금액"] - opening["누적매도금액"]
-            spy_sales = g["S&P500 누적매도금액"] - opening["S&P500 누적매도금액"]
-            capital = opening["내 자산가치"] + purchases
-            spy_capital = opening["S&P500 자산가치"] + purchases
-            portfolio_returns = ((g["내 자산가치"] + sales - capital)
-                                 / capital.where(capital > 0) * 100).resample("ME").last()
-            spy_returns = ((g["S&P500 자산가치"] + spy_sales - spy_capital)
-                           / spy_capital.where(spy_capital > 0) * 100).resample("ME").last()
-            _mine = g["내 자산가치"].resample("ME").last().dropna()
-            _spy = g["S&P500 자산가치"].resample("ME").last().dropna()
-            _prin = g["순투자원금"].resample("ME").last().dropna()
-            _bser = None
-            if rb_series is not None and not rb_series.empty:
-                _rb = rb_series[rb_series.index >= _cut] if _n else rb_series
-                _bser = _rb.resample("ME").last()
-            for _dt in _mine.index:
-                _m = float(_mine.loc[_dt])
-                _s = float(_spy.loc[_dt]) if _dt in _spy.index else 0.0
-                _p = float(_prin.loc[_dt]) if _dt in _prin.index else 0.0
-                _pr = float(portfolio_returns.loc[_dt]) if pd.notna(portfolio_returns.loc[_dt]) else None
-                _sr = float(spy_returns.loc[_dt]) if pd.notna(spy_returns.loc[_dt]) else None
-                _bt = float(_bser.loc[_dt]) if (_bser is not None and _dt in _bser.index and pd.notna(_bser.loc[_dt])) else None
-                growth.append({"month": _dt.strftime("%y/%m"),
-                               "portfolio": round(_m),
-                               "sp500": round(_s),
-                               "principal": round(_p),
-                               "portfolioPct": round(_pr, 1) if _pr is not None else None,
-                               "sp500Pct": round(_sr, 1) if _sr is not None else None,
-                               "alpha": round(_pr - _sr, 1) if (_pr is not None and _sr is not None) else None,
-                               "beta": round(_bt, 2) if _bt is not None else None})
-    except Exception:
-        pass
-
-    ret_map = {}
-    if data["breakdown"] is not None and not data["breakdown"].empty:
-        for r in data["breakdown"].to_dict("records"):
-            ret_map[str(r.get("티커"))] = float(r.get("수익률(%)") or 0)
+    gdf = pipeline.growth_frame(orders, fxr, tkr, include_div=bool(div), include_fx=bool(fx))
+    result = _benchmark_view(gdf, period)
+    months = _PERIOD_MONTHS.get((period or "").upper())
+    cutoff = pd.Timestamp.now().normalize() - pd.DateOffset(months=months) if months else None
     per_stock = []
-    sa = data.get("stock_analytics")
-    if sa is not None and not sa.empty:
-        for r in sa.to_dict("records"):
-            tk = str(r.get("티커"))
-            per_stock.append({
-                "ticker": tk, "name": r.get("종목") or tk,
-                "returnPct": ret_map.get(tk, 0.0),
-                "alpha": float(r.get("알파(연%)") or 0), "beta": float(r.get("베타") or 0),
-                "alphaContrib": float(r.get("알파기여(%)") or 0),
-                "betaContrib": float(r.get("베타기여(%)") or 0),
-            })
+    symbols = [tkr] if tkr else sorted({order.get("symbol") for order in orders if order.get("symbol")})
+    for symbol in symbols:
+        frame = gdf if symbol == tkr else pipeline.growth_frame(orders, fxr, symbol, include_div=bool(div), include_fx=bool(fx))
+        stats = comparison_statistics(frame, cutoff)
+        if stats["returns"].empty:
+            continue
+        value = stats["returns"]["portfolio"].iloc[-1]
+        per_stock.append({"ticker": symbol, "name": (data.get("name_map") or {}).get(symbol, symbol),
+                          "returnPct": round(float(value), 2) if pd.notna(value) else None,
+                          "alpha": stats["regression_alpha"], "beta": stats["beta"],
+                          "alphaContrib": None, "betaContrib": None,
+                          "weightValue": max(float(frame["내 자산가치"].iloc[-1]), 0.0)})
+    alpha_total = sum(abs(row["weightValue"] * row["alpha"]) for row in per_stock if row["alpha"] is not None)
+    beta_total = sum(abs(row["weightValue"] * row["beta"]) for row in per_stock if row["beta"] is not None)
+    for row in per_stock:
+        weight = row.pop("weightValue")
+        row["alphaContrib"] = weight * row["alpha"] / alpha_total * 100 if alpha_total and row["alpha"] is not None else None
+        row["betaContrib"] = weight * row["beta"] / beta_total * 100 if beta_total and row["beta"] is not None else None
 
     simulation = None
     try:
-        _ts, _monthly, sim_summary = pipeline.spy_dca(orders, fxr, start or None)
+        simulation_start = pd.Timestamp(start) if start else cutoff
+        if cutoff is not None and simulation_start is not None:
+            simulation_start = max(cutoff, simulation_start)
+        _ts, _monthly, sim_summary = pipeline.spy_dca(orders, fxr, simulation_start, tkr,
+                                                       include_div=bool(div), include_fx=bool(fx))
         if sim_summary:
             simulation = {
                 "startYm": sim_summary.get("시작월"), "startKrw": sim_summary.get("시작금액"),
@@ -722,34 +671,6 @@ def api_app_benchmark(request: Request, div: int = 1, fx: int = 1, start: str = 
     except Exception:
         simulation = None
 
-    summary = {
-        "portfolioReturn": ab.get("port_xirr_pct"), "sp500Return": ab.get("spy_xirr_pct"),
-        "alpha": ab.get("alpha_pct"), "beta": ab.get("beta"),
-        "corr": ab.get("corr"), "sharpe": sharpe, "twrReturn": twr_final,
-    }
-    if ticker:
-        sa_row = None
-        if sa is not None and not sa.empty:
-            _mm = [r for r in sa.to_dict("records") if str(r.get("티커")) == ticker]
-            sa_row = _mm[0] if _mm else None
-        _sp_final = round(float(twr["S&P500 수익률(%)"].iloc[-1]), 2) if (twr is not None and not twr.empty) else None
-        summary = {
-            "portfolioReturn": ret_map.get(ticker), "sp500Return": _sp_final,
-            "alpha": (sa_row.get("알파(연%)") if sa_row else None),
-            "beta": (sa_row.get("베타") if sa_row else None),
-            "corr": None, "sharpe": sharpe, "twrReturn": twr_final,
-        }
-    # 요약 카드를 성장차트(TWR·기간·배당·환차·종목 옵션이 모두 반영된) 최종 시점값과 일치시켜
-    # 그래프 툴팁과 요약 알파/수익률/베타가 어긋나지 않도록 한다.
-    if growth:
-        _l = growth[-1]
-        if _l.get("portfolioPct") is not None:
-            summary["portfolioReturn"] = _l["portfolioPct"]
-        if _l.get("sp500Pct") is not None:
-            summary["sp500Return"] = _l["sp500Pct"]
-        if _l.get("alpha") is not None:
-            summary["alpha"] = _l["alpha"]
-        # beta는 성장차트 롤링베타의 마지막 1점(최근 구간이라 불안정)이 아니라 전체 회귀 베타(CAPM)를 사용
     all_tickers = []
     _bd = data["breakdown"]
     if _bd is not None and not _bd.empty:
@@ -758,8 +679,7 @@ def api_app_benchmark(request: Request, div: int = 1, fx: int = 1, start: str = 
             _tk = str(_r.get("티커"))
             all_tickers.append({"ticker": _tk, "name": _nm.get(_tk) or _r.get("종목") or _tk})
     return JSONResponse({
-        "summary": summary, "growth": growth, "rollingBeta": rolling_beta,
-        "monthlyAlpha": monthly_alpha, "perStock": per_stock, "simulation": simulation,
+        **result, "perStock": per_stock, "simulation": simulation,
         "tickers": all_tickers,
     })
 
