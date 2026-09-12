@@ -18,6 +18,11 @@ app.add_api_route("/api/app/dashboard", webapp.api_app_dashboard)
 app.add_api_route("/api/app/tickers", webapp.api_app_tickers)
 
 
+def incomplete_app():
+    fixture.histories["NVDA"] = fixture.histories["NVDA"].iloc[:0]
+    return app
+
+
 @app.get("/api/app/me")
 def me():
     return {"ok": True, "user": "analysis-test"}

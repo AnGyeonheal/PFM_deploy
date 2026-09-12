@@ -3,7 +3,7 @@ import { Card, CardHeader, formatKRW } from "../components/Shared";
 
 type Stock = {
   ticker: string; name: string; currency: string; quantity: number;
-  currentPrice: number | null; avgPrice: number; unrealizedPnL: number; returnPct: number; status: string;
+  currentPrice: number | null; avgPrice: number; unrealizedPnL: number | null; returnPct: number | null; status: string;
 };
 
 const inputCls = "w-full bg-[#0a0d14] border border-white/10 rounded-sm px-2 py-1.5 text-xs text-[#e8eaf0] font-mono focus:outline-none focus:border-[#00d4a1]/50 transition-colors";
@@ -81,8 +81,8 @@ export default function HoldingsEditor() {
                   <td className="px-1 py-1" style={{ minWidth: 90 }}><input className={inputCls + " text-end"} type="number" step="any" value={String(val(s, "quantity"))} onChange={e => upd(s.ticker, "quantity", e.target.value)} /></td>
                   <td className="px-1 py-1" style={{ minWidth: 100 }}><input className={inputCls + " text-end"} type="number" step="any" value={String(val(s, "avgPrice"))} onChange={e => upd(s.ticker, "avgPrice", e.target.value)} /></td>
                   <td className="px-1 py-1" style={{ minWidth: 100 }}><input className={inputCls + " text-end"} type="number" step="any" value={String(val(s, "currentPrice"))} onChange={e => upd(s.ticker, "currentPrice", e.target.value)} /></td>
-                  <td className={`px-2 py-1 font-mono text-xs text-end whitespace-nowrap ${s.unrealizedPnL >= 0 ? "text-[#00d4a1]" : "text-[#ff5c6a]"}`}>{formatKRW(s.unrealizedPnL, true)}</td>
-                  <td className={`px-2 py-1 font-mono text-xs text-end whitespace-nowrap ${s.returnPct >= 0 ? "text-[#00d4a1]" : "text-[#ff5c6a]"}`}>{s.returnPct >= 0 ? "+" : ""}{s.returnPct}%</td>
+                  <td className={`px-2 py-1 font-mono text-xs text-end whitespace-nowrap ${s.unrealizedPnL == null ? "text-[#6b7494]" : s.unrealizedPnL >= 0 ? "text-[#00d4a1]" : "text-[#ff5c6a]"}`}>{formatKRW(s.unrealizedPnL, true)}</td>
+                  <td className={`px-2 py-1 font-mono text-xs text-end whitespace-nowrap ${s.returnPct == null ? "text-[#6b7494]" : s.returnPct >= 0 ? "text-[#00d4a1]" : "text-[#ff5c6a]"}`}>{s.returnPct == null ? "—" : `${s.returnPct >= 0 ? "+" : ""}${s.returnPct.toFixed(2)}%`}</td>
                 </tr>
               ))}
               {stocks.length === 0 && (

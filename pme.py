@@ -161,42 +161,67 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
     if not recs:
         return pd.DataFrame()
     symbols = sorted(set(r["symbol"] for r in recs))
+    coverage = {"requested_symbols": symbols, "included_symbols": [], "excluded_symbols": [], "warnings": []}
     spy_hist = get_history(BENCHMARK_TICKER, period="10y")
     fx_hist = get_usdkrw_history("10y")
     if spy_hist.empty:
-        return pd.DataFrame()
-    start = min(r["date"] for r in recs)
-    if start < spy_hist.index.min():
         unavailable = pd.DataFrame()
-        unavailable.attrs["warnings"] = ["벤치마크 시세보다 오래된 거래가 있어 전체 기간을 계산할 수 없습니다."]
+        coverage["excluded_symbols"] = symbols.copy()
+        coverage["warnings"].append("벤치마크 시세가 없어 성과를 계산할 수 없습니다.")
+        unavailable.attrs.update(coverage)
         return unavailable
-    idx = pd.date_range(start=start, end=spy_hist.index.max(), freq="D")
-
-    def align(s):
-        return s.reindex(idx.union(s.index)).ffill().reindex(idx).bfill()
-
-    fx_daily = align(fx_hist) if not fx_hist.empty else pd.Series(fx_now, index=idx)
-    spy_daily = align(spy_hist)
     sym_cur = {s: next(r["currency"] for r in recs if r["symbol"] == s) for s in symbols}
-    sym_hist = {}
+    native_history = {}
     for s in symbols:
+        symbol_records = [record for record in recs if record["symbol"] == s]
+        quantity = 0.0
+        reason = None
+        for record in symbol_records:
+            if record["side"] == "SELL" and record["qty"] > quantity + 1e-8:
+                reason = "매도 수량에 대응하는 매수 이력이 부족합니다."
+                break
+            quantity += record["qty"] if record["side"] == "BUY" else -record["qty"]
+        first_trade = min(record["date"] for record in symbol_records)
+        if not reason and first_trade < spy_hist.index.min():
+            reason = "벤치마크 시세보다 오래된 거래가 있습니다."
+        if reason:
+            coverage["excluded_symbols"].append(s)
+            coverage["warnings"].append(f"{s}: {reason}")
+            continue
         yft = to_yf_ticker(s, "KR" if sym_cur[s] == "KRW" else "US")
         h = get_history(yft, period="10y")
         if h.empty:
-            unavailable = pd.DataFrame()
-            unavailable.attrs["warnings"] = [f"{s}: 시세가 없어 성과를 계산할 수 없습니다."]
-            return unavailable
-        first_trade = min(record["date"] for record in recs if record["symbol"] == s)
-        if first_trade < h.index.min():
-            unavailable = pd.DataFrame()
-            unavailable.attrs["warnings"] = [f"{s}: 최초 거래 시점의 시세가 없어 성과를 계산할 수 없습니다."]
-            return unavailable
-        if not h.empty:
-            hh = align(h)
-            if sym_cur[s] == "KRW" and is_krw_foreign(s):
-                hh = hh / fx_daily  # 원화 상장 해외 ETF: 원화시세→달러(환노출 분리)
-                sym_cur[s] = "USD"
-            sym_hist[s] = hh
+            reason = "시세가 없어 성과를 계산할 수 없습니다."
+        elif first_trade < h.index.min():
+            reason = "최초 거래 시점의 시세가 없어 성과를 계산할 수 없습니다."
+        if reason:
+            coverage["excluded_symbols"].append(s)
+            coverage["warnings"].append(f"{s}: {reason}")
+            continue
+        native_history[s] = h
+        coverage["included_symbols"].append(s)
+
+    symbols = coverage["included_symbols"]
+    recs = [record for record in recs if record["symbol"] in native_history]
+    if not recs:
+        unavailable = pd.DataFrame()
+        unavailable.attrs.update(coverage)
+        return unavailable
+    start = min(r["date"] for r in recs)
+    idx = pd.date_range(start=start, end=spy_hist.index.max(), freq="D")
+
+    def align(series):
+        return series.reindex(idx.union(series.index)).ffill().reindex(idx).bfill()
+
+    fx_daily = align(fx_hist) if not fx_hist.empty else pd.Series(fx_now, index=idx)
+    spy_daily = align(spy_hist)
+    sym_hist = {}
+    for symbol in symbols:
+        history = align(native_history[symbol])
+        if sym_cur[symbol] == "KRW" and is_krw_foreign(symbol):
+            history = history / fx_daily
+            sym_cur[symbol] = "USD"
+        sym_hist[symbol] = history
 
     recs_sorted = sorted(recs, key=lambda r: r["date"])
     my_val = _holdings_value_series(recs_sorted, symbols, sym_hist, sym_cur,
@@ -236,10 +261,6 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
             held[s] = held.get(s, 0.0) + r["qty"]
             gross_buy.loc[gross_buy.index >= d] += cf
         else:
-            if r["qty"] > held[s] + 1e-8:
-                unavailable = pd.DataFrame()
-                unavailable.attrs["warnings"] = [f"{s}: 매도 수량에 대응하는 매수 이력이 부족합니다."]
-                return unavailable
             port_val = sum(held[k] * _px_krw(k, d) for k in symbols if held.get(k, 0) > 0)
             sold_val = r["qty"] * _px_krw(s, d)
             w = min(max((sold_val / port_val) if port_val > 0 else 1.0, 0.0), 1.0)
@@ -297,6 +318,7 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
     out["내 누적손익"] = out["내 자산가치"] - out["순투자원금"]  # 보유가치+배당 − 순투입원금 = 총손익
     if ticker and ticker in sym_hist:
         out["주가"] = sym_hist[ticker] * (fx_daily if is_krw_foreign(ticker) else 1.0)
+    out.attrs.update(coverage)
     return out
 
 

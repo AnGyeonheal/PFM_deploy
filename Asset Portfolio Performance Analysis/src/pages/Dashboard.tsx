@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { PieChart, Pie, Cell, AreaChart, Area, BarChart, Bar, LabelList, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
-import { Card, CardHeader, formatKRW, ReturnBadge, PnLText, CustomTooltip, type AnalysisOptions } from "../components/Shared";
+import { Card, CardHeader, formatKRW, ReturnBadge, PnLText, CustomTooltip, AnalysisNotice, type AnalysisOptions } from "../components/Shared";
 
 const ALLOC_COLORS = ["#00d4a1", "#4f8cff", "#6b7494", "#a78bfa", "#f0a500", "#ff5c6a", "#12b981", "#ff9f40"];
 
@@ -40,12 +40,13 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
   const effectivePnL = m.totalPnL;
   const effectiveReturn = m.returnPct;
 
-  const historicalRate = Number.isFinite(m.projectionRate) ? m.projectionRate : 0;
-  const projRatePct = projRate != null ? projRate : +historicalRate.toFixed(2);
-  const rate = projRatePct / 100;
+  const historicalRate: number | null = Number.isFinite(m.projectionRate) ? m.projectionRate : null;
+  const projRatePct = projRate ?? (historicalRate == null ? null : +historicalRate.toFixed(2));
+  const projectionAvailable = projRatePct != null && Number.isFinite(projRatePct) && projRatePct > -100;
+  const rate = (projRatePct ?? 0) / 100;
   const monthlyKRW = Math.max(0, monthlyManwon || 0) * 10000;  // 만원→원
   const rMonthly = Math.pow(1 + rate, 1 / 12) - 1;  // 연성장률의 월 환산
-  const projData = [0, 5, 10, 20, 30, 40].map(y => {
+  const projData = (projectionAvailable ? [0, 5, 10, 20, 30, 40] : []).map(y => {
     const months = y * 12;
     const base = m.totalAsset * Math.pow(1 + rate, y);  // 현재 자산의 복리 성장
     const contrib = months === 0 ? 0
@@ -61,6 +62,7 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
 
   return (
     <div className="space-y-6">
+      <AnalysisNotice analysis={d.analysis} />
       {/* KPI Row - D1 */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         {[
@@ -72,17 +74,17 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
             highlight: false,
           },
           {
-            label: "총 손익", value: (effectivePnL >= 0 ? "+" : "") + formatKRW(effectivePnL),
+            label: "총 손익", value: effectivePnL == null ? "—" : (effectivePnL >= 0 ? "+" : "") + formatKRW(effectivePnL),
             sub: effectiveReturn == null ? "수익률 —" : `수익률 ${effectiveReturn >= 0 ? "+" : ""}${effectiveReturn.toFixed(2)}%`,
-            highlight: true, positive: effectivePnL >= 0,
+            highlight: effectivePnL != null, positive: effectivePnL >= 0,
           },
           {
             label: "연평균 수익률", value: m.xirr != null ? `${m.xirr >= 0 ? "+" : ""}${m.xirr.toFixed(2)}%` : "—",
-            sub: "XIRR · 투자원금 흐름 반영",
-            highlight: true, positive: (m.xirr || 0) >= 0,
+            sub: d.analysis?.status === "partial" ? "XIRR · 일부 종목 기준" : "XIRR · 투자원금 흐름 반영",
+            highlight: m.xirr != null, positive: (m.xirr || 0) >= 0,
           },
           {
-            label: "주식 평가액", value: formatKRW(m.totalCurrent),
+            label: d.analysis?.status === "partial" ? "분석 종목 평가액" : "주식 평가액", value: formatKRW(m.totalCurrent),
             sub: `매입원가 ${formatKRW(m.totalBuy, true)}`, highlight: false,
           },
           {
@@ -152,6 +154,7 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
           <Card>
             <CardHeader title="자산 성장 추이" sub="기준가 100" />
             <div className="p-5">
+              {!d.growth?.length ? <div className="h-[220px] flex items-center justify-center text-xs text-[#6b7494]">선택 범위의 성장 데이터가 없습니다.</div> : (
               <ResponsiveContainer width="100%" height={220}>
                 <AreaChart data={d.growth || []} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
                   <defs>
@@ -168,6 +171,7 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
                   <Area type="monotone" dataKey="sp500" stroke="#4f8cff" strokeWidth={1.5} fill="none" name="S&P500" dot={false} strokeDasharray="4 2" activeDot={{ r: 4 }} />
                 </AreaChart>
               </ResponsiveContainer>
+              )}
             </div>
           </Card>
         </div>
@@ -201,17 +205,17 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
 
       {/* 장기 자산 예측 */}
       <Card>
-        <CardHeader title="장기 자산 예측" sub={`현재 자산 ${formatKRW(m.totalAsset, true)} · 연 ${projRatePct.toFixed(1)}%${monthlyManwon > 0 ? ` · 월 ${monthlyManwon.toLocaleString()}만원 적립` : ""} 가정`} />
+        <CardHeader title="장기 자산 예측" sub={projectionAvailable ? `현재 자산 ${formatKRW(m.totalAsset, true)} · 연 ${projRatePct!.toFixed(1)}%${monthlyManwon > 0 ? ` · 월 ${monthlyManwon.toLocaleString()}만원 적립` : ""} 가정` : "예측 기준 수익률 없음"} />
         <div className="p-5 space-y-5">
           <div className="flex flex-wrap items-center gap-3">
             <span className="text-xs text-[#6b7494] font-mono uppercase tracking-wider">연평균 성장률</span>
-            <input type="number" step="0.1" value={projRatePct}
-              onChange={e => setProjRate(parseFloat(e.target.value))}
+            <input type="number" aria-label="예측 연평균 성장률" step="0.1" min="-99.9" value={projRatePct ?? ""}
+              onChange={event => setProjRate(Number.isFinite(event.target.valueAsNumber) ? event.target.valueAsNumber : null)}
               className="w-20 bg-[#0a0d14] border border-white/10 rounded-sm px-2 py-1 text-sm text-[#e8eaf0] font-mono focus:outline-none focus:border-[#00d4a1]/50" />
             <span className="text-sm text-[#a0a8c0]">%</span>
-            <button onClick={() => setProjRate(null)}
-              className="text-xs font-mono px-2.5 py-1 rounded-sm border border-white/10 text-[#6b7494] hover:text-[#a0a8c0] transition-colors">
-              자동 {historicalRate.toFixed(1)}%
+            <button onClick={() => setProjRate(null)} disabled={historicalRate == null}
+              className="text-xs font-mono px-2.5 py-1 rounded-sm border border-white/10 text-[#6b7494] hover:text-[#a0a8c0] transition-colors disabled:opacity-50">
+              {historicalRate == null ? "자동 계산 불가" : `자동 ${historicalRate.toFixed(1)}%`}
             </button>
             <span className="w-px h-5 bg-white/10 mx-1" />
             <span className="text-xs text-[#6b7494] font-mono uppercase tracking-wider">월 적립액</span>
@@ -220,6 +224,7 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
               className="w-24 bg-[#0a0d14] border border-white/10 rounded-sm px-2 py-1 text-sm text-[#e8eaf0] font-mono focus:outline-none focus:border-[#4f8cff]/50" />
             <span className="text-sm text-[#a0a8c0]">만원</span>
           </div>
+          {projectionAvailable ? <>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             {projData.filter(p => p.year > 0).map(p => (
               <div key={p.year} className="bg-[#0a0d14] border border-white/5 rounded-sm p-3">
@@ -253,6 +258,7 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
               </Bar>
             </BarChart>
           </ResponsiveContainer>
+          </> : <div className="text-xs text-[#6b7494]">전체 투자이력의 수익률이 없어 자동 예측을 표시하지 않습니다.</div>}
           <p className="text-xs text-[#6b7494] font-mono leading-relaxed">
             ※ 자동 성장률은 전체 투자이력의 XIRR입니다. 매월 말 추가납입과 일정한 수익률을 가정하며, 미래 수익을 보장하지 않습니다.
           </p>
@@ -277,6 +283,7 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
                     <td className="px-4 py-3">
                       <div className="font-mono text-xs text-[#00d4a1]">{s.ticker}</div>
                       <div className="text-xs text-[#6b7494] mt-0.5">{s.name}</div>
+                      {s.analysis && !["complete", "partial"].includes(s.analysis.status) && <div className="text-xs text-[#fbbf24] mt-1" title={s.analysis.warnings.join("\n")}>성과 계산 불가</div>}
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-[#e8eaf0]">
                       {s.currentPrice == null ? "-" : (s.currency === "USD" ? `$${s.currentPrice.toLocaleString()}` : `${Math.round(s.currentPrice).toLocaleString()}원`)}

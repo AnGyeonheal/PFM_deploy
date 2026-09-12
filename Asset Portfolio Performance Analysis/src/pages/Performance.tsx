@@ -1,20 +1,22 @@
 import { useState, useEffect } from "react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from "recharts";
-import { Card, CardHeader, formatKRW, ReturnBadge, PnLText, CustomTooltip, type AnalysisOptions } from "../components/Shared";
+import { Card, CardHeader, formatKRW, ReturnBadge, PnLText, CustomTooltip, AnalysisNotice, type AnalysisCoverage, type AnalysisOptions } from "../components/Shared";
 
 type Metrics = {
-  totalBuy: number; unrealizedPnL: number; realizedPnL: number;
-  dividendPnL: number; fxPnL: number; pureStockPnL: number;
-  totalPnL: number; returnPct: number | null;
+  totalBuy: number; unrealizedPnL: number | null; realizedPnL: number | null;
+  dividendPnL: number | null; fxPnL: number | null; pureStockPnL: number | null;
+  totalPnL: number | null; returnPct: number | null;
 };
 type StockRow = {
-  ticker: string; name: string; buyTotal: number; unrealizedPnL: number;
-  realizedPnL: number; dividend: number; returnPct: number; status: string;
+  ticker: string; name: string; buyTotal: number; unrealizedPnL: number | null;
+  realizedPnL: number | null; dividend: number | null; returnPct: number | null; status: string;
+  analysis?: AnalysisCoverage;
 };
 
 export default function Performance({ opts, onTickers }: { opts: AnalysisOptions; onTickers?: (t: { ticker: string; name: string }[]) => void }) {
   const [m, setM] = useState<Metrics | null>(null);
   const [rows, setRows] = useState<StockRow[]>([]);
+  const [analysis, setAnalysis] = useState<AnalysisCoverage>();
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
 
@@ -24,7 +26,7 @@ export default function Performance({ opts, onTickers }: { opts: AnalysisOptions
     const stockQ = opts.scope === "stock" && opts.ticker ? `&ticker=${encodeURIComponent(opts.ticker)}` : "";
     fetch(`/api/app/dashboard?div=${opts.includeDividend ? 1 : 0}&fx=${opts.includeFx ? 1 : 0}${stockQ}`, { credentials: "include", signal: controller.signal })
       .then(r => { if (!r.ok) throw new Error("데이터를 불러오지 못했습니다"); return r.json(); })
-      .then(d => { setM(d.metrics); setRows(d.stocks || []); setErr(""); if (d?.tickers?.length && onTickers) onTickers(d.tickers); })
+      .then(d => { setM(d.metrics); setRows(d.stocks || []); setAnalysis(d.analysis); setErr(""); if (d?.tickers?.length && onTickers) onTickers(d.tickers); })
       .catch(e => { if (!controller.signal.aborted) setErr(String(e.message || e)); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
@@ -47,17 +49,26 @@ export default function Performance({ opts, onTickers }: { opts: AnalysisOptions
     { label: "주가 손익", value: pureStock, color: "#00d4a1" },
     { label: "환차손익", value: fxPnL, color: "#fbbf24" },
     { label: "배당", value: dividend, color: "#a78bfa" },
-  ].filter(d => opts.includeDividend || d.label !== "배당");
+  ].filter((entry): entry is { label: string; value: number; color: string } => entry.value != null)
+    .filter(entry => opts.includeDividend || entry.label !== "배당");
+  const chartData = [
+    { name: "주가 손익", amount: pureStock, color: "#00d4a1" },
+    { name: "환차손익", amount: fxPnL, color: "#fbbf24" },
+    { name: "실현 손익", amount: realized, color: "#4f8cff" },
+    { name: "배당", amount: dividend, color: "#a78bfa" },
+  ].filter((entry): entry is { name: string; amount: number; color: string } => entry.amount != null)
+    .map(entry => ({ ...entry, value: entry.amount / 1_000_000 }));
 
   return (
     <div className="space-y-6">
+      <AnalysisNotice analysis={analysis} />
       {/* E2 Summary */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[
-          { label: "총 손익", value: totalPnL, isKRW: true, positive: totalPnL >= 0 },
+          { label: "총 손익", value: totalPnL, isKRW: true, positive: (totalPnL ?? 0) >= 0 },
           { label: "총 수익률", value: totalReturn, isKRW: false, positive: (totalReturn ?? 0) >= 0 },
-          { label: "평가손익", value: unrealized, isKRW: true, positive: unrealized >= 0 },
-          { label: "실현손익", value: realized, isKRW: true, positive: realized >= 0 },
+          { label: "평가손익", value: unrealized, isKRW: true, positive: (unrealized ?? 0) >= 0 },
+          { label: "실현손익", value: realized, isKRW: true, positive: (realized ?? 0) >= 0 },
         ].map(k => (
           <Card key={k.label} className="p-5">
             <div className="text-xs text-[#6b7494] uppercase tracking-widest font-mono mb-3">{k.label}</div>
@@ -103,19 +114,14 @@ export default function Performance({ opts, onTickers }: { opts: AnalysisOptions
           <CardHeader title="주가 손익 vs 환차손익" sub="E5: 순수 주가성과 분리" />
           <div className="p-5">
             <ResponsiveContainer width="100%" height={200}>
-              <BarChart data={[
-                { name: "주가 손익", value: m.pureStockPnL / 1_000_000 },
-                { name: "환차손익", value: m.fxPnL / 1_000_000 },
-                { name: "실현 손익", value: m.realizedPnL / 1_000_000 },
-                { name: "배당", value: m.dividendPnL / 1_000_000 },
-              ]} margin={{ top: 4, right: 4, bottom: 4, left: 0 }}>
+              <BarChart data={chartData} margin={{ top: 4, right: 4, bottom: 4, left: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
                 <XAxis dataKey="name" tick={{ fill: "#6b7494", fontSize: 10, fontFamily: "JetBrains Mono" }} axisLine={false} tickLine={false} />
                 <YAxis tick={{ fill: "#6b7494", fontSize: 10, fontFamily: "JetBrains Mono" }} axisLine={false} tickLine={false} unit="M" />
                 <Tooltip content={<CustomTooltip />} />
                 <Bar dataKey="value" name="손익(백만원)" radius={[2, 2, 0, 0]}>
-                  {[m.pureStockPnL, m.fxPnL, m.realizedPnL, m.dividendPnL].map((v, i) => (
-                    <Cell key={i} fill={v >= 0 ? ["#00d4a1", "#fbbf24", "#4f8cff", "#a78bfa"][i] : "#ff5c6a"} />
+                  {chartData.map(entry => (
+                    <Cell key={entry.name} fill={entry.amount >= 0 ? entry.color : "#ff5c6a"} />
                   ))}
                 </Bar>
               </BarChart>
@@ -139,15 +145,17 @@ export default function Performance({ opts, onTickers }: { opts: AnalysisOptions
             <tbody>
               {[...rows].map(s => {
                 const div = opts.includeDividend ? s.dividend : 0;
-                const total = s.unrealizedPnL + s.realizedPnL + div;
+                const total = s.unrealizedPnL == null || s.realizedPnL == null || div == null
+                  ? null : s.unrealizedPnL + s.realizedPnL + div;
                 return { s, div, total };
-              }).sort((a, b) => b.total - a.total).map(({ s, div, total }, i) => {
+              }).sort((first, second) => (second.total ?? -Infinity) - (first.total ?? -Infinity)).map(({ s, div, total }, i) => {
                 const holding = s.status !== "청산";
                 return (
                   <tr key={s.ticker} className={`border-b border-white/4 hover:bg-white/3 transition-colors ${i % 2 === 0 ? "" : "bg-white/[0.015]"}`}>
                     <td className="px-4 py-3">
                       <div className="font-mono text-xs text-[#00d4a1]">{s.ticker}</div>
                       <div className="text-xs text-[#6b7494]">{s.name}</div>
+                      {s.analysis && !["complete", "partial"].includes(s.analysis.status) && <div className="text-xs text-[#fbbf24] mt-1" title={s.analysis.warnings.join("\n")}>성과 계산 불가</div>}
                     </td>
                     <td className="px-4 py-3">
                       <span className={`text-xs font-mono px-1.5 py-0.5 rounded-sm ${holding ? "bg-[#00d4a1]/10 text-[#00d4a1]" : "bg-white/5 text-[#6b7494]"}`}>
@@ -159,7 +167,7 @@ export default function Performance({ opts, onTickers }: { opts: AnalysisOptions
                     <td className="px-4 py-3"><PnLText value={s.realizedPnL} /></td>
                     {opts.includeDividend && <td className="px-4 py-3"><PnLText value={div} /></td>}
                     <td className="px-4 py-3"><PnLText value={total} /></td>
-                    <td className="px-4 py-3"><ReturnBadge value={s.buyTotal ? (total / s.buyTotal) * 100 : 0} /></td>
+                    <td className="px-4 py-3"><ReturnBadge value={s.returnPct} /></td>
                   </tr>
                 );
               })}

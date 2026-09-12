@@ -7,8 +7,24 @@ views, and the shared growth/XIRR/regression functions in `pme.py`.
 
 `build_asset_value_growth` reconstructs positions in execution-time order.
 Closed positions remain in performance history. Purchases, sales, remaining
-average-cost basis and cash dividends are recorded separately. Missing quotes
-or sales without sufficient purchase history do not produce a fabricated loss.
+average-cost basis and cash dividends are recorded separately. Korean stock
+codes use the KRX listing's market to select .KS (KOSPI) or .KQ (KOSDAQ), unless
+the caller explicitly specifies the market or Yahoo ticker.
+
+A missing quote, insufficient history or unmatched sale excludes that symbol's
+entire transaction ledger from the aggregate, including its purchases, sales
+and dividends. Healthy symbols continue to be analyzed against the same subset
+of SPY contributions. Quotes are never invented or backfilled before a symbol's
+available history just to produce a metric.
+
+Dashboard and benchmark responses carry an `analysis` object with `status`,
+`includedSymbols`, `excludedSymbols` and `warnings`. Partial metrics are labelled
+as a subset, while account total assets retain their original account scope.
+Selecting an unavailable symbol yields null performance values, not zero or
+old values from another calculation. An interval after full liquidation with
+no remaining assets or new purchases is `no_period_data`, even if its calendar
+dates exist in the historical frame. Partial XIRR is not automatically applied
+to the full account's asset projection; a manual scenario rate remains available.
 
 Prices use Yahoo Close with `auto_adjust=False` (split-adjusted, not dividend-
 adjusted). Pipeline trade quantities/prices are normalized for splits. Cash
@@ -120,6 +136,12 @@ Frontend gates: `tsc --noEmit` and `npm run build` in the React directory.
 mocked authentication/data access. Never deploy it. Run from the repository root:
 `python -m uvicorn fixture_app:app --app-dir tests --host 127.0.0.1 --port 8001`.
 The production entrypoint remains `webapp:app`.
+
+To exercise mixed quote availability in the UI, use the same test server with
+`fixture_app:incomplete_app --factory`. This fixture intentionally removes NVDA
+quotes and retains a healthy synthetic ETF. Regression tests cover 72 mixed-data
+option combinations in addition to the 48 complete-data combinations, and
+KOSDAQ routing, unmatched sales, empty periods and liquidation boundaries.
 
 Browser checks covered 48 option combinations, chart modes, ETF selection,
 rapid toggling and 390px/1440px layouts. A gated-response interception test did

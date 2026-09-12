@@ -26,6 +26,18 @@ def _memo(key, producer):
     return val.copy() if hasattr(val, "copy") else val
 
 
+def _krx_market_map():
+    def load():
+        try:
+            import FinanceDataReader as fdr
+            listing = fdr.StockListing("KRX")
+            return {str(code).zfill(6): str(market).upper()
+                    for code, market in zip(listing["Code"], listing["Market"])}
+        except Exception:
+            return {}
+    return _memo(("krx_markets",), load)
+
+
 def to_yf_ticker(symbol, market_country="US", market=None):
     """토스/수동입력 심볼을 yfinance 티커로 변환합니다.
     - 미국 주식: 그대로 사용 (BRK.B → BRK-B 처럼 점은 하이픈으로)
@@ -42,7 +54,8 @@ def to_yf_ticker(symbol, market_country="US", market=None):
         # A 접두사(예: A360750) 제거 후 6자리 코드로 통일
         if len(symbol) >= 2 and symbol[0] == "A" and symbol[1:].isdigit():
             symbol = symbol[1:]
-        suffix = ".KQ" if (market or "").upper() in ("KOSDAQ", "KQ") else ".KS"
+        resolved_market = (market or _krx_market_map().get(symbol.zfill(6), "")).upper()
+        suffix = ".KQ" if resolved_market in ("KOSDAQ", "KOSDAQ GLOBAL", "KQ") else ".KS"
         return f"{symbol.zfill(6)}{suffix}"
     # 미국 등 해외
     return symbol.replace(".", "-")

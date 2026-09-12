@@ -15,7 +15,33 @@ export const PERIODS: { key: AnalysisOptions["period"]; label: string }[] = [
   { key: "ALL", label: "전체" },
 ];
 
-export function formatKRW(n: number, compact = false): string {
+export type AnalysisCoverage = {
+  status: "complete" | "partial" | "unavailable" | "no_data" | "no_period_data";
+  includedSymbols: string[];
+  excludedSymbols: string[];
+  warnings: string[];
+};
+
+export function AnalysisNotice({ analysis }: { analysis?: AnalysisCoverage }) {
+  if (!analysis || analysis.status === "complete") return null;
+  const included = analysis.includedSymbols.length;
+  const total = included + analysis.excludedSymbols.length;
+  const title = analysis.status === "partial" ? `일부 종목 기준 · ${included}/${total}종목 분석`
+    : analysis.status === "no_period_data" ? "선택기간 데이터 없음" : "성과 계산 불가";
+  return (
+    <div role="status" aria-label="분석 데이터 상태" className="border-l-2 border-[#fbbf24] pl-3 py-2 text-xs text-[#fbbf24] space-y-2">
+      <div className="font-medium">{title}</div>
+      {analysis.status === "partial" && <div>미분석 종목의 거래·원금·배당 제외. 계좌 총자산은 전체 기준.</div>}
+      {analysis.warnings.length > 0 && <details open={analysis.warnings.length <= 3}>
+        <summary className="cursor-pointer">{analysis.status === "partial" ? "제외 사유" : "계산 불가 사유"}</summary>
+        <ul className="mt-2 space-y-1 break-words">{analysis.warnings.map(message => <li key={message}>{message}</li>)}</ul>
+      </details>}
+    </div>
+  );
+}
+
+export function formatKRW(n: number | null, compact = false): string {
+  if (n == null || !Number.isFinite(n)) return "—";
   if (compact) {
     if (Math.abs(n) >= 100_000_000) return `${(n / 100_000_000).toFixed(1)}억`;
     if (Math.abs(n) >= 10_000) return `${(n / 10_000).toFixed(0)}만`;
@@ -37,7 +63,8 @@ export function ReturnBadge({ value, size = "sm" }: { value: number | null; size
   );
 }
 
-export function PnLText({ value }: { value: number }) {
+export function PnLText({ value }: { value: number | null }) {
+  if (value == null || !Number.isFinite(value)) return <span className="font-mono text-sm text-[#6b7494]">—</span>;
   const isPos = value >= 0;
   return (
     <span className={`font-mono text-sm ${isPos ? "text-[#00d4a1]" : "text-[#ff5c6a]"}`}>

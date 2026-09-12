@@ -214,6 +214,27 @@ def _save_daily_metrics(user, date_str, snapshot):
         pass
 
 
+def _analysis_status(frame, cutoff=None):
+    attributes = frame.attrs if frame is not None else {}
+    warnings = list(attributes.get("warnings", []))
+    included = list(attributes.get("included_symbols", []))
+    excluded = list(attributes.get("excluded_symbols", []))
+    if frame is None or frame.empty:
+        status = "unavailable" if warnings else "no_data"
+        if not warnings:
+            warnings.append("분석할 거래 이력이 없습니다.")
+    elif cutoff is not None and frame.loc[frame.index >= cutoff].empty:
+        status = "no_period_data"
+        warnings.append("선택기간에 분석할 데이터가 없습니다.")
+    elif profit_from_growth(frame, cutoff).get("returnPct") is None:
+        status = "no_period_data"
+        warnings.append("선택기간에 분석 가능한 투자 자산이나 매수 이력이 없습니다.")
+    else:
+        status = "partial" if excluded else "complete"
+    return {"status": status, "includedSymbols": included, "excludedSymbols": excluded,
+            "warnings": warnings}
+
+
 @app.get("/api/app/dashboard")
 def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str = "", period: str = ""):
     user = _current_user(request)
@@ -275,12 +296,19 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
         })
         stock_profit = profit_from_growth(analysis_frame(tk, bool(fx)), cutoff)
         pure_profit = profit_from_growth(analysis_frame(tk, False), cutoff)
+        stock_analysis = _analysis_status(analysis_frame(tk, bool(fx)), cutoff)
+        if stock_analysis["status"] not in ("complete", "partial"):
+            stock_profit = {}
         if stock_profit:
             stocks[-1].update(buyTotal=stock_profit["totalBuy"], currentTotal=stock_profit["totalCurrent"],
                               unrealizedPnL=stock_profit["unrealizedPnL"], realizedPnL=stock_profit["realizedPnL"],
                               dividend=stock_profit["dividendPnL"], returnPct=stock_profit["returnPct"],
-                              pureStockKrw=pure_profit["unrealizedPnL"],
-                              fxPnLStock=stock_profit["unrealizedPnL"] - pure_profit["unrealizedPnL"])
+                              pureStockKrw=pure_profit.get("unrealizedPnL"),
+                              fxPnLStock=stock_profit["unrealizedPnL"] - pure_profit["unrealizedPnL"] if pure_profit else None)
+        else:
+            stocks[-1].update(unrealizedPnL=None, realizedPnL=None, dividend=None,
+                              returnPct=None, pureStockKrw=None, fxPnLStock=None)
+        stocks[-1]["analysis"] = stock_analysis
     holdings = data["holdings"]
     allocation = [{"name": (h.get("name") or h.get("ticker")), "value": round(float(h.get("weight_pct") or 0), 1)}
                   for h in holdings if float(h.get("weight_pct") or 0) > 0]
@@ -302,7 +330,8 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
         sel = [x for x in stocks if x["ticker"] == ticker]
         if sel:
             s0 = sel[0]
-            _tp = s0["unrealizedPnL"] + s0["realizedPnL"] + s0["dividend"]  # unrealizedPnL은 이미 환차 토글 반영
+            components = [s0["unrealizedPnL"], s0["realizedPnL"], s0["dividend"]]
+            _tp = sum(components) if all(value is not None for value in components) else None
             metrics = {
                 "totalAsset": s0["currentTotal"], "totalCurrent": s0["currentTotal"], "cash": 0,
                 "totalBuy": s0["buyTotal"], "unrealizedPnL": s0["unrealizedPnL"],
@@ -313,19 +342,24 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
             stocks = sel
             allocation = [{"name": s0["name"], "value": 100.0}]
     frame = analysis_frame(ticker or None, bool(fx))
+    analysis = _analysis_status(frame, cutoff)
     profit = profit_from_growth(frame, cutoff)
     pure_profit = profit_from_growth(analysis_frame(ticker or None, False), cutoff)
+    if analysis["status"] not in ("complete", "partial"):
+        profit = {}
     if profit:
         metrics.update(profit)
-        metrics["pureStockPnL"] = pure_profit["totalPnL"] - pure_profit["dividendPnL"]
-        metrics["fxPnL"] = profit["totalPnL"] - profit["dividendPnL"] - metrics["pureStockPnL"]
+        metrics["pureStockPnL"] = pure_profit["totalPnL"] - pure_profit["dividendPnL"] if pure_profit else None
+        metrics["fxPnL"] = profit["totalPnL"] - profit["dividendPnL"] - metrics["pureStockPnL"] if pure_profit else None
     else:
-        metrics.update(totalPnL=0, realizedPnL=0, unrealizedPnL=0, dividendPnL=0,
-                       pureStockPnL=0, fxPnL=0, returnPct=None)
+        metrics.update(totalPnL=None, realizedPnL=None, unrealizedPnL=None, dividendPnL=None,
+                       pureStockPnL=None, fxPnL=None, returnPct=None)
     metrics["xirr"] = xirr_from_growth(frame, cutoff)
-    metrics["projectionRate"] = xirr_from_growth(frame)
+    metrics["projectionRate"] = xirr_from_growth(frame) if not analysis["excludedSymbols"] else None
     stats = comparison_statistics(frame, cutoff)
     indexed = (1.0 + stats["daily"]).cumprod() * 100
+    if analysis["status"] not in ("complete", "partial"):
+        indexed = pd.DataFrame()
     growth = [{"month": date.strftime("%y/%m"), "portfolio": round(float(row["portfolio"]), 2),
                "sp500": round(float(row["sp500"]), 2)} for date, row in indexed.resample("ME").last().iterrows()] if not indexed.empty else []
     # 전일 대비 변동(전체 포트 기준): 오늘 값을 저장하고 직전 저장일과 비교
@@ -366,7 +400,8 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
                 }
         except Exception:
             changes = None
-    return JSONResponse({"metrics": metrics, "stocks": stocks, "allocation": allocation, "fx": fx_rate, "growth": growth, "tickers": all_tickers, "changes": changes})
+    return JSONResponse({"metrics": metrics, "stocks": stocks, "allocation": allocation, "fx": fx_rate,
+                         "growth": growth, "tickers": all_tickers, "changes": changes, "analysis": analysis})
 
 
 @app.get("/api/app/tickers")
@@ -590,9 +625,10 @@ def _benchmark_view(frame, period=""):
                "beta": stats["beta"], "corr": stats["corr"], "sharpe": stats["sharpe"],
                "regressionAlpha": stats["regression_alpha"],
                "twrReturn": round(stats["twr"], 2) if stats["twr"] is not None else None}
+    analysis = _analysis_status(frame, cutoff)
     result = {"summary": summary, "growth": [], "rollingBeta": [], "monthlyAlpha": [],
-              "warnings": frame.attrs.get("warnings", []) if frame is not None else []}
-    if stats["returns"].empty:
+              "warnings": analysis["warnings"], "analysis": analysis}
+    if stats["returns"].empty or analysis["status"] not in ("complete", "partial"):
         return result
     selected = frame.loc[stats["returns"].index]
     monthly = selected.resample("ME").last()

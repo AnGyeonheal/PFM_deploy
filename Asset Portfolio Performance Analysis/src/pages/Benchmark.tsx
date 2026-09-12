@@ -3,7 +3,7 @@ import {
   AreaChart, Area, LineChart, Line, BarChart, Bar, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
-import { Card, CardHeader, CustomTooltip, ReturnBadge, formatKRW, type AnalysisOptions } from "../components/Shared";
+import { Card, CardHeader, CustomTooltip, ReturnBadge, formatKRW, AnalysisNotice, type AnalysisCoverage, type AnalysisOptions } from "../components/Shared";
 
 type Summary = { portfolioReturn: number | null; sp500Return: number | null; alpha: number | null; regressionAlpha: number | null; beta: number | null; corr: number | null; sharpe: number | null; twrReturn: number | null };
 type PerStock = { ticker: string; name: string; returnPct: number | null; alpha: number | null; beta: number | null; alphaContrib: number | null; betaContrib: number | null };
@@ -17,6 +17,7 @@ type BenchData = {
   simulation: Sim;
   tickers?: { ticker: string; name: string }[];
   warnings?: string[];
+  analysis?: AnalysisCoverage;
 };
 
 const signedPercent = (value: number | null, unit = "%") => value == null || !Number.isFinite(value)
@@ -79,7 +80,7 @@ export default function Benchmark({ opts, onTickers }: { opts: AnalysisOptions; 
 
   return (
     <div className="space-y-6">
-      {d.warnings?.map(message => <div role="status" key={message} className="text-sm text-[#fbbf24]">{message}</div>)}
+      <AnalysisNotice analysis={d.analysis} />
       {/* F1/F2 Summary */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         {[

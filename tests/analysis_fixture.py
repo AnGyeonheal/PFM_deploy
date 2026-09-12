@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 
 import names
+import benchmark
 import pipeline
 import pme
 import webapp
@@ -36,6 +37,7 @@ class AnalysisFixture:
 
     def __enter__(self):
         self.stack = ExitStack()
+        self.stack.enter_context(patch.object(benchmark, "_krx_market_map", return_value={"360750": "KOSPI"}))
         names.register_krw_foreign(self.name_map)
         self.stack.enter_context(patch.object(pme, "get_history", side_effect=lambda symbol, **kwargs:
                                               self.histories.get(symbol, pd.Series(dtype=float)).copy()))
