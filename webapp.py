@@ -652,9 +652,22 @@ def api_app_benchmark(request: Request, div: int = 1, fx: int = 1, start: str = 
         if gdf is not None and not gdf.empty:
             g = gdf
             _n = _PERIOD_MONTHS.get((period or "").upper())
+            opening = pd.Series(0.0, index=gdf.columns)
             if _n:
                 _cut = pd.Timestamp.now().normalize() - pd.DateOffset(months=_n)
+                before = gdf[gdf.index < _cut]
+                if not before.empty:
+                    opening = before.iloc[-1]
                 g = g[g.index >= _cut]
+            purchases = g["누적매수금액"] - opening["누적매수금액"]
+            sales = g["누적매도금액"] - opening["누적매도금액"]
+            spy_sales = g["S&P500 누적매도금액"] - opening["S&P500 누적매도금액"]
+            capital = opening["내 자산가치"] + purchases
+            spy_capital = opening["S&P500 자산가치"] + purchases
+            portfolio_returns = ((g["내 자산가치"] + sales - capital)
+                                 / capital.where(capital > 0) * 100).resample("ME").last()
+            spy_returns = ((g["S&P500 자산가치"] + spy_sales - spy_capital)
+                           / spy_capital.where(spy_capital > 0) * 100).resample("ME").last()
             _mine = g["내 자산가치"].resample("ME").last().dropna()
             _spy = g["S&P500 자산가치"].resample("ME").last().dropna()
             _prin = g["순투자원금"].resample("ME").last().dropna()
@@ -662,25 +675,12 @@ def api_app_benchmark(request: Request, div: int = 1, fx: int = 1, start: str = 
             if rb_series is not None and not rb_series.empty:
                 _rb = rb_series[rb_series.index >= _cut] if _n else rb_series
                 _bser = _rb.resample("ME").last()
-            # 수익률/알파는 자산가치(순투자원금 대비) 기준 — 그래프 금액 모드와 일치하고 배당·환차 반영.
-            # 기간 지정 시 기간초 자산 대비 순손익률(기간 내 추가 순투자 제외)로 환산.
-            _ts = _mine.index[0]
-            _m0 = float(_mine.loc[_ts])
-            _s0 = float(_spy.loc[_ts]) if _ts in _spy.index else _m0
-            _pp0 = float(_prin.loc[_ts]) if _ts in _prin.index else 0.0
             for _dt in _mine.index:
                 _m = float(_mine.loc[_dt])
                 _s = float(_spy.loc[_dt]) if _dt in _spy.index else 0.0
                 _p = float(_prin.loc[_dt]) if _dt in _prin.index else 0.0
-                if _n:  # 기간 지정: 기간 투입자본(기간초 자산 + 기간 순투자) 대비 순손익률 — 기간초 자산이 작아도 안정
-                    _dp = _p - _pp0
-                    _base_m = _m0 + _dp
-                    _base_s = _s0 + _dp
-                    _pr = ((_m - _m0 - _dp) / _base_m * 100) if _base_m > 1 else None
-                    _sr = ((_s - _s0 - _dp) / _base_s * 100) if _base_s > 1 else None
-                else:  # 전체: 순투자원금 대비 누적 수익률
-                    _pr = ((_m - _p) / _p * 100) if _p > 1 else None
-                    _sr = ((_s - _p) / _p * 100) if _p > 1 else None
+                _pr = float(portfolio_returns.loc[_dt]) if pd.notna(portfolio_returns.loc[_dt]) else None
+                _sr = float(spy_returns.loc[_dt]) if pd.notna(spy_returns.loc[_dt]) else None
                 _bt = float(_bser.loc[_dt]) if (_bser is not None and _dt in _bser.index and pd.notna(_bser.loc[_dt])) else None
                 growth.append({"month": _dt.strftime("%y/%m"),
                                "portfolio": round(_m),

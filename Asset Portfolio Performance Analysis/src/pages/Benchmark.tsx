@@ -100,7 +100,7 @@ export default function Benchmark({ opts, onTickers }: { opts: AnalysisOptions; 
         <CardHeader title={chartMode === "amount" ? "자산 성장 추이 vs S&P500" : "수익률 추이 vs S&P500"}
           sub={chartMode === "amount"
             ? "같은 시점·금액으로 S&P500을 매매했다면의 내 자산가치(원) 비교"
-            : "순투자원금 대비 수익률(%) 비교 · 커서를 올리면 알파·베타 표시"} />
+            : "투입자본 대비 누적 수익률(%) · 매도 회수금 반영"} />
         <div className="p-5">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-4 text-xs font-mono text-[#6b7494]">

@@ -255,6 +255,7 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
     spy_shares = pd.Series(0.0, index=idx)
     gross_buy = pd.Series(0.0, index=idx)
     sell_cash = pd.Series(0.0, index=idx)
+    spy_sell_cash = pd.Series(0.0, index=idx)
     held = {s: 0.0 for s in symbols}
     spy_now = 0.0
 
@@ -278,6 +279,7 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
             port_val = sum(held[k] * _px_krw(k, d) for k in symbols if held.get(k, 0) > 0)
             sold_val = r["qty"] * _px_krw(s, d)
             w = min(max((sold_val / port_val) if port_val > 0 else 1.0, 0.0), 1.0)
+            spy_sell_cash.loc[spy_sell_cash.index >= d] += spy_now * spy_px * fx_d * w
             spy_now *= (1.0 - w)  # 판 비중만큼 SPY 매도
             held[s] = held.get(s, 0.0) - r["qty"]
             sell_cash.loc[sell_cash.index >= d] += cf
@@ -298,6 +300,9 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
         "내 자산가치": my_val + div_cum,
         "S&P500 자산가치": spy_val,
         "순투자원금": gross_buy - sell_cash,
+        "누적매수금액": gross_buy,
+        "누적매도금액": sell_cash,
+        "S&P500 누적매도금액": spy_sell_cash,
     })
     out["내 누적손익"] = out["내 자산가치"] - out["순투자원금"]  # 보유가치+배당 − 순투입원금 = 총손익
     if ticker and ticker in sym_hist:
