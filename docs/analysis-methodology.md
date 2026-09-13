@@ -1,6 +1,6 @@
 # Performance and Benchmark Methodology
 
-Audited: 2026-09-12. Applies to the React benchmark, dashboard and performance
+Audited: 2026-09-13. Applies to the React benchmark, dashboard and performance
 views, and the shared growth/XIRR/regression functions in `pme.py`.
 
 ## Shared Ledger
@@ -72,9 +72,43 @@ This is a daily approximation, not exact intraday flow-timestamp valuation.
 
 XIRR solves NPV=0 for purchases (-), sales (+), an opening valuation (-) for
 period analysis, and the final valuation (+). Dividends already in final cash
-are not added again. Same-day-only flows have no annualized rate. The current
-solver searches rates between -99.99% and 10,000%; a missing bracket returns
-no value. Non-conventional cash flows can have multiple IRRs.
+are not added again. It measures this ledger's investment strategy with retained
+cash dividends, not every cash movement in the brokerage account.
+
+The solver is PyXIRR (Actual/365 Fixed, initial guess 0.1). Cash flows on the
+same calendar day are combined with compensated summation and normalized by
+their largest absolute amount. Thus changing the currency unit does not change
+the solution. Nonfinite amounts/invalid dates, same-day-only or one-sign flows,
+and non-convergent/nonfinite solutions return no value. The previous fixed
+10,000% annual-rate cap and absolute-currency convergence test were removed.
+Non-conventional cash flows can have multiple IRRs; a converged root is not a
+guarantee of uniqueness. XIRR is always annualized, including partial calendar
+years and short holdings; a large annualized rate is not a realized one-year gain.
+
+$$ \sum_i CF_i / (1+r)^{(d_i-d_0)/365} = 0 $$
+
+## Calendar Years
+
+The UI option `YOY` is labelled **Yearly (YoY)** and implements the user's
+chosen calendar-year view, not a percentage-change-versus-prior-year calculation.
+Select a year from the first recorded trade year through the current year.
+`period=YOY&year=2025`, for example, analyzes 2025-01-01 through 2025-12-31;
+the current year stops at the latest available valuation date. `analysis.asOf`
+shows that actual closing date. `1Y` remains a rolling twelve-month window.
+
+An existing position enters the calendar year at its previous December 31
+value as an opening outflow; only that year's new purchases/sales are external
+flows. The selected year's closing value is the terminal inflow. Trades after
+year-end are excluded BEFORE validating and building the ledger, so later sales
+or data errors cannot affect the historical year's profit or XIRR. Calendar
+days, including leap day, are retained; 366-day growth annualizes over 366/365.
+
+The year selection applies to ROI, XIRR, risk statistics, monthly charts,
+per-stock performance and the lump-sum simulation across the three analysis
+pages. Account total assets, current price/quantity and future asset projection
+remain current and are labelled separately from period-end values. Automatic
+projection assumptions use inception-to-date XIRR, not a past year's XIRR.
+Selecting a historical year does not update daily comparison snapshots.
 
 ## Options and Statistics
 
@@ -132,6 +166,19 @@ Coverage includes sales, dividends, FX, dates, XIRR, missing prices, profit
 identities, identical-asset beta/alpha and 48 option combinations across APIs.
 Frontend gates: `tsc --noEmit` and `npm run build` in the React directory.
 
+XIRR accuracy tests include the known irregular-flow result 37.33625335%,
+10%/-25%/0% annual gains across amount scales, one-day annualization, invalid
+inputs, leap-year opening/closing balances and generated deposit/withdrawal
+schedules with known target rates. Calendar-year API tests cover two years,
+both dividend/FX flags, total/individual holdings, future-year validation,
+pre-inception empty years and exclusion of later transactions.
+
+At this audit, real-account inception and 2021-2026 annual XIRRs were independently
+checked with trade-derived cash flows, a separate NPV expression and bisection.
+The largest absolute NPV residual was below KRW 0.004 and the largest difference
+from the reference annual rate was below 0.000001 percentage points. This checks
+numerical accuracy for those inputs, not the completeness of brokerage imports.
+
 `tests/fixture_app.py` is a LOCAL TEST-ONLY application with synthetic data and
 mocked authentication/data access. Never deploy it. Run from the repository root:
 `python -m uvicorn fixture_app:app --app-dir tests --host 127.0.0.1 --port 8001`.
@@ -146,3 +193,6 @@ KOSDAQ routing, unmatched sales, empty periods and liquidation boundaries.
 Browser checks covered 48 option combinations, chart modes, ETF selection,
 rapid toggling and 390px/1440px layouts. A gated-response interception test did
 not complete in the browser tool; actual rapid-click cancellation was verified.
+Yearly-view browser checks covered 72 combinations (two years, dividend/FX
+flags, total/individual scope and three pages), XIRR/card consistency, matching
+year labels on charts, retained year selection across pages, and mobile layout.

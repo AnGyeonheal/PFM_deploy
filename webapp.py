@@ -11,7 +11,7 @@ import secrets as _secrets
 from datetime import datetime
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Form, UploadFile, File
+from fastapi import FastAPI, Request, Form, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -93,6 +93,30 @@ def _df_records(df, limit=None):
 
 
 _PERIOD_MONTHS = {"1M": 1, "3M": 3, "6M": 6, "1Y": 12, "5Y": 60}
+
+
+def _period_bounds(period="", year=0, today=None):
+    today = pd.Timestamp(today).normalize() if today is not None else pd.Timestamp.now().normalize()
+    if (period or "").upper() == "YOY":
+        selected_year = year or today.year
+        if not isinstance(selected_year, int) or not 1900 <= selected_year <= today.year:
+            raise HTTPException(status_code=422, detail="조회 가능한 연도를 선택하세요.")
+        return pd.Timestamp(selected_year, 1, 1), min(pd.Timestamp(selected_year, 12, 31), today)
+    months = _PERIOD_MONTHS.get((period or "").upper())
+    return (today - pd.DateOffset(months=months) if months else None), None
+
+
+def _available_years(orders):
+    current_year = pd.Timestamp.now().year
+    first_year = current_year
+    for order in orders:
+        try:
+            date = pd.Timestamp((order.get("execution") or {}).get("filledAt") or order.get("orderedAt"))
+            if pd.notna(date) and 1900 <= date.year <= current_year:
+                first_year = min(first_year, date.year)
+        except (TypeError, ValueError):
+            continue
+    return list(range(current_year, first_year - 1, -1))
 
 
 def _twr_growth_series(twr, period=""):
@@ -232,32 +256,32 @@ def _analysis_status(frame, cutoff=None):
     else:
         status = "partial" if excluded else "complete"
     return {"status": status, "includedSymbols": included, "excludedSymbols": excluded,
-            "warnings": warnings}
+            "warnings": warnings, "asOf": frame.index[-1].strftime("%Y-%m-%d") if frame is not None and not frame.empty else None}
 
 
 @app.get("/api/app/dashboard")
-def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str = "", period: str = ""):
+def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str = "", period: str = "", year: int = 0):
     user = _current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    cutoff, period_end = _period_bounds(period, year)
     data = get_portfolio(user, include_div=bool(div), include_fx=bool(fx))
     summary = data["summary"] or {}
     perf = data["perf"] or {}
     fx_rate = data["fx_rate"]
     name_map = data["name_map"]
-    months = _PERIOD_MONTHS.get((period or "").upper())
-    cutoff = pd.Timestamp.now().normalize() - pd.DateOffset(months=months) if months else None
     frames = {}
 
     def analysis_frame(symbol, with_fx):
         key = (symbol, with_fx)
         if key not in frames:
             frames[key] = pipeline.growth_frame(data["combined_orders"], fx_rate, symbol,
-                                                 include_div=bool(div), include_fx=with_fx)
+                                                 include_div=bool(div), include_fx=with_fx, end=period_end)
         return frames[key]
     sa = data.get("stock_analytics")
     sa_map = {str(r["티커"]): r for r in sa.to_dict("records")} if (sa is not None and not sa.empty) else {}
     stocks = []
+    current_values = {}
     per_fx = _per_ticker_fx(data["combined_orders"], fx_rate) if data["combined_orders"] else {}
     for r in _df_records(data["breakdown"]):
         tk = str(r.get("티커"))
@@ -282,6 +306,7 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
             pure_krw = upnl
             fx_pnl_stock = 0.0
         display_upnl = pure_krw if (cur == "USD" and not bool(fx)) else upnl  # 환차 토글 반영
+        current_values[tk] = buy + display_upnl
         stocks.append({
             "ticker": tk, "name": name_map.get(tk) or r.get("종목") or tk,
             "currency": cur, "quantity": float(r.get("보유수량") or 0),
@@ -308,6 +333,9 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
         else:
             stocks[-1].update(unrealizedPnL=None, realizedPnL=None, dividend=None,
                               returnPct=None, pureStockKrw=None, fxPnLStock=None)
+            if period_end is not None:
+                closing = profit_from_growth(analysis_frame(tk, bool(fx)))
+                stocks[-1].update(currentTotal=closing.get("totalCurrent"), buyTotal=closing.get("totalBuy"))
         stocks[-1]["analysis"] = stock_analysis
     holdings = data["holdings"]
     allocation = [{"name": (h.get("name") or h.get("ticker")), "value": round(float(h.get("weight_pct") or 0), 1)}
@@ -333,7 +361,7 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
             components = [s0["unrealizedPnL"], s0["realizedPnL"], s0["dividend"]]
             _tp = sum(components) if all(value is not None for value in components) else None
             metrics = {
-                "totalAsset": s0["currentTotal"], "totalCurrent": s0["currentTotal"], "cash": 0,
+                "totalAsset": current_values[ticker] if period_end is not None else s0["currentTotal"], "totalCurrent": s0["currentTotal"], "cash": 0,
                 "totalBuy": s0["buyTotal"], "unrealizedPnL": s0["unrealizedPnL"],
                 "realizedPnL": s0["realizedPnL"], "dividendPnL": s0["dividend"], "fxPnL": s0["fxPnLStock"],
                 "pureStockPnL": s0["pureStockKrw"], "totalPnL": _tp,
@@ -354,8 +382,13 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
     else:
         metrics.update(totalPnL=None, realizedPnL=None, unrealizedPnL=None, dividendPnL=None,
                        pureStockPnL=None, fxPnL=None, returnPct=None)
+        if period_end is not None:
+            closing = profit_from_growth(frame)
+            metrics.update(totalCurrent=closing.get("totalCurrent"), totalBuy=closing.get("totalBuy"))
     metrics["xirr"] = xirr_from_growth(frame, cutoff)
-    metrics["projectionRate"] = xirr_from_growth(frame) if not analysis["excludedSymbols"] else None
+    projection_frame = pipeline.growth_frame(data["combined_orders"], fx_rate, ticker or None,
+                                               include_div=bool(div), include_fx=bool(fx)) if period_end is not None else frame
+    metrics["projectionRate"] = xirr_from_growth(projection_frame) if not projection_frame.attrs.get("excluded_symbols") else None
     stats = comparison_statistics(frame, cutoff)
     indexed = (1.0 + stats["daily"]).cumprod() * 100
     if analysis["status"] not in ("complete", "partial"):
@@ -364,7 +397,7 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
                "sp500": round(float(row["sp500"]), 2)} for date, row in indexed.resample("ME").last().iterrows()] if not indexed.empty else []
     # 전일 대비 변동(전체 포트 기준): 오늘 값을 저장하고 직전 저장일과 비교
     changes = None
-    if not ticker and bool(div) and bool(fx):
+    if not ticker and bool(div) and bool(fx) and period_end is None:
         try:
             sa2 = data.get("stock_analytics")
             stocks_ab = {}
@@ -401,7 +434,8 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
         except Exception:
             changes = None
     return JSONResponse({"metrics": metrics, "stocks": stocks, "allocation": allocation, "fx": fx_rate,
-                         "growth": growth, "tickers": all_tickers, "changes": changes, "analysis": analysis})
+                         "growth": growth, "tickers": all_tickers, "changes": changes, "analysis": analysis,
+                         "years": _available_years(data["combined_orders"])})
 
 
 @app.get("/api/app/tickers")
@@ -617,9 +651,10 @@ def api_app_fx(request: Request):
     })
 
 
-def _benchmark_view(frame, period=""):
-    months = _PERIOD_MONTHS.get((period or "").upper())
-    cutoff = pd.Timestamp.now().normalize() - pd.DateOffset(months=months) if months else None
+def _benchmark_view(frame, period="", year=0):
+    cutoff, period_end = _period_bounds(period, year)
+    if frame is not None and not frame.empty and period_end is not None:
+        frame = frame.loc[frame.index <= period_end]
     stats = comparison_statistics(frame, cutoff)
     summary = {"portfolioReturn": None, "sp500Return": None, "alpha": None,
                "beta": stats["beta"], "corr": stats["corr"], "sharpe": stats["sharpe"],
@@ -657,24 +692,23 @@ def _benchmark_view(frame, period=""):
 
 
 @app.get("/api/app/benchmark")
-def api_app_benchmark(request: Request, div: int = 1, fx: int = 1, start: str = "", ticker: str = "", period: str = ""):
+def api_app_benchmark(request: Request, div: int = 1, fx: int = 1, start: str = "", ticker: str = "", period: str = "", year: int = 0):
     user = _current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    cutoff, period_end = _period_bounds(period, year)
     data = get_portfolio(user, include_div=bool(div), include_fx=bool(fx))
     orders = data["combined_orders"]
     fxr = data["fx_rate"]
     if not orders:
         return JSONResponse({"error": "no_data"}, status_code=404)
     tkr = ticker or None
-    gdf = pipeline.growth_frame(orders, fxr, tkr, include_div=bool(div), include_fx=bool(fx))
-    result = _benchmark_view(gdf, period)
-    months = _PERIOD_MONTHS.get((period or "").upper())
-    cutoff = pd.Timestamp.now().normalize() - pd.DateOffset(months=months) if months else None
+    gdf = pipeline.growth_frame(orders, fxr, tkr, include_div=bool(div), include_fx=bool(fx), end=period_end)
+    result = _benchmark_view(gdf, period, year)
     per_stock = []
     symbols = [tkr] if tkr else sorted({order.get("symbol") for order in orders if order.get("symbol")})
     for symbol in symbols:
-        frame = gdf if symbol == tkr else pipeline.growth_frame(orders, fxr, symbol, include_div=bool(div), include_fx=bool(fx))
+        frame = gdf if symbol == tkr else pipeline.growth_frame(orders, fxr, symbol, include_div=bool(div), include_fx=bool(fx), end=period_end)
         stats = comparison_statistics(frame, cutoff)
         if stats["returns"].empty:
             continue
@@ -697,7 +731,7 @@ def api_app_benchmark(request: Request, div: int = 1, fx: int = 1, start: str = 
         if cutoff is not None and simulation_start is not None:
             simulation_start = max(cutoff, simulation_start)
         _ts, _monthly, sim_summary = pipeline.spy_dca(orders, fxr, simulation_start, tkr,
-                                                       include_div=bool(div), include_fx=bool(fx))
+                                                       include_div=bool(div), include_fx=bool(fx), end=period_end)
         if sim_summary:
             simulation = {
                 "startYm": sim_summary.get("시작월"), "startKrw": sim_summary.get("시작금액"),
@@ -716,7 +750,7 @@ def api_app_benchmark(request: Request, div: int = 1, fx: int = 1, start: str = 
             all_tickers.append({"ticker": _tk, "name": _nm.get(_tk) or _r.get("종목") or _tk})
     return JSONResponse({
         **result, "perStock": per_stock, "simulation": simulation,
-        "tickers": all_tickers,
+        "tickers": all_tickers, "years": _available_years(orders),
     })
 
 

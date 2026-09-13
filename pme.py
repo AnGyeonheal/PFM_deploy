@@ -3,7 +3,10 @@
 실제 내 종목 성과와 비교하여 진짜 초과수익(알파)을 계산합니다.
 주가 추이만 보는 방식과 달리 매매 타이밍이 반영됩니다.
 """
+import math
+
 import pandas as pd
+from pyxirr import DayCount, xirr as solve_xirr
 
 from benchmark import to_yf_ticker, get_history, get_dividends, get_usdkrw_history, BENCHMARK_TICKER
 from names import is_krw_foreign
@@ -146,7 +149,7 @@ def _holdings_value_series(recs_sorted, symbols, sym_hist, sym_cur,
 
 
 def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None,
-                             include_div=True, include_fx=True):
+                             include_div=True, include_fx=True, end=None):
     """보유 자산가치(원금+수익금) 성장 추이.
     내 자산가치 = 주식평가액(일별 환율) + 누적 배당(지급일 반영).
     S&P500 자산가치 = 매수는 SPY 매입, 매도는 '판 비중만큼' SPY도 매도(Modified PME) → 유령자본 제거.
@@ -158,6 +161,9 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
     recs = _trade_records(orders)
     if ticker:
         recs = [r for r in recs if r["symbol"] == ticker]
+    end_date = pd.Timestamp(end).tz_localize(None).normalize() if end is not None else None
+    if end_date is not None:
+        recs = [record for record in recs if record["date"] <= end_date]
     if not recs:
         return pd.DataFrame()
     symbols = sorted(set(r["symbol"] for r in recs))
@@ -208,7 +214,8 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
         unavailable.attrs.update(coverage)
         return unavailable
     start = min(r["date"] for r in recs)
-    idx = pd.date_range(start=start, end=spy_hist.index.max(), freq="D")
+    valuation_end = min(end_date, spy_hist.index.max()) if end_date is not None else spy_hist.index.max()
+    idx = pd.date_range(start=start, end=valuation_end, freq="D")
 
     def align(series):
         return series.reindex(idx.union(series.index)).ffill().reindex(idx).bfill()
@@ -490,9 +497,9 @@ def build_stock_analytics(orders, fx_now=1400.0, name_map=None, holdings=None,
 
 
 def build_spy_dca(orders, fx_now=1400.0, start_ym=None, ticker=None, include_div=True,
-                   include_fx=True, div_events=None):
+                   include_fx=True, div_events=None, end=None):
     """동일 초기자본으로 내 전략(TWR)과 SPY 일시투자를 비교하며 이후 입출금은 제외합니다."""
-    frame = build_asset_value_growth(orders, fx_now, div_events, ticker, include_div, include_fx)
+    frame = build_asset_value_growth(orders, fx_now, div_events, ticker, include_div, include_fx, end=end)
     empty = (pd.DataFrame(), pd.DataFrame(), {})
     if frame.empty:
         return empty
@@ -587,44 +594,44 @@ def _xnpv(rate, cashflows):
 
 
 def xirr(cashflows):
-    """불규칙 현금흐름의 연환산 내부수익률(XIRR, 소수)을 이분법으로 계산합니다.
-    cashflows: [(Timestamp, amount)] — 유출(-)·유입(+). 해가 없으면 None.
-    """
+    """Actual/365 기준 XIRR(소수). 날짜별 현금흐름을 합산하고 금액 단위를 정규화합니다."""
     if not cashflows:
         return None
     grouped = {}
     for date, amount in cashflows:
-        date = pd.Timestamp(date).normalize()
-        grouped[date] = grouped.get(date, 0.0) + amount
-    cashflows = [(date, amount) for date, amount in sorted(grouped.items()) if abs(amount) > 1e-10]
+        try:
+            date = pd.Timestamp(date)
+            amount = float(amount)
+            if pd.isna(date) or not math.isfinite(amount):
+                return None
+            date = date.tz_localize(None).normalize()
+        except (TypeError, ValueError, OverflowError):
+            return None
+        grouped.setdefault(date, []).append(amount)
+    try:
+        cashflows = [(date, math.fsum(amounts)) for date, amounts in sorted(grouped.items())]
+    except (ValueError, OverflowError):
+        return None
+    cashflows = [(date, amount) for date, amount in cashflows if amount != 0]
     if len(cashflows) < 2:
         return None
-    amounts = [cf for _, cf in cashflows]
-    if not (any(a > 0 for a in amounts) and any(a < 0 for a in amounts)):
+    amounts = [amount for _, amount in cashflows]
+    if not (any(amount > 0 for amount in amounts) and any(amount < 0 for amount in amounts)):
         return None
-    lo, hi = -0.9999, 100.0
-    f_lo = _xnpv(lo, cashflows)
-    f_hi = _xnpv(hi, cashflows)
-    if f_lo == 0:
-        return lo
-    if f_hi == 0:
-        return hi
-    if f_lo * f_hi > 0:  # 부호 변화가 없으면 유효한 해가 없음
+    scale = max(abs(amount) for amount in amounts)
+    normalized = [(date, amount / scale) for date, amount in cashflows]
+    rate = solve_xirr(normalized, guess=0.1, silent=True, day_count=DayCount.ACT_365F)
+    if rate is None or not math.isfinite(rate) or rate <= -1:
         return None
-    for _ in range(200):
-        mid = (lo + hi) / 2.0
-        f_mid = _xnpv(mid, cashflows)
-        if abs(f_mid) < 1e-7:
-            return mid
-        if f_lo * f_mid < 0:
-            hi, f_hi = mid, f_mid
-        else:
-            lo, f_lo = mid, f_mid
-    return (lo + hi) / 2.0
+    return rate
 
 
-def xirr_from_growth(frame, start=None, benchmark=False):
+def xirr_from_growth(frame, start=None, benchmark=False, end=None):
     if frame is None or frame.empty:
+        return None
+    if end is not None:
+        frame = frame.loc[frame.index <= pd.Timestamp(end)]
+    if frame.empty:
         return None
     selected = frame.loc[frame.index >= start] if start is not None else frame
     if selected.empty:

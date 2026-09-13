@@ -1,6 +1,7 @@
 streamlit
 pandas
 numpy
+pyxirr>=0.10,<0.11
 plotly
 python-dotenv
 requests

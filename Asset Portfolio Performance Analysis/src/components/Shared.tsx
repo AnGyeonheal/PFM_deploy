@@ -1,7 +1,8 @@
 export type AnalysisOptions = {
   includeDividend: boolean;
   includeFx: boolean;
-  period: "1M" | "3M" | "6M" | "1Y" | "5Y" | "ALL";
+  period: "1M" | "3M" | "6M" | "1Y" | "5Y" | "ALL" | "YOY";
+  year?: number;
   scope: "total" | "stock";
   ticker: string;
 };
@@ -13,6 +14,7 @@ export const PERIODS: { key: AnalysisOptions["period"]; label: string }[] = [
   { key: "1Y", label: "1년" },
   { key: "5Y", label: "5년" },
   { key: "ALL", label: "전체" },
+  { key: "YOY", label: "연도별(YoY)" },
 ];
 
 export type AnalysisCoverage = {
@@ -20,7 +22,15 @@ export type AnalysisCoverage = {
   includedSymbols: string[];
   excludedSymbols: string[];
   warnings: string[];
+  asOf?: string | null;
 };
+
+export function AnalysisPeriodLabel({ opts, asOf }: { opts: AnalysisOptions; asOf?: string | null }) {
+  if (opts.period !== "YOY") return null;
+  return <div aria-label="분석 기간" className="text-xs text-[#a0a8c0] font-mono">
+    {opts.year ?? new Date().getFullYear()}년 · {opts.year ?? new Date().getFullYear()}-01-01 ~ {asOf ?? "데이터 없음"}
+  </div>;
+}
 
 export function AnalysisNotice({ analysis }: { analysis?: AnalysisCoverage }) {
   if (!analysis || analysis.status === "complete") return null;
@@ -109,15 +119,18 @@ export const CustomTooltip = ({ active, payload, label }: any) => {
 };
 
 export function AnalysisBar({
-  opts, setOpts, tickers = [], showPeriod = true,
+  opts, setOpts, tickers = [], years = [], showPeriod = true,
 }: {
   opts: AnalysisOptions;
   setOpts: (o: AnalysisOptions) => void;
   tickers?: { ticker: string; name: string }[];
+  years?: number[];
   showPeriod?: boolean;
 }) {
   const toggle = (key: keyof Pick<AnalysisOptions, "includeDividend" | "includeFx">) =>
     setOpts({ ...opts, [key]: !opts[key] });
+  const selectedYear = opts.year ?? new Date().getFullYear();
+  const yearOptions = [...new Set([selectedYear, ...years])].sort((first, second) => second - first);
 
   return (
     <div className="flex flex-wrap items-center gap-3 bg-[#111520] border border-white/7 rounded-sm px-4 py-2.5">
@@ -147,6 +160,12 @@ export function AnalysisBar({
           {p.label}
         </button>
       ))}
+      {showPeriod && opts.period === "YOY" && (
+        <select aria-label="분석 연도" value={selectedYear} onChange={event => setOpts({ ...opts, year: Number(event.target.value) })}
+          className="text-xs font-mono bg-[#0a0d14] border border-white/10 rounded-sm px-2 py-1.5 text-[#e8eaf0] focus:outline-none focus:border-[#00d4a1]/50">
+          {yearOptions.map(year => <option key={year} value={year}>{year}년{year === new Date().getFullYear() ? " (진행 중)" : ""}</option>)}
+        </select>
+      )}
       <div className="w-px h-4 bg-white/10" />
       {/* G5 scope */}
       <div className="flex gap-0 border border-white/10 rounded-sm overflow-hidden">
@@ -159,7 +178,7 @@ export function AnalysisBar({
         ))}
       </div>
       {opts.scope === "stock" && (
-        <select value={opts.ticker} onChange={e => setOpts({ ...opts, ticker: e.target.value })}
+        <select aria-label="분석 종목" value={opts.ticker} onChange={e => setOpts({ ...opts, ticker: e.target.value })}
           className="text-xs font-mono bg-[#0a0d14] border border-white/10 rounded-sm px-2 py-1.5 text-[#e8eaf0] focus:outline-none focus:border-[#00d4a1]/50">
           {tickers.length === 0 && <option value="">종목 없음</option>}
           {tickers.map(t => <option key={t.ticker} value={t.ticker}>{t.name || t.ticker}</option>)}

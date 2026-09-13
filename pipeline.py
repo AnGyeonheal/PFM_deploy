@@ -569,11 +569,11 @@ def holdings_price_overrides(overrides=None):
     return out
 
 
-def growth_frame(combined_orders, fx_rate, ticker=None, include_div=True, include_fx=True):
+def growth_frame(combined_orders, fx_rate, ticker=None, include_div=True, include_fx=True, end=None):
     """보유 자산가치(원금+수익금) 성장 추이 프레임. 배당·환차손익 반영 여부 토글."""
     tk = ticker or None
     div_events = _dated_div_events(combined_orders, fx_rate, tk)
-    return build_asset_value_growth(combined_orders, fx_rate, div_events, tk, include_div, include_fx)
+    return build_asset_value_growth(combined_orders, fx_rate, div_events, tk, include_div, include_fx, end=end)
 
 
 def trade_bars(combined_orders, ticker=None, fx=1400.0):
@@ -589,9 +589,9 @@ def rolling_beta(combined_orders, fx, ticker=None, include_div=True, include_fx=
     return compute_rolling_beta(combined_orders, fx, ticker, include_div=include_div, include_fx=include_fx, div_events=events)
 
 
-def spy_dca(combined_orders, fx, start_ym=None, ticker=None, include_div=True, include_fx=True):
+def spy_dca(combined_orders, fx, start_ym=None, ticker=None, include_div=True, include_fx=True, end=None):
     events = _dated_div_events(combined_orders, fx, ticker) if include_div else []
-    return build_spy_dca(combined_orders, fx, start_ym, ticker, include_div, include_fx, events)
+    return build_spy_dca(combined_orders, fx, start_ym, ticker, include_div, include_fx, events, end=end)
 
 
 def twr_comparison(combined_orders, fx, ticker=None, include_fx=True, include_div=True):

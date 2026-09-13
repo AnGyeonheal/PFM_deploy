@@ -44,8 +44,9 @@ export default function App() {
   const [phase, setPhase] = useState<Phase>("onboard");
   const [page, setPage] = useState<Page>("dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(() => window.matchMedia("(min-width: 768px)").matches);
-  const [opts, setOpts] = useState<AnalysisOptions>({ includeDividend: true, includeFx: true, period: "1Y", scope: "total", ticker: "" });
+  const [opts, setOpts] = useState<AnalysisOptions>({ includeDividend: true, includeFx: true, period: "1Y", scope: "total", ticker: "", year: new Date().getFullYear() });
   const [tickers, setTickers] = useState<{ ticker: string; name: string }[]>([]);
+  const [years, setYears] = useState<number[]>([]);
 
   useEffect(() => {
     const media = window.matchMedia("(min-width: 768px)");
@@ -164,12 +165,12 @@ export default function App() {
           <div className="flex-1"><h1 className="text-sm font-medium text-[#e8eaf0]">{PAGE_LABELS[page]}</h1></div>
         </header>
         {ANALYSIS_PAGES.includes(page) && (
-          <div className="px-3 md:px-6 pt-4"><AnalysisBar opts={opts} setOpts={setOpts} tickers={tickers} showPeriod={page === "dashboard" || page === "benchmark"} /></div>
+          <div className="px-3 md:px-6 pt-4"><AnalysisBar opts={opts} setOpts={setOpts} tickers={tickers} years={years} /></div>
         )}
         <main className="flex-1 overflow-y-auto px-3 md:px-6 py-6">
-          {page === "dashboard" && <Dashboard opts={opts} onTickers={setTickers} />}
-          {page === "performance" && <Performance opts={opts} onTickers={setTickers} />}
-          {page === "benchmark" && <Benchmark opts={opts} onTickers={setTickers} />}
+          {page === "dashboard" && <Dashboard opts={opts} onTickers={setTickers} onYears={setYears} />}
+          {page === "performance" && <Performance opts={opts} onTickers={setTickers} onYears={setYears} />}
+          {page === "benchmark" && <Benchmark opts={opts} onTickers={setTickers} onYears={setYears} />}
           {page === "fx" && <FxRates />}
           {page === "ai" && <AIAssistant />}
         </main>

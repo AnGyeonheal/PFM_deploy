@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { PieChart, Pie, Cell, AreaChart, Area, BarChart, Bar, LabelList, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
-import { Card, CardHeader, formatKRW, ReturnBadge, PnLText, CustomTooltip, AnalysisNotice, type AnalysisOptions } from "../components/Shared";
+import { Card, CardHeader, formatKRW, ReturnBadge, PnLText, CustomTooltip, AnalysisNotice, AnalysisPeriodLabel, type AnalysisOptions } from "../components/Shared";
 
 const ALLOC_COLORS = ["#00d4a1", "#4f8cff", "#6b7494", "#a78bfa", "#f0a500", "#ff5c6a", "#12b981", "#ff9f40"];
 
@@ -10,7 +10,7 @@ const DeltaText = ({ value, digits }: { value: number; digits: number }) => {
   return <span className={`font-mono text-xs ${pos ? "text-[#00d4a1]" : "text-[#ff5c6a]"}`}>{pos ? "▲" : "▼"} {Math.abs(value).toFixed(digits)}</span>;
 };
 
-export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; onTickers?: (t: { ticker: string; name: string }[]) => void }) {
+export default function Dashboard({ opts, onTickers, onYears }: { opts: AnalysisOptions; onTickers?: (t: { ticker: string; name: string }[]) => void; onYears?: (years: number[]) => void }) {
   const [d, setD] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -22,14 +22,14 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
     setLoading(true);
     setError(false);
     const stockQ = opts.scope === "stock" && opts.ticker ? `&ticker=${encodeURIComponent(opts.ticker)}` : "";
-    const q = `div=${opts.includeDividend ? 1 : 0}&fx=${opts.includeFx ? 1 : 0}${stockQ}&period=${opts.period}`;
+    const q = `div=${opts.includeDividend ? 1 : 0}&fx=${opts.includeFx ? 1 : 0}${stockQ}&period=${opts.period}&year=${opts.year ?? new Date().getFullYear()}`;
     fetch(`/api/app/dashboard?${q}`, { credentials: "include", signal: controller.signal })
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
-      .then((data) => { setD(data); if (data?.tickers?.length && onTickers) onTickers(data.tickers); })
+      .then((data) => { if (controller.signal.aborted) return; setD(data); if (data?.tickers?.length && onTickers) onTickers(data.tickers); if (data?.years && onYears) onYears(data.years); })
       .catch(() => { if (!controller.signal.aborted) setError(true); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [opts.includeDividend, opts.includeFx, opts.scope, opts.ticker, opts.period]);
+  }, [opts.includeDividend, opts.includeFx, opts.scope, opts.ticker, opts.period, opts.year]);
 
   if (loading) return <div className="text-[#6b7494] text-sm p-10 text-center font-mono">불러오는 중…</div>;
   if (error || !d) return <div className="text-[#ff5c6a] text-sm p-10 text-center font-mono">데이터를 불러오지 못했습니다. 로그인 상태를 확인하세요.</div>;
@@ -62,12 +62,13 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
 
   return (
     <div className="space-y-6">
+      <AnalysisPeriodLabel opts={opts} asOf={d.analysis?.asOf} />
       <AnalysisNotice analysis={d.analysis} />
       {/* KPI Row - D1 */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         {[
           {
-            label: "총 자산", value: formatKRW(m.totalAsset),
+            label: opts.period === "YOY" ? "총 자산 (현재)" : "총 자산", value: formatKRW(m.totalAsset),
             sub: d.changes && d.changes.totalAssetDelta != null
               ? `전일 대비 ${d.changes.totalAssetDelta >= 0 ? "+" : ""}${formatKRW(d.changes.totalAssetDelta, true)}${d.changes.totalAssetDeltaPct != null ? ` (${d.changes.totalAssetDeltaPct >= 0 ? "+" : ""}${d.changes.totalAssetDeltaPct}%)` : ""}`
               : `현금 ${formatKRW(m.cash, true)} 포함`,
@@ -80,11 +81,11 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
           },
           {
             label: "연평균 수익률", value: m.xirr != null ? `${m.xirr >= 0 ? "+" : ""}${m.xirr.toFixed(2)}%` : "—",
-            sub: d.analysis?.status === "partial" ? "XIRR · 일부 종목 기준" : "XIRR · 투자원금 흐름 반영",
+            sub: `${opts.period === "YOY" ? `${opts.year ?? new Date().getFullYear()}년 ` : ""}XIRR · ${d.analysis?.status === "partial" ? "일부 종목 기준" : "투자원금 흐름 반영"}`,
             highlight: m.xirr != null, positive: (m.xirr || 0) >= 0,
           },
           {
-            label: d.analysis?.status === "partial" ? "분석 종목 평가액" : "주식 평가액", value: formatKRW(m.totalCurrent),
+            label: opts.period === "YOY" ? "기말 주식 평가액" : d.analysis?.status === "partial" ? "분석 종목 평가액" : "주식 평가액", value: formatKRW(m.totalCurrent),
             sub: `매입원가 ${formatKRW(m.totalBuy, true)}`, highlight: false,
           },
           {
@@ -267,12 +268,12 @@ export default function Dashboard({ opts, onTickers }: { opts: AnalysisOptions; 
 
       {/* Holdings - D2, D3 */}
       <Card>
-        <CardHeader title="보유 종목" sub={`${stocks.length}개 종목`} />
+        <CardHeader title={opts.period === "YOY" ? "종목별 연간 성과" : "보유 종목"} sub={`${stocks.length}개 종목`} />
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-white/7">
-                {["종목", "현재가", "평단가", "매입환율", "수량", "평가액", "매입원가", "평가손익", "수익률"].map(h => (
+                {(opts.period === "YOY" ? ["종목", "현재가", "현재 평단가", "매입환율", "현재 수량", "기말 평가액", "기말 원가", "기간 평가손익", "연간 수익률"] : ["종목", "현재가", "평단가", "매입환율", "수량", "평가액", "매입원가", "평가손익", "수익률"]).map(h => (
                   <th key={h} className="px-4 py-3 text-left text-xs text-[#6b7494] font-mono uppercase tracking-wider">{h}</th>
                 ))}
               </tr>

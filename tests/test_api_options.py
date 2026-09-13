@@ -63,6 +63,62 @@ class ApiOptionTests(unittest.TestCase):
         self.assertEqual(result["growth"], [])
         self.assertTrue(all(value is None for value in result["summary"].values()))
 
+    def test_year_end_excludes_later_transactions_and_valuation(self):
+        year_end = pd.Timestamp(year=self.fixture.index[0].year, month=12, day=31)
+        expected = pme.build_asset_value_growth(self.fixture.orders, ticker="NVDA", include_div=False)
+        future_sale = {"symbol": "NVDA", "currency": "USD", "side": "SELL",
+                       "execution": {"filledAt": str(year_end + pd.Timedelta(days=1)),
+                                     "filledQuantity": 1000, "averageFilledPrice": 100}}
+        frame = pme.build_asset_value_growth(self.fixture.orders + [future_sale], ticker="NVDA",
+                                             include_div=False, end=year_end)
+        self.assertFalse(frame.empty)
+        self.assertEqual(frame.index[-1], year_end)
+        pd.testing.assert_frame_equal(frame, expected.loc[:year_end])
+
+    def test_calendar_year_options_use_identical_boundaries_across_views(self):
+        for dividend, fx, ticker, year in product((0, 1), (0, 1), ("", "NVDA", "360750"),
+                                                  (self.fixture.index[0].year, self.fixture.index[-1].year)):
+            with self.subTest(dividend=dividend, fx=fx, ticker=ticker, year=year):
+                options = dict(div=dividend, fx=fx, ticker=ticker, period="YOY", year=year)
+                dashboard = json.loads(webapp.api_app_dashboard(None, **options).body)
+                benchmark = json.loads(webapp.api_app_benchmark(None, **options).body)
+                full = pme.build_asset_value_growth(self.fixture.orders, div_events=self.fixture.dividends,
+                                                     ticker=ticker or None, include_div=bool(dividend), include_fx=bool(fx))
+                truncated = full.loc[:pd.Timestamp(year, 12, 31)]
+                stats = pme.comparison_statistics(truncated, pd.Timestamp(year, 1, 1))
+                expected = stats["returns"]["portfolio"].iloc[-1]
+                self.assertAlmostEqual(dashboard["metrics"]["returnPct"], expected)
+                self.assertAlmostEqual(dashboard["metrics"]["xirr"], pme.xirr_from_growth(truncated, pd.Timestamp(year, 1, 1)))
+                self.assertAlmostEqual(dashboard["metrics"]["projectionRate"], pme.xirr_from_growth(full))
+                self.assertEqual(benchmark["summary"]["portfolioReturn"], round(expected, 2))
+                self.assertIsNone(dashboard["changes"])
+                for chart in (dashboard["growth"], benchmark["growth"], benchmark["monthlyAlpha"], benchmark["rollingBeta"]):
+                    self.assertTrue(all(row["month"].startswith(f"{year % 100:02d}/") for row in chart))
+                self.assertEqual(dashboard["analysis"]["asOf"], truncated.index[-1].strftime("%Y-%m-%d"))
+                self.assertIn(year, dashboard["years"])
+                self.assertEqual(dashboard["years"], benchmark["years"])
+                if ticker:
+                    self.assertEqual(benchmark["perStock"][0]["returnPct"], round(expected, 2))
+
+    def test_calendar_year_before_first_investment_is_unavailable(self):
+        year = self.fixture.index[0].year - 1
+        for endpoint in (webapp.api_app_dashboard, webapp.api_app_benchmark):
+            result = json.loads(endpoint(None, ticker="NVDA", period="YOY", year=year).body)
+            self.assertEqual(result["growth"], [])
+            if "metrics" in result:
+                self.assertIsNone(result["metrics"]["xirr"])
+                self.assertIsNone(result["metrics"]["returnPct"])
+            else:
+                self.assertIsNone(result["summary"]["portfolioReturn"])
+
+    def test_year_bounds_reject_future_years_and_preserve_leap_day(self):
+        start, end = webapp._period_bounds("YOY", 2024, today="2024-02-29")
+        self.assertEqual(start, pd.Timestamp("2024-01-01"))
+        self.assertEqual(end, pd.Timestamp("2024-02-29"))
+        with self.assertRaises(webapp.HTTPException) as error:
+            webapp._period_bounds("YOY", 2027, today="2026-09-13")
+        self.assertEqual(error.exception.status_code, 422)
+
 
 if __name__ == "__main__":
     unittest.main()

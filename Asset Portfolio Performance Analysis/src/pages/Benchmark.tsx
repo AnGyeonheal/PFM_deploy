@@ -3,7 +3,7 @@ import {
   AreaChart, Area, LineChart, Line, BarChart, Bar, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
-import { Card, CardHeader, CustomTooltip, ReturnBadge, formatKRW, AnalysisNotice, type AnalysisCoverage, type AnalysisOptions } from "../components/Shared";
+import { Card, CardHeader, CustomTooltip, ReturnBadge, formatKRW, AnalysisNotice, AnalysisPeriodLabel, type AnalysisCoverage, type AnalysisOptions } from "../components/Shared";
 
 type Summary = { portfolioReturn: number | null; sp500Return: number | null; alpha: number | null; regressionAlpha: number | null; beta: number | null; corr: number | null; sharpe: number | null; twrReturn: number | null };
 type PerStock = { ticker: string; name: string; returnPct: number | null; alpha: number | null; beta: number | null; alphaContrib: number | null; betaContrib: number | null };
@@ -18,6 +18,7 @@ type BenchData = {
   tickers?: { ticker: string; name: string }[];
   warnings?: string[];
   analysis?: AnalysisCoverage;
+  years?: number[];
 };
 
 const signedPercent = (value: number | null, unit = "%") => value == null || !Number.isFinite(value)
@@ -47,7 +48,7 @@ const ChartTooltip = ({ active, payload, label, isPct }: any) => {
   );
 };
 
-export default function Benchmark({ opts, onTickers }: { opts: AnalysisOptions; onTickers?: (t: { ticker: string; name: string }[]) => void }) {
+export default function Benchmark({ opts, onTickers, onYears }: { opts: AnalysisOptions; onTickers?: (t: { ticker: string; name: string }[]) => void; onYears?: (years: number[]) => void }) {
   const [simStart, setSimStart] = useState("");
   const [chartMode, setChartMode] = useState<"amount" | "pct">("amount");
   const [d, setD] = useState<BenchData | null>(null);
@@ -58,14 +59,14 @@ export default function Benchmark({ opts, onTickers }: { opts: AnalysisOptions; 
     const controller = new AbortController();
     setLoading(true);
     const stockQ = opts.scope === "stock" && opts.ticker ? `&ticker=${encodeURIComponent(opts.ticker)}` : "";
-    const qs = `div=${opts.includeDividend ? 1 : 0}&fx=${opts.includeFx ? 1 : 0}${simStart ? `&start=${simStart}` : ""}${stockQ}&period=${opts.period}`;
+    const qs = `div=${opts.includeDividend ? 1 : 0}&fx=${opts.includeFx ? 1 : 0}${simStart ? `&start=${simStart}` : ""}${stockQ}&period=${opts.period}&year=${opts.year ?? new Date().getFullYear()}`;
     fetch(`/api/app/benchmark?${qs}`, { credentials: "include", signal: controller.signal })
       .then(r => { if (!r.ok) throw new Error("데이터를 불러오지 못했습니다"); return r.json(); })
-      .then(j => { setD(j); setErr(""); if (j?.tickers?.length && onTickers) onTickers(j.tickers); })
+      .then(j => { if (controller.signal.aborted) return; setD(j); setErr(""); if (j?.tickers?.length && onTickers) onTickers(j.tickers); if (j?.years && onYears) onYears(j.years); })
       .catch(e => { if (!controller.signal.aborted) setErr(String(e.message || e)); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [opts.includeDividend, opts.includeFx, simStart, opts.scope, opts.ticker, opts.period]);
+  }, [opts.includeDividend, opts.includeFx, simStart, opts.scope, opts.ticker, opts.period, opts.year]);
 
   if (loading) return <div className="text-[#6b7494] text-sm py-20 text-center">불러오는 중…</div>;
   if (err) return <div className="text-[#ff5c6a] text-sm py-20 text-center">{err}</div>;
@@ -80,6 +81,7 @@ export default function Benchmark({ opts, onTickers }: { opts: AnalysisOptions; 
 
   return (
     <div className="space-y-6">
+      <AnalysisPeriodLabel opts={opts} asOf={d.analysis?.asOf} />
       <AnalysisNotice analysis={d.analysis} />
       {/* F1/F2 Summary */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">

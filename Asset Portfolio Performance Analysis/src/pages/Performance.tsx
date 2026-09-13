@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from "recharts";
-import { Card, CardHeader, formatKRW, ReturnBadge, PnLText, CustomTooltip, AnalysisNotice, type AnalysisCoverage, type AnalysisOptions } from "../components/Shared";
+import { Card, CardHeader, formatKRW, ReturnBadge, PnLText, CustomTooltip, AnalysisNotice, AnalysisPeriodLabel, type AnalysisCoverage, type AnalysisOptions } from "../components/Shared";
 
 type Metrics = {
   totalBuy: number; unrealizedPnL: number | null; realizedPnL: number | null;
@@ -13,7 +13,7 @@ type StockRow = {
   analysis?: AnalysisCoverage;
 };
 
-export default function Performance({ opts, onTickers }: { opts: AnalysisOptions; onTickers?: (t: { ticker: string; name: string }[]) => void }) {
+export default function Performance({ opts, onTickers, onYears }: { opts: AnalysisOptions; onTickers?: (t: { ticker: string; name: string }[]) => void; onYears?: (years: number[]) => void }) {
   const [m, setM] = useState<Metrics | null>(null);
   const [rows, setRows] = useState<StockRow[]>([]);
   const [analysis, setAnalysis] = useState<AnalysisCoverage>();
@@ -24,13 +24,13 @@ export default function Performance({ opts, onTickers }: { opts: AnalysisOptions
     const controller = new AbortController();
     setLoading(true);
     const stockQ = opts.scope === "stock" && opts.ticker ? `&ticker=${encodeURIComponent(opts.ticker)}` : "";
-    fetch(`/api/app/dashboard?div=${opts.includeDividend ? 1 : 0}&fx=${opts.includeFx ? 1 : 0}${stockQ}`, { credentials: "include", signal: controller.signal })
+    fetch(`/api/app/dashboard?div=${opts.includeDividend ? 1 : 0}&fx=${opts.includeFx ? 1 : 0}${stockQ}&period=${opts.period}&year=${opts.year ?? new Date().getFullYear()}`, { credentials: "include", signal: controller.signal })
       .then(r => { if (!r.ok) throw new Error("데이터를 불러오지 못했습니다"); return r.json(); })
-      .then(d => { setM(d.metrics); setRows(d.stocks || []); setAnalysis(d.analysis); setErr(""); if (d?.tickers?.length && onTickers) onTickers(d.tickers); })
+      .then(d => { if (controller.signal.aborted) return; setM(d.metrics); setRows(d.stocks || []); setAnalysis(d.analysis); setErr(""); if (d?.tickers?.length && onTickers) onTickers(d.tickers); if (d?.years && onYears) onYears(d.years); })
       .catch(e => { if (!controller.signal.aborted) setErr(String(e.message || e)); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [opts.includeDividend, opts.includeFx, opts.scope, opts.ticker]);
+  }, [opts.includeDividend, opts.includeFx, opts.scope, opts.ticker, opts.period, opts.year]);
 
   if (loading) return <div className="text-[#6b7494] text-sm py-20 text-center">불러오는 중…</div>;
   if (err) return <div className="text-[#ff5c6a] text-sm py-20 text-center">{err}</div>;
@@ -61,6 +61,7 @@ export default function Performance({ opts, onTickers }: { opts: AnalysisOptions
 
   return (
     <div className="space-y-6">
+      <AnalysisPeriodLabel opts={opts} asOf={analysis?.asOf} />
       <AnalysisNotice analysis={analysis} />
       {/* E2 Summary */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
