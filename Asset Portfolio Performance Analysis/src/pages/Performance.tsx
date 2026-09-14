@@ -64,17 +64,18 @@ export default function Performance({ opts, onTickers, onYears }: { opts: Analys
       <AnalysisPeriodLabel opts={opts} asOf={analysis?.asOf} />
       <AnalysisNotice analysis={analysis} />
       {/* E2 Summary */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div aria-label="손익 요약" className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         {[
           { label: "총 손익", value: totalPnL, isKRW: true, positive: (totalPnL ?? 0) >= 0 },
           { label: "총 수익률", value: totalReturn, isKRW: false, positive: (totalReturn ?? 0) >= 0 },
-          { label: "평가손익", value: unrealized, isKRW: true, positive: (unrealized ?? 0) >= 0 },
-          { label: "실현손익", value: realized, isKRW: true, positive: (realized ?? 0) >= 0 },
+          { label: "실현 손익", value: realized, isKRW: true, positive: (realized ?? 0) >= 0 },
+          { label: "미실현 손익", value: unrealized, isKRW: true, positive: (unrealized ?? 0) >= 0 },
+          { label: "배당 손익", value: dividend, isKRW: true, positive: (dividend ?? 0) >= 0, excluded: !opts.includeDividend },
         ].map(k => (
-          <Card key={k.label} className="p-5">
-            <div className="text-xs text-[#6b7494] uppercase tracking-widest font-mono mb-3">{k.label}</div>
-            <div className={`font-['DM_Serif_Display',serif] text-2xl ${k.positive ? "text-[#00d4a1]" : "text-[#ff5c6a]"}`}>
-              {k.value == null ? "—" : k.isKRW ? `${k.value >= 0 ? "+" : ""}${formatKRW(k.value)}` : `${k.value >= 0 ? "+" : ""}${k.value.toFixed(2)}%`}
+          <Card key={k.label} className="p-5 min-w-0">
+            <div className="text-xs text-[#6b7494] uppercase tracking-widest font-mono mb-3">{k.label}{k.excluded && " (제외)"}</div>
+            <div className={`font-['DM_Serif_Display',serif] text-2xl break-all ${k.value == null || k.value === 0 || k.excluded ? "text-[#a0a8c0]" : k.positive ? "text-[#00d4a1]" : "text-[#ff5c6a]"}`}>
+              {k.value == null || !Number.isFinite(k.value) ? "—" : k.isKRW ? `${Math.round(k.value) > 0 ? "+" : ""}${Math.round(k.value).toLocaleString("ko-KR")}원` : `${k.value >= 0 ? "+" : ""}${k.value.toFixed(2)}%`}
             </div>
           </Card>
         ))}
@@ -138,7 +139,7 @@ export default function Performance({ opts, onTickers, onYears }: { opts: Analys
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-white/7">
-                {["종목", "상태", "투자원가", "평가손익", "실현손익", opts.includeDividend ? "배당" : null, "총손익", "수익률"].filter(Boolean).map(h => (
+                {["종목", "상태", "투자원가", "미실현 손익", "실현 손익", opts.includeDividend ? "배당 손익" : null, "총손익", "수익률"].filter(Boolean).map(h => (
                   <th key={h!} className="px-4 py-3 text-left text-xs text-[#6b7494] font-mono uppercase tracking-wider">{h}</th>
                 ))}
               </tr>

@@ -116,6 +116,15 @@ Period profit components are changes from the opening snapshot. The displayed
 FX component is the difference between price profit with actual FX and with
 fixed purchase FX, so price profit + FX profit + dividends = total profit.
 
+The dashboard and performance summaries separately display realized profit,
+unrealized profit and dividend profit for the selected interval in KRW. These
+use the existing ledger components; FX is already reflected according to the
+FX option and is not added a second time. Dividend exclusion shows zero with
+an excluded label; unavailable components remain unavailable rather than zero.
+Amounts are rounded to whole won for display, so component rounding can differ
+from a rounded total by one won. For a bounded interval, unrealized profit is
+the change in unrealized P&L, not the separate closing-position holding P&L.
+
 Daily TWR assumes end-of-day external cash flows:
 
 $$ 1+r_t = (V_t + S_t - B_t) / V_{t-1} $$

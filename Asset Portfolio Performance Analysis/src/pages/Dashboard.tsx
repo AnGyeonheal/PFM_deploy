@@ -155,6 +155,34 @@ export default function Dashboard({ opts, onTickers, onYears }: { opts: Analysis
         ))}
       </div>
 
+      <section aria-label="손익 구분" className="border-y border-white/10 py-4">
+        <div className="flex flex-wrap items-baseline justify-between gap-2 mb-4">
+          <h2 className="text-sm font-medium text-[#e8eaf0]">손익 구분</h2>
+          <span className="text-xs text-[#6b7494]">선택기간 · 원화 환산</span>
+        </div>
+        <dl className="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-white/10">
+          {[
+            { label: "실현 손익", value: m.realizedPnL, title: "선택기간에 매도로 실현한 손익" },
+            { label: "미실현 손익", value: m.unrealizedPnL, title: "선택기간 동안의 평가손익 변동. 전체기간 선택 시 현재 보유분 평가손익." },
+            { label: "배당 손익", value: m.dividendPnL, title: "선택기간의 배당·분배금", excluded: !opts.includeDividend },
+          ].map(item => {
+            const value = typeof item.value === "number" && Number.isFinite(item.value) ? item.value : null;
+            const displayed = value == null ? null : Math.round(value);
+            return (
+              <div key={item.label} role="group" aria-label={item.label} className="min-w-0 py-4 first:pt-0 last:pb-0 md:py-0 md:px-5 md:first:pl-0 md:last:pr-0">
+                <dt title={item.title} className="flex items-center gap-2 text-xs text-[#a0a8c0]">
+                  {item.label}
+                  {item.excluded && <span className="text-[#6b7494]">(제외)</span>}
+                </dt>
+                <dd className={`mt-2 text-xl font-mono tabular-nums break-all ${value == null || displayed === 0 || item.excluded ? "text-[#a0a8c0]" : value > 0 ? "text-[#00d4a1]" : "text-[#ff5c6a]"}`}>
+                  {displayed == null ? "—" : `${displayed > 0 ? "+" : ""}${displayed.toLocaleString("ko-KR")}원`}
+                </dd>
+              </div>
+            );
+          })}
+        </dl>
+      </section>
+
       {/* 전일 대비 변동 */}
       {d.changes && (
         <Card>
