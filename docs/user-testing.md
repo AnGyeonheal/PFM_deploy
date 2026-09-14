@@ -116,6 +116,55 @@ An unavailable IP lookup is displayed as unknown, not guessed.
   settings routes that bypass the new flow, rejects cross-origin writes and uses
   no-store headers for private responses. Restore accepts only local snapshot IDs.
 
+## Import Failure Diagnostics
+
+Analysis errors show a safe reason, suggested next action, failed stage and, when
+available, the file, sheet and split chunk. The chunk is not an Excel row number.
+The error code, response wait time and request ID help the operator find the
+matching server event. An analysis failure does not confirm or save any rows,
+including rows parsed successfully before another chunk failed.
+
+Common codes:
+
+| Code | Meaning and Next Step |
+| --- | --- |
+| `GEMINI_QUOTA` | Google request/usage limit; retry later and check project quotas/billing. This does not necessarily mean the daily free quota. |
+| `AI_REQUEST_LIMIT` | This application's hourly request limit, separate from Google's quotas. |
+| `GEMINI_NOT_CONFIGURED`, `GEMINI_AUTH` | The operator must check the server key, restrictions and permissions. Do not ask testers to submit keys in error reports. |
+| `GEMINI_TIMEOUT`, `GEMINI_UNAVAILABLE` | Provider timeout or connection/service failure; retry later, with smaller files if needed. |
+| `GEMINI_MODEL_UNAVAILABLE` | The configured model is missing or inaccessible. |
+| `GEMINI_INPUT_LIMIT`, `GEMINI_OUTPUT_LIMIT` | Input/output length limit; split the file by date or reduce unnecessary columns. |
+| `GEMINI_BLOCKED` | Google restricted the response; remove unnecessary personal/free-text content and request operator review. |
+| `GEMINI_INVALID_JSON`, `GEMINI_INVALID_RESPONSE` | The response is not valid JSON or not a transaction/dividend list. It is not evidence that the file contains no trades. |
+| `GEMINI_EMPTY_RESPONSE`, `GEMINI_INCOMPLETE_RESPONSE` | No readable response or abnormal completion. A valid empty dividend list is allowed. |
+| `FILE_READ_FAILED`, `FILE_EMPTY`, `IMPORT_ROW_TOO_LONG`, `IMPORT_TOO_LARGE` | Check file format, text extraction or upload size; the failing source is included where available. |
+| `VALIDATION_FAILED` | Use the existing full unmapped/invalid-row report to correct the source. |
+| `NO_RECORDS` | Both model lists are empty; verify the selected sheets contain executions or dividend receipts. |
+| `GEMINI_INVALID_REQUEST`, `GEMINI_UNKNOWN`, `IMPORT_INTERNAL_ERROR` | Operator investigation is required; unrecognized errors are not assigned a guessed cause. |
+
+The API preserves an `error` string and adds `failure` and `saved: false` for
+analysis failures. `failure.requestId` matches `X-Request-ID`. Google status codes
+are separate from the application's HTTP status (for example, Google 403 is
+reported as server configuration failure 503). Safe model-attempt codes are
+retained; the final missing-model error cannot hide an earlier quota/auth failure.
+
+The `uvicorn.error` logger emits `import_result` JSON events with the request ID,
+time, elapsed seconds, stage, chunk, status, safe error code and safe model-attempt
+statuses. It does not record upload filenames, user/account identifiers, raw
+transaction text, model response bodies or exception messages. Share the request
+ID with the operator; do not send credentials or unredacted trade files. Configure
+log retention privately if diagnostics must survive terminal/server restarts.
+
+The browser also handles non-JSON proxy responses: HTTP 524 is a Cloudflare wait
+timeout, 502/503 are server/proxy errors, 413 is an upload limit and 401 requires
+login. It displays `CF-Ray` when supplied, but never renders the proxy's HTML.
+A network error or proxy timeout does not prove that the server stopped working;
+analysis may continue. Avoid repeated immediate uploads. No save confirmation is
+sent by analysis. Request IDs may be unavailable when a proxy rejects the request
+before the application responds. Existing historical failures cannot be diagnosed
+retroactively from status-only logs. This change does not extend tunnel timeouts
+or introduce background jobs.
+
 ## Checks
 
 ```powershell

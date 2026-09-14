@@ -6,6 +6,7 @@
 import io
 import os
 import json
+import logging
 import math
 import time
 import asyncio
@@ -1152,6 +1153,22 @@ def _validate_import_rows(rows, broker, dividend=False):
     return normalized
 
 
+class _ImportFailure(ValueError):
+    def __init__(self, code, message, action, *, source=None, stage="read", status=422,
+                 provider_status=None, attempts=None):
+        super().__init__(message)
+        self.status = status
+        self.details = {"code": code, "action": action, "stage": stage, "source": source,
+                        "providerStatus": provider_status, "attempts": attempts or []}
+
+    @classmethod
+    def from_gemini(cls, error, source, stage):
+        from ai_copilot import classify_gemini_error
+        reason = classify_gemini_error(error)
+        return cls(reason.code, str(reason), reason.action, source=source, stage=stage,
+                   status=reason.http_status, provider_status=reason.provider_status, attempts=reason.attempts)
+
+
 def _parse_import_files(uploads, broker):
     from ai_copilot import parse_brokerage_full_transactions, parse_brokerage_dividends
     raw_texts = []
@@ -1171,22 +1188,33 @@ def _parse_import_files(uploads, broker):
                     text = content.decode("cp949")
                 raw_texts.append((source, text))
         except Exception:
-            raise ValueError("파일을 읽지 못했습니다. 파일 형식과 문자 인코딩을 확인하세요.") from None
-    if not raw_texts or any(not text.strip() for _, text in raw_texts):
-        raise ValueError("내용을 읽지 못한 파일이 있습니다. 스캔 PDF 대신 CSV 또는 Excel을 사용해 주세요.")
-    chunks = [(dict(source, chunk=number), chunk) for source, text in raw_texts
-              for number, chunk in enumerate(_import_chunks(text), 1)]
+            raise _ImportFailure("FILE_READ_FAILED", "파일을 읽지 못했습니다.",
+                                 "암호 설정·파일 손상·문자 인코딩을 확인하고 CSV 또는 Excel로 다시 내보내세요.", source=source) from None
+    if not raw_texts:
+        raise _ImportFailure("FILE_EMPTY", "파일에서 분석할 내용을 찾지 못했습니다.", "빈 시트를 제외한 거래내역 파일을 선택하세요.")
+    chunks = []
+    for source, text in raw_texts:
+        if not text.strip():
+            raise _ImportFailure("FILE_EMPTY", "파일에서 텍스트를 추출하지 못했습니다.",
+                                 "스캔 PDF 대신 텍스트가 있는 CSV 또는 Excel 파일을 사용하세요.", source=source)
+        try:
+            chunks.extend((dict(source, chunk=number), chunk) for number, chunk in enumerate(_import_chunks(text), 1))
+        except ValueError:
+            raise _ImportFailure("IMPORT_ROW_TOO_LONG", "분석 가능한 길이를 초과한 행이 있습니다.",
+                                 "불필요한 긴 메모·설명 열을 제거하고 거래 표만 업로드하세요.", source=source, stage="split") from None
     if len(chunks) > 20:
-        raise ValueError("한 번에 분석할 수 있는 파일 분량을 초과했습니다. 파일을 나누어 업로드하세요.")
+        raise _ImportFailure("IMPORT_TOO_LARGE", f"분석 분량이 {len(chunks)}개 구간으로 최대 20개를 초과했습니다.",
+                             "파일을 분기·반기별로 나누어 한 개씩 업로드하세요.", stage="split")
     rows, dividends, issues = [], [], []
     for source, chunk in chunks:
-        parsed, error = parse_brokerage_full_transactions(chunk, broker)
-        if error:
-            raise ValueError("거래내역 AI 분석에 실패했습니다. 기존 데이터는 변경하지 않았습니다.")
-        parsed_dividends, dividend_error = parse_brokerage_dividends(chunk, broker)
-        if dividend_error:
-            raise ValueError("배당내역 AI 분석에 실패했습니다. 기존 데이터는 변경하지 않았습니다.")
-        for parsed_rows, is_dividend, target in ((parsed, False, rows), (parsed_dividends, True, dividends)):
+        for parser, is_dividend, target, stage in ((parse_brokerage_full_transactions, False, rows, "transactions"),
+                                                  (parse_brokerage_dividends, True, dividends, "dividends")):
+            try:
+                parsed_rows, error = parser(chunk, broker)
+            except Exception as error:
+                raise _ImportFailure.from_gemini(error, source, stage) from None
+            if error:
+                raise _ImportFailure.from_gemini(error, source, stage)
             try:
                 target.extend(_validate_import_rows(parsed_rows, broker, dividend=is_dividend))
             except _ImportValidationError as error:
@@ -1194,7 +1222,8 @@ def _parse_import_files(uploads, broker):
     if issues:
         raise _ImportValidationError(issues)
     if not rows and not dividends:
-        raise ValueError("거래·배당 내역을 찾지 못했습니다.")
+        raise _ImportFailure("NO_RECORDS", "AI 응답에 거래·배당 내역이 없습니다.",
+                             "실제 체결·입금 내역이 포함된 시트인지 확인하세요. 빈 결과만으로 원본에 거래가 없다고 단정할 수 없습니다.", stage="validation")
     return rows, dividends
 
 
@@ -1233,6 +1262,24 @@ async def api_app_import(request: Request, broker: str = Form("증권사"), cons
     user = _current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    started = time.monotonic()
+    request_id = _secrets.token_hex(8)
+
+    def log_result(status, code, details):
+        record = {"event": "import_result", "time": datetime.now().isoformat(), "requestId": request_id,
+                  "status": status, "code": code, "elapsedSeconds": round(time.monotonic() - started, 2),
+                  "stage": details.get("stage"), "chunk": (details.get("source") or {}).get("chunk"),
+                  "providerStatus": details.get("providerStatus"), "attempts": details.get("attempts", [])}
+        logging.getLogger("uvicorn.error").log(logging.WARNING if status >= 400 else logging.INFO,
+                                              "import_result %s", json.dumps(record, ensure_ascii=True))
+
+    def failed(failure, issues=None):
+        details = dict(failure.details, requestId=request_id, elapsedSeconds=round(time.monotonic() - started, 2))
+        log_result(failure.status, details["code"], details)
+        payload = {"ok": False, "saved": False, "error": str(failure), "failure": details}
+        if issues is not None:
+            payload.update(issues=issues, issueCount=len(issues))
+        return JSONResponse(payload, status_code=failure.status, headers={"X-Request-ID": request_id})
     if not consent:
         return JSONResponse({"error": "거래내역의 Google Gemini 전송에 동의해야 AI 분석을 사용할 수 있습니다."}, status_code=400)
     if not 1 <= len(files) <= 5 or not broker.strip() or len(broker) > 100:
@@ -1247,22 +1294,30 @@ async def api_app_import(request: Request, broker: str = Form("증권사"), cons
             return JSONResponse({"error": "파일 한 개는 5MB 이하여야 합니다."}, status_code=413)
         uploads.append((filename, content))
     _IMPORT_DRAFTS.pop(user, None)
-    _consume_ai_quota(user)
-    pipeline.apply_credentials(user)
     try:
+        _consume_ai_quota(user)
+        pipeline.apply_credentials(user)
         rows, dividends = await run_in_threadpool(_parse_import_files, uploads, broker.strip())
+    except HTTPException as error:
+        return failed(_ImportFailure("AI_REQUEST_LIMIT" if error.status_code == 429 else "GEMINI_NOT_CONFIGURED",
+                                      str(error.detail), "시간당 한도는 잠시 후 초기화됩니다. 키 미설정은 운영자에게 문의하세요.",
+                                      stage="admission", status=error.status_code))
     except _ImportValidationError as error:
-        return JSONResponse({"ok": False, "error": str(error), "issues": error.issues,
-                             "issueCount": len(error.issues), "saved": False}, status_code=422)
-    except ValueError as error:
-        return JSONResponse({"ok": False, "error": str(error)}, status_code=422)
+        return failed(_ImportFailure("VALIDATION_FAILED", str(error), "아래 미매핑·검증 필요 내역을 확인하고 원본 파일을 수정해 다시 분석하세요.",
+                                      stage="validation"), error.issues)
+    except _ImportFailure as error:
+        return failed(error)
+    except Exception:
+        return failed(_ImportFailure("IMPORT_INTERNAL_ERROR", "서버에서 예상하지 못한 전처리 오류가 발생했습니다.",
+                                      "문의 코드를 운영자에게 전달하세요. 기존 데이터는 변경하지 않았습니다.", stage="processing", status=500))
     now = time.monotonic()
     for owner in [owner for owner, draft in _IMPORT_DRAFTS.items() if draft["expires"] <= now]:
         _IMPORT_DRAFTS.pop(owner, None)
     draft_id = _secrets.token_urlsafe(24)
     _IMPORT_DRAFTS[user] = {"id": draft_id, "expires": now + 900, "rows": rows, "dividends": dividends}
+    log_result(200, "OK", {"stage": "preview"})
     return JSONResponse({"ok": True, "draftId": draft_id, "transactions": len(rows), "dividends": len(dividends),
-                         "txPreview": rows[:30], "divPreview": dividends[:30], "saved": False})
+                         "txPreview": rows[:30], "divPreview": dividends[:30], "saved": False}, headers={"X-Request-ID": request_id})
 
 
 @app.post("/api/app/import/confirm")

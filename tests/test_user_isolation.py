@@ -7,6 +7,7 @@ from contextvars import Context
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
@@ -220,6 +221,177 @@ class UserConnectionApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertNotIn("alice", webapp._IMPORT_DRAFTS)
 
+    def test_provider_failure_reports_safe_reason_location_and_request_id(self):
+        from google.api_core.exceptions import ResourceExhausted
+
+        private_text = "private-api-key-and-transaction-content"
+        failure = ResourceExhausted("Quota exceeded: " + private_text)
+        with patch.object(ai_copilot.genai, "configure"), \
+            patch.object(ai_copilot, "_generate_with_fallback", return_value=(None, failure)), \
+            self.assertLogs("uvicorn.error", level="WARNING") as captured:
+            response = self.alice.post("/api/app/import", data={"consent": "true"},
+                                       files={"files": ("MyTrades.CSV", b"TEST", "text/csv")})
+        self.assertEqual(response.status_code, 429)
+        payload = response.json()
+        self.assertEqual(payload["failure"]["code"], "GEMINI_QUOTA")
+        self.assertEqual(payload["failure"]["stage"], "transactions")
+        self.assertEqual(payload["failure"]["source"]["file"], "MyTrades.CSV")
+        self.assertEqual(payload["failure"]["source"]["chunk"], 1)
+        self.assertTrue(payload["failure"]["action"])
+        self.assertGreaterEqual(payload["failure"]["elapsedSeconds"], 0)
+        self.assertEqual(payload["failure"]["requestId"], response.headers["X-Request-ID"])
+        self.assertNotIn(private_text, response.text)
+        self.assertFalse(payload["saved"])
+        self.assertNotIn("alice", webapp._IMPORT_DRAFTS)
+        log = "\n".join(captured.output)
+        self.assertIn(payload["failure"]["requestId"], log)
+        self.assertIn("GEMINI_QUOTA", log)
+        for private_value in (private_text, "MyTrades.CSV", "shared-test-key", "alice"):
+            self.assertNotIn(private_value, log)
+
+    def test_invalid_gemini_json_is_not_reported_as_missing_trades(self):
+        reply = SimpleNamespace(text='[{"private": "raw-response-content",', candidates=[], prompt_feedback=None)
+        with patch.object(ai_copilot.genai, "configure"), \
+                patch.object(ai_copilot, "_generate_with_fallback", return_value=(reply, None)):
+            response = self.alice.post("/api/app/import", data={"consent": "true"},
+                                       files={"files": ("Trades.CSV", b"TEST", "text/csv")})
+        self.assertEqual(response.json()["failure"]["code"], "GEMINI_INVALID_JSON")
+        self.assertNotIn("raw-response-content", response.text)
+        self.assertNotIn("alice", webapp._IMPORT_DRAFTS)
+
+    def test_provider_failure_categories_have_safe_messages(self):
+        from google.api_core import exceptions
+
+        cases = ((exceptions.InvalidArgument("API key not valid"), "GEMINI_AUTH", 503),
+                 (exceptions.PermissionDenied("private-secret"), "GEMINI_AUTH", 503),
+                 (exceptions.Unauthenticated("private-secret"), "GEMINI_AUTH", 503),
+                 (exceptions.DeadlineExceeded("private-secret"), "GEMINI_TIMEOUT", 504),
+                 (TimeoutError("private-secret"), "GEMINI_TIMEOUT", 504),
+                 (exceptions.ServiceUnavailable("private-secret"), "GEMINI_UNAVAILABLE", 503),
+                 (exceptions.InternalServerError("private-secret"), "GEMINI_UNAVAILABLE", 503),
+                 (exceptions.NotFound("private-secret"), "GEMINI_MODEL_UNAVAILABLE", 503),
+                 (exceptions.InvalidArgument("input too long"), "GEMINI_INPUT_LIMIT", 422),
+                 (exceptions.InvalidArgument("private-secret"), "GEMINI_INVALID_REQUEST", 422),
+                 (RuntimeError("could not generate private-secret"), "GEMINI_UNKNOWN", 502))
+        for provider_error, code, status in cases:
+            with self.subTest(code=code, exception=type(provider_error).__name__), \
+                    patch.object(ai_copilot.genai, "configure"), \
+                    patch.object(ai_copilot, "_generate_with_fallback", return_value=(None, provider_error)):
+                response = self.alice.post("/api/app/import", data={"consent": "true"},
+                                           files={"files": ("Trades.CSV", b"TEST", "text/csv")})
+                self.assertEqual(response.status_code, status)
+                self.assertEqual(response.json()["failure"]["code"], code)
+                self.assertTrue(response.json()["failure"]["action"])
+                self.assertNotIn("private-secret", response.text)
+                self.assertFalse(response.json()["saved"])
+                self.assertNotIn("alice", webapp._IMPORT_DRAFTS)
+
+    def test_response_stop_reasons_and_invalid_shapes_are_distinct(self):
+        from google.ai.generativelanguage import Candidate, GenerateContentResponse
+        from google.generativeai.types import GenerateContentResponse as Response
+
+        cases = [(Response.from_response(GenerateContentResponse(candidates=[Candidate(finish_reason=reason)])), code)
+                 for reason, code in ((2, "GEMINI_OUTPUT_LIMIT"), (3, "GEMINI_BLOCKED"),
+                                      (4, "GEMINI_BLOCKED"), (5, "GEMINI_INCOMPLETE_RESPONSE"))]
+        cases.append((Response.from_response(GenerateContentResponse(prompt_feedback={"block_reason": 1})), "GEMINI_BLOCKED"))
+        cases.extend((SimpleNamespace(text=text, candidates=[], prompt_feedback=None), code)
+                     for text, code in (("", "GEMINI_EMPTY_RESPONSE"), ("{", "GEMINI_INVALID_JSON"),
+                                        ("{}", "GEMINI_INVALID_RESPONSE"), ("null", "GEMINI_INVALID_RESPONSE"),
+                                        ('{"result": {}}', "GEMINI_INVALID_RESPONSE")))
+        for reply, code in cases:
+            with self.subTest(code=code), patch.object(ai_copilot.genai, "configure"), \
+                    patch.object(ai_copilot, "_generate_with_fallback", return_value=(reply, None)):
+                response = self.alice.post("/api/app/import", data={"consent": "true"},
+                                           files={"files": ("Trades.CSV", b"TEST", "text/csv")})
+                self.assertEqual(response.json()["failure"]["code"], code)
+                self.assertFalse(response.json()["saved"])
+                self.assertNotIn("alice", webapp._IMPORT_DRAFTS)
+
+    def test_dividend_failure_reports_later_chunk_without_partial_save(self):
+        content = io.BytesIO()
+        with pd.ExcelWriter(content, engine="openpyxl") as writer:
+            pd.DataFrame({"ticker": ["AAPL"]}).to_excel(writer, sheet_name="Trades", index=False)
+        trade = SimpleNamespace(text=json.dumps(self.parsed_trade("AAPL")), candidates=[], prompt_feedback=None)
+        empty = SimpleNamespace(text='```json\n{"dividends": []}\n```', candidates=[], prompt_feedback=None)
+        truncated = SimpleNamespace(text="private-response", candidates=[SimpleNamespace(finish_reason=2)], prompt_feedback=None)
+        with patch.object(ai_copilot.genai, "configure"), \
+                patch.object(webapp, "_import_chunks", return_value=iter(["first", "second"])), \
+                patch.object(ai_copilot, "_generate_with_fallback", side_effect=[(trade, None), (empty, None), (trade, None), (truncated, None)]):
+            response = self.alice.post("/api/app/import", data={"consent": "true"},
+                files={"files": ("Report.XLSX", content.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+        failure = response.json()["failure"]
+        self.assertEqual(failure["code"], "GEMINI_OUTPUT_LIMIT")
+        self.assertEqual(failure["stage"], "dividends")
+        self.assertEqual(failure["source"], {"file": "Report.XLSX", "sheet": "Trades", "chunk": 2})
+        self.assertNotIn("private-response", response.text)
+        self.assertNotIn("alice", webapp._IMPORT_DRAFTS)
+        self.assertFalse(Path(self.directory, "alice", "manual_transactions.csv").exists())
+
+    def test_valid_empty_dividend_response_allows_preview_and_retry(self):
+        trade = SimpleNamespace(text=json.dumps({"transactions": self.parsed_trade("AAPL")}), candidates=[], prompt_feedback=None)
+        empty = SimpleNamespace(text='{"result": []}', candidates=[], prompt_feedback=None)
+        invalid = SimpleNamespace(text="{", candidates=[], prompt_feedback=None)
+        with patch.object(ai_copilot.genai, "configure"), \
+                patch.object(ai_copilot, "_generate_with_fallback", side_effect=[(invalid, None), (trade, None), (empty, None)]):
+            for status in (502, 200):
+                response = self.alice.post("/api/app/import", data={"consent": "true"},
+                                           files={"files": ("Trades.CSV", b"TEST", "text/csv")})
+                self.assertEqual(response.status_code, status)
+                self.assertFalse(response.json()["saved"])
+        self.assertEqual(response.json()["transactions"], 1)
+        self.assertEqual(response.json()["dividends"], 0)
+        self.assertNotIn("failure", response.json())
+        self.assertFalse(Path(self.directory, "alice", "manual_transactions.csv").exists())
+
+    def test_fallback_does_not_hide_quota_behind_a_missing_model(self):
+        from google.api_core.exceptions import NotFound, ResourceExhausted
+
+        quota = ResourceExhausted("private-quota-details")
+        with patch.object(ai_copilot, "MODEL_CHAIN", ["gemini-quota-test", "gemini-missing-test"]), \
+                patch.object(ai_copilot.genai, "configure"), patch.object(ai_copilot.time, "sleep"), \
+                patch.object(ai_copilot.genai, "GenerativeModel", side_effect=[quota, quota, NotFound("private-model-details")]), \
+                self.assertLogs("uvicorn.error", level="WARNING") as captured:
+            response = self.alice.post("/api/app/import", data={"consent": "true"},
+                                       files={"files": ("Trades.CSV", b"TEST", "text/csv")})
+        self.assertEqual(response.status_code, 429)
+        failure = response.json()["failure"]
+        self.assertEqual(failure["code"], "GEMINI_QUOTA")
+        self.assertEqual([attempt["code"] for attempt in failure["attempts"]],
+                         ["GEMINI_QUOTA", "GEMINI_QUOTA", "GEMINI_MODEL_UNAVAILABLE"])
+        self.assertEqual([attempt["providerStatus"] for attempt in failure["attempts"]], [429, 429, 404])
+        self.assertIn("gemini-missing-test", "\n".join(captured.output))
+        for private_value in ("private-quota-details", "private-model-details", "Trades.CSV", "shared-test-key"):
+            self.assertNotIn(private_value, "\n".join(captured.output))
+        self.assertNotIn("private-", response.text)
+
+    def test_model_fallback_success_preserves_the_preview_contract(self):
+        from google.api_core.exceptions import NotFound
+
+        trade = SimpleNamespace(text=json.dumps(self.parsed_trade("AAPL")), candidates=[], prompt_feedback=None)
+        empty = SimpleNamespace(text="[]", candidates=[], prompt_feedback=None)
+        with patch.object(ai_copilot, "MODEL_CHAIN", ["gemini-first-test", "gemini-next-test"]), \
+                patch.object(ai_copilot.genai, "configure"), patch.object(ai_copilot.genai, "GenerativeModel") as model:
+            model.return_value.generate_content.side_effect = [NotFound("private-model-details"), trade, empty]
+            response = self.alice.post("/api/app/import", data={"consent": "true"},
+                                       files={"files": ("Trades.CSV", b"TEST", "text/csv")})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["transactions"], 1)
+        self.assertEqual(response.json()["dividends"], 0)
+        self.assertFalse(response.json()["saved"])
+        self.assertNotIn("failure", response.json())
+        self.assertNotIn("private-", response.text)
+
+    def test_unreadable_file_reports_source_without_calling_gemini(self):
+        with patch.object(ai_copilot, "_generate_with_fallback") as generate:
+            response = self.alice.post("/api/app/import", data={"consent": "true"},
+                files={"files": ("Broken.XLSX", b"not-an-excel-file", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+        generate.assert_not_called()
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["failure"]["code"], "FILE_READ_FAILED")
+        self.assertEqual(response.json()["failure"]["source"]["file"], "Broken.XLSX")
+        self.assertFalse(response.json()["saved"])
+        self.assertNotIn("alice", webapp._IMPORT_DRAFTS)
+
     def test_import_reports_every_unmapped_row_and_its_source(self):
         trades = [dict(self.parsed_trade("")[0], 종목명="Unknown fund"),
                   dict(self.parsed_trade("AAPL")[0], 일자="bad-date", 수량=-1)]
@@ -310,7 +482,9 @@ class UserConnectionApiTests(unittest.TestCase):
     def test_shared_ai_quota_is_user_scoped_and_enforced(self):
         with patch.dict(os.environ, {"PFM_AI_REQUESTS_PER_HOUR": "1"}):
             self.assertEqual(self.preview(self.alice, "ALICE").status_code, 200)
-            self.assertEqual(self.preview(self.alice, "ALICE").status_code, 429)
+            rejected = self.preview(self.alice, "ALICE")
+            self.assertEqual(rejected.status_code, 429)
+            self.assertEqual(rejected.json()["failure"]["code"], "AI_REQUEST_LIMIT")
             self.assertEqual(self.preview(self.bob, "BOB").status_code, 200)
 
     def test_concurrent_http_imports_keep_worker_contexts_separate(self):

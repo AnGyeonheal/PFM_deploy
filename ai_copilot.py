@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import time
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -30,15 +31,76 @@ MODEL_CHAIN = [
 ]
 
 
+class GeminiFailure(str):
+    MESSAGES = {
+        "GEMINI_NOT_CONFIGURED": ("서버의 공용 Gemini 키가 설정되지 않았습니다.", "운영자에게 Gemini 키 설정을 요청하세요.", 503),
+        "GEMINI_QUOTA": ("Gemini API의 요청 또는 사용량 한도에 도달했습니다.", "잠시 후 다시 시도하세요. 반복되면 운영자가 Google API 할당량과 결제 상태를 확인해야 합니다.", 429),
+        "GEMINI_AUTH": ("Google이 서버의 Gemini API 인증 또는 접근 권한을 거부했습니다.", "운영자가 API 키의 유효성·제한·사용 권한을 확인해야 합니다. 파일을 바꿔도 해결되지 않습니다.", 503),
+        "GEMINI_TIMEOUT": ("Gemini 응답을 기다리다가 시간 초과가 발생했습니다.", "파일을 기간별로 나눠 한 개씩 다시 시도하세요. 반복되면 운영자에게 문의하세요.", 504),
+        "GEMINI_UNAVAILABLE": ("Gemini 서비스에 연결하지 못했거나 서비스가 일시적으로 응답하지 않았습니다.", "잠시 후 다시 시도하세요. 계속되면 운영자가 네트워크와 Google 서비스 상태를 확인해야 합니다.", 503),
+        "GEMINI_MODEL_UNAVAILABLE": ("설정된 Gemini 모델을 사용할 수 없습니다.", "운영자가 지원되는 모델 이름과 해당 프로젝트의 모델 접근 권한을 확인해야 합니다.", 503),
+        "GEMINI_INPUT_LIMIT": ("Gemini가 입력 분량 제한으로 분석 요청을 거절했습니다.", "파일을 기간별로 나누고 불필요한 시트나 긴 메모 열을 제거해 다시 시도하세요.", 422),
+        "GEMINI_INVALID_REQUEST": ("Gemini가 분석 요청 형식을 거절했습니다.", "운영자에게 문의 코드와 실패 구간을 전달해 요청 설정을 확인하세요.", 422),
+        "GEMINI_BLOCKED": ("Gemini가 안전성 또는 콘텐츠 정책에 따라 응답을 제한했습니다.", "불필요한 개인정보·자유서술을 제외한 거래 표를 사용하세요. 문제가 없으면 운영자에게 문의하세요.", 422),
+        "GEMINI_OUTPUT_LIMIT": ("Gemini 응답이 출력 길이 한도에서 중단됐습니다.", "거래가 적게 포함되도록 파일을 기간별로 나눠 다시 분석하세요.", 422),
+        "GEMINI_INVALID_JSON": ("Gemini 응답이 올바른 JSON 형식이 아니어서 읽지 못했습니다.", "파일을 작게 나누어 다시 시도하세요. 반복되면 운영자가 응답 형식 설정을 점검해야 합니다.", 502),
+        "GEMINI_INVALID_RESPONSE": ("Gemini가 거래·배당 목록과 다른 형식으로 응답했습니다.", "거래 표만 포함한 파일로 다시 시도하세요. 반복되면 운영자에게 문의하세요.", 502),
+        "GEMINI_EMPTY_RESPONSE": ("Gemini가 읽을 수 있는 분석 응답을 반환하지 않았습니다.", "잠시 후 다시 시도하세요. 거래내역이 없다는 뜻은 아닙니다.", 502),
+        "GEMINI_INCOMPLETE_RESPONSE": ("Gemini가 분석 응답을 정상적으로 완료하지 못했습니다.", "파일을 나누어 다시 시도하고, 반복되면 운영자에게 문의하세요.", 502),
+        "GEMINI_UNKNOWN": ("Gemini 분석 중 분류되지 않은 오류가 발생했습니다.", "운영자에게 문의 코드를 전달하세요. 현재 정보만으로 정확한 원인을 확정할 수 없습니다.", 502),
+    }
+
+    def __new__(cls, code, provider_status=None):
+        code = code if code in cls.MESSAGES else "GEMINI_UNKNOWN"
+        message, action, status = cls.MESSAGES[code]
+        value = super().__new__(cls, message)
+        value.code, value.action, value.http_status = code, action, status
+        value.provider_status = provider_status
+        value.attempts = []
+        return value
+
+
+def classify_gemini_error(error):
+    if isinstance(error, GeminiFailure):
+        return error
+    status = getattr(error, "code", None) or getattr(error, "status_code", None)
+    if status is None:
+        status = getattr(getattr(error, "response", None), "status_code", None)
+    try:
+        status = int(status() if callable(status) else status)
+    except (TypeError, ValueError):
+        status = None
+    text = (type(error).__name__ + " " + str(error)).lower()
+    if status is None:
+        match = re.search(r"\b(400|401|403|404|408|429|500|502|503|504)\b", text)
+        status = int(match.group(1)) if match else None
+    if status in (401, 403) or any(value in text for value in ("api_key_invalid", "api key not valid", "api key expired", "api key was reported as leaked")):
+        code = "GEMINI_AUTH"
+    elif status == 429 or any(value in text for value in ("resourceexhausted", "resource_exhausted", "quota exceeded", "rate limit")):
+        code = "GEMINI_QUOTA"
+    elif status in (408, 504) or any(value in text for value in ("timeout", "timed out", "deadlineexceeded", "deadline exceeded")):
+        code = "GEMINI_TIMEOUT"
+    elif status == 404:
+        code = "GEMINI_MODEL_UNAVAILABLE"
+    elif any(value in text for value in ("token limit", "maximum number of tokens", "context length", "input too long")):
+        code = "GEMINI_INPUT_LIMIT"
+    elif status == 400:
+        code = "GEMINI_INVALID_REQUEST"
+    elif status in (500, 502, 503) or any(value in text for value in ("connectionerror", "serviceunavailable", "connection refused")):
+        code = "GEMINI_UNAVAILABLE"
+    else:
+        code = "GEMINI_UNKNOWN"
+    return GeminiFailure(code, status)
+
+
 def _is_quota_error(err):
-    s = str(err).lower()
-    return "429" in s or "quota" in s or "rate" in s or "exhaust" in s
+    return classify_gemini_error(err).code == "GEMINI_QUOTA"
 
 
 def _generate_with_fallback(prompt, system_instruction=None, tools=None, max_retry=2):
     """모델 폴백 + 429 재시도로 generate_content를 호출합니다.
     반환: (response 또는 None, 에러메시지 또는 None)"""
-    last_err = None
+    failures, attempts = [], []
     for model_name in MODEL_CHAIN:
         for attempt in range(max_retry):
             try:
@@ -47,12 +109,59 @@ def _generate_with_fallback(prompt, system_instruction=None, tools=None, max_ret
                 )
                 return model.generate_content(prompt), None
             except Exception as e:
-                last_err = e
+                failure = classify_gemini_error(e)
+                failures.append(failure)
+                attempts.append({"model": model_name, "code": failure.code, "providerStatus": failure.provider_status})
                 if _is_quota_error(e):
                     time.sleep(2 * (attempt + 1))  # 백오프 후 재시도
                     continue
                 break  # 한도 외 에러는 다음 모델로
-    return None, last_err
+    priorities = ("GEMINI_AUTH", "GEMINI_QUOTA", "GEMINI_TIMEOUT", "GEMINI_UNAVAILABLE",
+                  "GEMINI_INPUT_LIMIT", "GEMINI_INVALID_REQUEST", "GEMINI_UNKNOWN", "GEMINI_MODEL_UNAVAILABLE")
+    failure = min(failures, key=lambda item: priorities.index(item.code)) if failures else GeminiFailure("GEMINI_UNKNOWN")
+    failure.attempts = attempts
+    return None, failure
+
+
+def _parse_brokerage_response(prompt, result_key):
+    response, error = _generate_with_fallback(prompt)
+    if response is None:
+        return None, classify_gemini_error(error)
+
+    def reason_name(reason):
+        return str(getattr(reason, "name", reason) or "")
+
+    feedback = getattr(response, "prompt_feedback", None)
+    blocked = reason_name(getattr(feedback, "block_reason", None))
+    if blocked not in ("", "0", "BLOCK_REASON_UNSPECIFIED"):
+        return None, GeminiFailure("GEMINI_BLOCKED")
+    candidates = getattr(response, "candidates", None) or []
+    finish = reason_name(getattr(candidates[0], "finish_reason", None)) if candidates else ""
+    if finish in ("2", "MAX_TOKENS"):
+        return None, GeminiFailure("GEMINI_OUTPUT_LIMIT")
+    if finish in ("3", "4", "7", "8", "9", "10", "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY"):
+        return None, GeminiFailure("GEMINI_BLOCKED")
+    if finish not in ("", "0", "1", "STOP", "FINISH_REASON_UNSPECIFIED"):
+        return None, GeminiFailure("GEMINI_INCOMPLETE_RESPONSE")
+    try:
+        text = (response.text or "").strip()
+    except (ValueError, AttributeError):
+        return None, GeminiFailure("GEMINI_EMPTY_RESPONSE")
+    if not text:
+        return None, GeminiFailure("GEMINI_EMPTY_RESPONSE")
+    if text.startswith("```") and text.endswith("```"):
+        text = text[3:-3].strip()
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None, GeminiFailure("GEMINI_INVALID_JSON")
+    if isinstance(data, dict):
+        data = data.get(result_key, data.get("result"))
+    if not isinstance(data, list):
+        return None, GeminiFailure("GEMINI_INVALID_RESPONSE")
+    return data, None
 
 
 def ai_resolve_tickers(names):
@@ -268,8 +377,8 @@ def parse_brokerage_full_transactions(raw_text, broker_name="증권사"):
     """
     load_dotenv()
     gemini_key = _SHARED_GEMINI_KEY
-    if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요":
-        return None, "[오류] .env 파일에 유효한 GEMINI_API_KEY가 없습니다."
+    if not shared_gemini_available():
+        return None, GeminiFailure("GEMINI_NOT_CONFIGURED")
 
     genai.configure(api_key=gemini_key, transport="rest")
 
@@ -299,26 +408,7 @@ def parse_brokerage_full_transactions(raw_text, broker_name="증권사"):
 [원본 거래내역]
 {raw_text[:14000]}
 """
-    response, err = _generate_with_fallback(prompt)
-    if response is None:
-        if _is_quota_error(err):
-            return None, "⚠️ Gemini 무료 사용량(하루 한도)을 초과했습니다. 잠시 후 다시 시도해 주세요."
-        return None, f"거래내역 파싱 중 에러: {err}"
-    try:
-        text = (response.text or "").strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        text = text.strip()
-        data = json.loads(text)
-        if isinstance(data, dict):
-            data = data.get("result") or data.get("transactions") or []
-        return data, None
-    except json.JSONDecodeError:
-        return None, f"AI 응답을 JSON으로 변환하지 못했습니다. 원본 형식을 확인하세요.\n응답: {text[:300]}"
-    except Exception as e:
-        return None, f"거래내역 파싱 중 에러: {e}"
+    return _parse_brokerage_response(prompt, "transactions")
 
 
 def parse_brokerage_dividends(raw_text, broker_name="증권사"):
@@ -327,8 +417,8 @@ def parse_brokerage_dividends(raw_text, broker_name="증권사"):
     """
     load_dotenv()
     gemini_key = _SHARED_GEMINI_KEY
-    if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요":
-        return None, "[오류] .env 파일에 유효한 GEMINI_API_KEY가 없습니다."
+    if not shared_gemini_available():
+        return None, GeminiFailure("GEMINI_NOT_CONFIGURED")
 
     genai.configure(api_key=gemini_key, transport="rest")
 
@@ -359,26 +449,7 @@ def parse_brokerage_dividends(raw_text, broker_name="증권사"):
 [원본 데이터]
 {raw_text[:14000]}
 """
-    response, err = _generate_with_fallback(prompt)
-    if response is None:
-        if _is_quota_error(err):
-            return None, "⚠️ Gemini 무료 사용량(하루 한도)을 초과했습니다. 잠시 후 다시 시도해 주세요."
-        return None, f"배당 파싱 중 에러: {err}"
-    try:
-        text = (response.text or "").strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        text = text.strip()
-        data = json.loads(text)
-        if isinstance(data, dict):
-            data = data.get("result") or data.get("dividends") or []
-        return data, None
-    except json.JSONDecodeError:
-        return None, f"AI 응답을 JSON으로 변환하지 못했습니다. 원본 형식을 확인하세요.\n응답: {text[:300]}"
-    except Exception as e:
-        return None, f"배당 파싱 중 에러: {e}"
+    return _parse_brokerage_response(prompt, "dividends")
 
 
 def review_toss_transactions(orders, name_map=None):

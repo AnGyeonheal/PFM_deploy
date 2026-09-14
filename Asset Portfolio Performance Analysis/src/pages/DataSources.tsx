@@ -4,10 +4,24 @@ import { Card, CardHeader } from "../components/Shared";
 type Src = { name: string; count: number };
 type UnmappedTicker = { ticker: string; name: string; reason: string };
 type ImportIssue = { kind: "transaction" | "dividend"; responseRow: number | null; date: string; ticker: string; name: string; fields: string[]; reasons: string[]; source: { file: string; sheet: string; chunk: number } };
+type ImportFailure = { code: string; action: string; stage?: string; source?: { file: string; sheet?: string; chunk?: number } | null; providerStatus?: number | null; elapsedSeconds: number; requestId?: string; httpStatus?: number; rayId?: string };
 type DSData = { tossConnected: boolean; txCount: number; divCount: number; tickerCount: number; mappedCount: number; unmappedCount: number; unmappedTickers?: UnmappedTicker[]; sources: Src[] };
 type ImportResult = { draftId: string; saved: boolean; transactions: number; dividends: number; txPreview: Record<string, string | number>[]; divPreview: Record<string, string | number>[] };
 type Connections = { geminiAvailable: boolean; tossConfigured: boolean; account: string; outboundIp: string; aiRequestsPerHour: number };
 const fieldClass = "w-full min-w-0 bg-[#0a0d14] border border-white/10 rounded-sm px-3 py-2 text-sm text-[#e8eaf0] font-mono focus:outline-none focus:border-[#00d4a1]/50";
+const importStages: Record<string, string> = { admission: "요청 확인", read: "파일 읽기", split: "파일 분할", transactions: "거래내역 AI 분석", dividends: "배당내역 AI 분석", validation: "분석 결과 검증", processing: "서버 전처리" };
+
+function importHttpFailure(status: number): [string, string, string] {
+  if (status === 524) return ["CLOUDFLARE_TIMEOUT", "Cloudflare의 응답 대기 시간이 초과됐습니다.", "서버에서는 분석이 계속될 수 있습니다. 즉시 반복 요청하지 말고 잠시 기다린 뒤 파일을 기간별로 나누어 시도하세요. 저장 확정은 실행되지 않았습니다."];
+  if (status === 504 || status === 408) return ["HTTP_TIMEOUT", "서버 또는 중계 구간에서 응답 시간이 초과됐습니다.", "잠시 기다린 뒤 파일을 작게 나누어 시도하세요. 이 응답만으로 Gemini 오류인지는 확정할 수 없습니다."];
+  if (status === 401) return ["AUTH_REQUIRED", "로그인이 만료됐거나 로그인이 필요합니다.", "다시 로그인한 뒤 업로드하세요."];
+  if (status === 403) return ["ACCESS_DENIED", "서버 또는 중계 서비스가 요청을 거부했습니다.", "현재 접속 주소와 접근 권한을 확인하세요. 반복되면 운영자에게 문의하세요."];
+  if (status === 413) return ["UPLOAD_TOO_LARGE", "업로드 용량 제한을 초과했습니다.", "파일당 5MB, 전체 요청 12MB 이내로 나누어 업로드하세요."];
+  if (status === 429) return ["REQUEST_LIMIT", "요청 또는 사용량 제한에 도달했습니다.", "잠시 후 다시 시도하세요. 운영자는 앱과 Gemini의 사용량 제한을 확인해야 합니다."];
+  if (status === 400 || status === 422) return ["INVALID_IMPORT", "업로드 입력 또는 파일을 검증하지 못했습니다.", "파일 형식과 필수 항목을 확인하세요. 세부 내역이 없으면 문의 코드를 운영자에게 전달하세요."];
+  if (status >= 500) return ["SERVER_ERROR", `서버 또는 중계 서비스에서 오류가 발생했습니다. (HTTP ${status})`, "잠시 후 다시 시도하고 반복되면 문의 코드를 운영자에게 전달하세요."];
+  return ["INVALID_SERVER_RESPONSE", "서버가 읽을 수 있는 분석 결과를 반환하지 않았습니다.", "새로고침 후 다시 로그인하고, 반복되면 문의 코드를 운영자에게 전달하세요."];
+}
 
 export default function DataSources({ onChanged }: { onChanged?: (data: DSData) => void }) {
   const [d, setD] = useState<DSData | null>(null);
@@ -27,6 +41,7 @@ export default function DataSources({ onChanged }: { onChanged?: (data: DSData) 
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [uploadErr, setUploadErr] = useState("");
+  const [importFailure, setImportFailure] = useState<ImportFailure | null>(null);
   const [importIssues, setImportIssues] = useState<ImportIssue[]>([]);
   const [clearing, setClearing] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -76,12 +91,14 @@ export default function DataSources({ onChanged }: { onChanged?: (data: DSData) 
     if (!fl) return;
     const selected = [...files, ...Array.from(fl)];
     if (selected.length > 5 || selected.some(file => file.size > 5 * 1024 * 1024)) {
+      setImportFailure(null);
       setUploadErr("최대 5개, 파일당 5MB까지 선택할 수 있습니다."); return;
     }
-    setFiles(selected); setResult(null); setUploadErr(""); setImportIssues([]);
+    setFiles(selected); setResult(null); setUploadErr(""); setImportIssues([]); setImportFailure(null);
   };
 
   const doUpload = async () => {
+    setImportFailure(null);
     if (files.length === 0) { setUploadErr("업로드할 파일을 선택하세요."); return; }
     if (!consent) { setUploadErr("Google Gemini 전송에 동의해 주세요."); return; }
     setUploading(true); setUploadErr(""); setResult(null); setImportIssues([]);
@@ -89,18 +106,26 @@ export default function DataSources({ onChanged }: { onChanged?: (data: DSData) 
     fd.append("broker", broker.trim() || "증권사");
     fd.append("consent", "true");
     files.forEach(f => fd.append("files", f));
+    const started = performance.now();
     try {
       const r = await fetch("/api/app/import", { method: "POST", body: fd, credentials: "include" });
-      const j = await r.json().catch(() => ({}));
-      if (r.ok && j.ok) {
+      const decoded = await r.json().catch(() => null);
+      const j = decoded && typeof decoded === "object" && !Array.isArray(decoded) ? decoded : {};
+      if (r.ok && j.ok && typeof j.draftId === "string") {
         setResult(j);
         setFiles([]);
       } else {
-        setUploadErr(j.error || j.detail || "업로드/분석에 실패했습니다.");
+        const [code, message, action] = importHttpFailure(r.status);
+        const knownFailure = j.failure && typeof j.failure.code === "string" && typeof j.failure.action === "string" ? j.failure : null;
+        setUploadErr(typeof j.error === "string" ? j.error : typeof j.detail === "string" ? j.detail : message);
+        setImportFailure({ code, action, ...knownFailure, elapsedSeconds: (performance.now() - started) / 1000,
+          httpStatus: r.status, requestId: knownFailure?.requestId || r.headers.get("x-request-id") || undefined,
+          rayId: r.headers.get("cf-ray") || undefined });
         setImportIssues(Array.isArray(j.issues) ? j.issues : []);
       }
     } catch {
-      setUploadErr("서버에 연결할 수 없습니다.");
+      setUploadErr("분석 요청의 응답을 받지 못했습니다.");
+      setImportFailure({ code: "NETWORK_ERROR", action: "인터넷·서버·터널 연결 상태를 확인하세요. 서버에서 분석이 진행 중일 수 있으므로 즉시 반복 업로드하지 마세요.", elapsedSeconds: (performance.now() - started) / 1000 });
     } finally {
       setUploading(false);
     }
@@ -108,7 +133,7 @@ export default function DataSources({ onChanged }: { onChanged?: (data: DSData) 
 
   const confirmImport = async () => {
     if (!result?.draftId) return;
-    setConfirming(true); setUploadErr("");
+    setConfirming(true); setUploadErr(""); setImportFailure(null);
     try {
       const response = await fetch("/api/app/import/confirm", {
         method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
@@ -247,7 +272,21 @@ export default function DataSources({ onChanged }: { onChanged?: (data: DSData) 
             <input type="checkbox" checked={consent} onChange={event => setConsent(event.target.checked)} className="mt-0.5 accent-[#00d4a1]" />
             <span>거래내역을 Google Gemini에 전송하여 분석하는 데 동의합니다. API 키·비밀번호·불필요한 개인정보가 포함된 파일은 제외합니다.</span>
           </label>
-          {uploadErr && <div role="alert" className="text-xs text-[#ff5c6a] font-mono">{uploadErr}</div>}
+          {uploadErr && <section role="alert" aria-label="임포트 실패 상세" className="border-l-2 border-[#ff5c6a] pl-3 space-y-2 text-xs leading-relaxed">
+            <p className="text-[#ff5c6a] font-medium">{uploadErr}</p>
+            {importFailure && <>
+              <p className="text-[#a0a8c0]">{importFailure.action}</p>
+              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[#6b7494]">
+                {importFailure.stage && <><dt>실패 단계</dt><dd>{importStages[importFailure.stage] || "알 수 없음"}</dd></>}
+                {importFailure.source && <><dt>파일 · 구간</dt><dd className="min-w-0 break-all">{[importFailure.source.file, importFailure.source.sheet, importFailure.source.chunk ? `분할 ${importFailure.source.chunk}` : ""].filter(Boolean).join(" · ")}</dd></>}
+                <dt>응답 대기</dt><dd>{importFailure.elapsedSeconds.toFixed(1)}초</dd>
+                <dt>오류 코드</dt><dd className="min-w-0 break-all font-mono">{importFailure.code}{importFailure.httpStatus ? ` · HTTP ${importFailure.httpStatus}` : ""}{importFailure.providerStatus ? ` · Google ${importFailure.providerStatus}` : ""}</dd>
+                {importFailure.requestId && <><dt>문의 코드</dt><dd className="min-w-0 break-all font-mono select-all">{importFailure.requestId}</dd></>}
+                {importFailure.rayId && <><dt>Cloudflare Ray</dt><dd className="min-w-0 break-all font-mono select-all">{importFailure.rayId}</dd></>}
+              </dl>
+              <p className="text-[#6b7494]">저장 확정 전이므로 기존 거래·배당 내역은 변경되지 않았습니다.</p>
+            </>}
+          </section>}
           {importIssues.length > 0 && (
             <section aria-label="미매핑 및 전처리 확인 내역" className="space-y-3 border-t border-white/10 pt-3">
               <h3 className="text-sm font-medium text-[#e8eaf0]">미매핑·검증 필요 {importIssues.length}건</h3>
