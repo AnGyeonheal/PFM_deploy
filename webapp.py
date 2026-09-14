@@ -975,7 +975,10 @@ def api_app_datasources(request: Request):
     name_map = data["name_map"] or {}
     bd = data["breakdown"]
     tickers = [str(t) for t in bd["티커"].unique()] if (bd is not None and not bd.empty) else []
-    mapped = sum(1 for t in tickers if name_map.get(t) and name_map.get(t) != t)
+    unmapped = [{"ticker": ticker, "name": name_map.get(ticker) or ticker,
+                 "reason": "종목코드에 해당하는 종목명을 확인하지 못했습니다."}
+                for ticker in tickers if not name_map.get(ticker) or name_map[ticker] == ticker]
+    mapped = len(tickers) - len(unmapped)
     sources = []
     if detail_df is not None and not detail_df.empty and "증권사" in detail_df.columns:
         vc = detail_df["증권사"].value_counts()
@@ -984,8 +987,20 @@ def api_app_datasources(request: Request):
         "tossConnected": auth.has_toss_credentials(user),
         "txCount": tx_count, "divCount": div_count,
         "tickerCount": len(tickers), "mappedCount": mapped,
-        "unmappedCount": len(tickers) - mapped, "sources": sources,
+        "unmappedCount": len(unmapped), "unmappedTickers": unmapped, "sources": sources,
     })
+
+
+class _ImportValidationError(ValueError):
+    def __init__(self, issues):
+        self.issues = issues
+        super().__init__(f"미매핑 또는 검증이 필요한 내역이 {len(issues)}건 있습니다. 저장하지 않았습니다.")
+
+
+def _import_issue(number, row, dividend, fields, reasons):
+    return {"kind": "dividend" if dividend else "transaction", "responseRow": number,
+            "date": str(row.get("일자") or "")[:100], "ticker": str(row.get("티커") or "")[:100],
+            "name": str(row.get("종목명") or "")[:200], "fields": fields, "reasons": reasons}
 
 
 def _import_chunks(text, limit=12000):
@@ -1005,31 +1020,48 @@ def _import_chunks(text, limit=12000):
 
 def _validate_import_rows(rows, broker, dividend=False):
     if not isinstance(rows, list):
-        raise ValueError("AI 응답 형식이 올바르지 않습니다. 저장하지 않았습니다.")
+        raise _ImportValidationError([_import_issue(None, {}, dividend, ["응답 형식"], ["AI 응답이 행 목록이 아닙니다."])])
     columns = DIV_COLUMNS if dividend else TX_COLUMNS
     normalized = []
+    issues = []
     for number, row in enumerate(rows, 1):
         if not isinstance(row, dict):
-            raise ValueError(f"AI 응답 {number}행의 형식이 올바르지 않습니다.")
+            issues.append(_import_issue(number, {}, dividend, ["응답 형식"], ["AI 결과 행을 해석하지 못했습니다."]))
+            continue
         result = {column: str(row.get(column) or "").strip() for column in columns}
         result["증권사"] = broker
+        fields, reasons = [], []
         try:
             result["일자"] = datetime.strptime(result["일자"], "%Y-%m-%d").strftime("%Y-%m-%d")
-            if not result["티커"] or result["통화"] not in ("KRW", "USD"):
-                raise ValueError()
-            if not dividend and result["구분"] not in ("매수", "매도"):
-                raise ValueError()
-            for field in (("배당금",) if dividend else ("수량", "단가")):
+        except ValueError:
+            fields.append("일자")
+            reasons.append("거래·입금일을 YYYY-MM-DD 형식으로 확인하지 못했습니다.")
+        if result["티커"].casefold() in ("", "none", "nan", "null", "n/a", "-", "미상", "알 수 없음"):
+            fields.append("티커")
+            reasons.append("종목명에 대응하는 티커를 매핑하지 못했습니다.")
+        if result["통화"] not in ("KRW", "USD"):
+            fields.append("통화")
+            reasons.append("통화를 KRW 또는 USD로 확인하지 못했습니다.")
+        if not dividend and result["구분"] not in ("매수", "매도"):
+            fields.append("구분")
+            reasons.append("매수·매도 구분을 확인하지 못했습니다.")
+        for field in (("배당금",) if dividend else ("수량", "단가")):
+            try:
                 if isinstance(row.get(field), bool):
                     raise ValueError()
                 value = float(row.get(field))
                 if not math.isfinite(value) or value <= 0:
                     raise ValueError()
                 result[field] = value
-        except (ValueError, TypeError, OverflowError):
-            kind = "배당" if dividend else "거래"
-            raise ValueError(f"{kind} {number}행의 날짜·종목·통화·수량·금액을 확인해야 합니다. 저장하지 않았습니다.") from None
-        normalized.append(result)
+            except (ValueError, TypeError, OverflowError):
+                fields.append(field)
+                reasons.append(f"{field} 값이 없거나 0보다 큰 유효한 숫자가 아닙니다.")
+        if fields:
+            issues.append(_import_issue(number, row, dividend, fields, reasons))
+        else:
+            normalized.append(result)
+    if issues:
+        raise _ImportValidationError(issues)
     return normalized
 
 
@@ -1038,33 +1070,42 @@ def _parse_import_files(uploads, broker):
     raw_texts = []
     for filename, content in uploads:
         try:
-            if filename.endswith((".xlsx", ".xls")):
+            source = {"file": filename, "sheet": ""}
+            if filename.lower().endswith((".xlsx", ".xls")):
                 sheets = pd.read_excel(io.BytesIO(content), sheet_name=None, dtype=str)
-                raw_texts.extend(sheet.fillna("").to_csv(index=False) for sheet in sheets.values() if not sheet.empty)
-            elif filename.endswith(".pdf"):
-                raw_texts.append(_pdf_to_text(content))
+                raw_texts.extend((dict(source, sheet=str(name)), sheet.fillna("").to_csv(index=False))
+                                 for name, sheet in sheets.items() if not sheet.empty)
+            elif filename.lower().endswith(".pdf"):
+                raw_texts.append((source, _pdf_to_text(content)))
             else:
                 try:
-                    raw_texts.append(content.decode("utf-8-sig"))
+                    text = content.decode("utf-8-sig")
                 except UnicodeDecodeError:
-                    raw_texts.append(content.decode("cp949"))
+                    text = content.decode("cp949")
+                raw_texts.append((source, text))
         except Exception:
             raise ValueError("파일을 읽지 못했습니다. 파일 형식과 문자 인코딩을 확인하세요.") from None
-    if not raw_texts or any(not text.strip() for text in raw_texts):
+    if not raw_texts or any(not text.strip() for _, text in raw_texts):
         raise ValueError("내용을 읽지 못한 파일이 있습니다. 스캔 PDF 대신 CSV 또는 Excel을 사용해 주세요.")
-    chunks = [chunk for text in raw_texts for chunk in _import_chunks(text)]
+    chunks = [(dict(source, chunk=number), chunk) for source, text in raw_texts
+              for number, chunk in enumerate(_import_chunks(text), 1)]
     if len(chunks) > 20:
         raise ValueError("한 번에 분석할 수 있는 파일 분량을 초과했습니다. 파일을 나누어 업로드하세요.")
-    rows, dividends = [], []
-    for chunk in chunks:
+    rows, dividends, issues = [], [], []
+    for source, chunk in chunks:
         parsed, error = parse_brokerage_full_transactions(chunk, broker)
         if error:
             raise ValueError("거래내역 AI 분석에 실패했습니다. 기존 데이터는 변경하지 않았습니다.")
         parsed_dividends, dividend_error = parse_brokerage_dividends(chunk, broker)
         if dividend_error:
             raise ValueError("배당내역 AI 분석에 실패했습니다. 기존 데이터는 변경하지 않았습니다.")
-        rows.extend(_validate_import_rows(parsed, broker))
-        dividends.extend(_validate_import_rows(parsed_dividends, broker, dividend=True))
+        for parsed_rows, is_dividend, target in ((parsed, False, rows), (parsed_dividends, True, dividends)):
+            try:
+                target.extend(_validate_import_rows(parsed_rows, broker, dividend=is_dividend))
+            except _ImportValidationError as error:
+                issues.extend(dict(issue, source=source) for issue in error.issues)
+    if issues:
+        raise _ImportValidationError(issues)
     if not rows and not dividends:
         raise ValueError("거래·배당 내역을 찾지 못했습니다.")
     return rows, dividends
@@ -1111,17 +1152,21 @@ async def api_app_import(request: Request, broker: str = Form("증권사"), cons
         return JSONResponse({"error": "증권사와 1~5개의 파일을 선택하세요."}, status_code=400)
     uploads = []
     for upload in files:
-        filename = (upload.filename or "").lower()
-        if not filename.endswith((".csv", ".txt", ".xlsx", ".xls", ".pdf")):
+        filename = os.path.basename((upload.filename or "").replace("\\", "/"))
+        if not filename.lower().endswith((".csv", ".txt", ".xlsx", ".xls", ".pdf")):
             return JSONResponse({"error": "CSV·TXT·Excel·PDF 파일만 지원합니다."}, status_code=400)
         content = await upload.read(5 * 1024 * 1024 + 1)
         if len(content) > 5 * 1024 * 1024:
             return JSONResponse({"error": "파일 한 개는 5MB 이하여야 합니다."}, status_code=413)
         uploads.append((filename, content))
+    _IMPORT_DRAFTS.pop(user, None)
     _consume_ai_quota(user)
     pipeline.apply_credentials(user)
     try:
         rows, dividends = await run_in_threadpool(_parse_import_files, uploads, broker.strip())
+    except _ImportValidationError as error:
+        return JSONResponse({"ok": False, "error": str(error), "issues": error.issues,
+                             "issueCount": len(error.issues), "saved": False}, status_code=422)
     except ValueError as error:
         return JSONResponse({"ok": False, "error": str(error)}, status_code=422)
     now = time.monotonic()

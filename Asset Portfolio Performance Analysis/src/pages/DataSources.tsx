@@ -2,7 +2,9 @@ import { useState, useEffect, useRef } from "react";
 import { Card, CardHeader } from "../components/Shared";
 
 type Src = { name: string; count: number };
-type DSData = { tossConnected: boolean; txCount: number; divCount: number; tickerCount: number; mappedCount: number; unmappedCount: number; sources: Src[] };
+type UnmappedTicker = { ticker: string; name: string; reason: string };
+type ImportIssue = { kind: "transaction" | "dividend"; responseRow: number | null; date: string; ticker: string; name: string; fields: string[]; reasons: string[]; source: { file: string; sheet: string; chunk: number } };
+type DSData = { tossConnected: boolean; txCount: number; divCount: number; tickerCount: number; mappedCount: number; unmappedCount: number; unmappedTickers?: UnmappedTicker[]; sources: Src[] };
 type ImportResult = { draftId: string; saved: boolean; transactions: number; dividends: number; txPreview: Record<string, string | number>[]; divPreview: Record<string, string | number>[] };
 type Connections = { geminiAvailable: boolean; tossConfigured: boolean; account: string; outboundIp: string; aiRequestsPerHour: number };
 const fieldClass = "w-full min-w-0 bg-[#0a0d14] border border-white/10 rounded-sm px-3 py-2 text-sm text-[#e8eaf0] font-mono focus:outline-none focus:border-[#00d4a1]/50";
@@ -25,6 +27,7 @@ export default function DataSources({ onChanged }: { onChanged?: (data: DSData) 
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [uploadErr, setUploadErr] = useState("");
+  const [importIssues, setImportIssues] = useState<ImportIssue[]>([]);
   const [clearing, setClearing] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -75,13 +78,13 @@ export default function DataSources({ onChanged }: { onChanged?: (data: DSData) 
     if (selected.length > 5 || selected.some(file => file.size > 5 * 1024 * 1024)) {
       setUploadErr("최대 5개, 파일당 5MB까지 선택할 수 있습니다."); return;
     }
-    setFiles(selected); setResult(null); setUploadErr("");
+    setFiles(selected); setResult(null); setUploadErr(""); setImportIssues([]);
   };
 
   const doUpload = async () => {
     if (files.length === 0) { setUploadErr("업로드할 파일을 선택하세요."); return; }
     if (!consent) { setUploadErr("Google Gemini 전송에 동의해 주세요."); return; }
-    setUploading(true); setUploadErr(""); setResult(null);
+    setUploading(true); setUploadErr(""); setResult(null); setImportIssues([]);
     const fd = new FormData();
     fd.append("broker", broker.trim() || "증권사");
     fd.append("consent", "true");
@@ -94,6 +97,7 @@ export default function DataSources({ onChanged }: { onChanged?: (data: DSData) 
         setFiles([]);
       } else {
         setUploadErr(j.error || j.detail || "업로드/분석에 실패했습니다.");
+        setImportIssues(Array.isArray(j.issues) ? j.issues : []);
       }
     } catch {
       setUploadErr("서버에 연결할 수 없습니다.");
@@ -244,6 +248,39 @@ export default function DataSources({ onChanged }: { onChanged?: (data: DSData) 
             <span>거래내역을 Google Gemini에 전송하여 분석하는 데 동의합니다. API 키·비밀번호·불필요한 개인정보가 포함된 파일은 제외합니다.</span>
           </label>
           {uploadErr && <div role="alert" className="text-xs text-[#ff5c6a] font-mono">{uploadErr}</div>}
+          {importIssues.length > 0 && (
+            <section aria-label="미매핑 및 전처리 확인 내역" className="space-y-3 border-t border-white/10 pt-3">
+              <h3 className="text-sm font-medium text-[#e8eaf0]">미매핑·검증 필요 {importIssues.length}건</h3>
+              <div className="text-xs text-[#6b7494]">티커 미매핑 {importIssues.filter(issue => issue.fields.includes("티커")).length}건 · 전체 업로드 미저장</div>
+              <div className="overflow-x-auto max-h-80">
+                <table aria-label="전처리 확인 내역" className="w-full min-w-[760px] text-xs">
+                  <thead className="text-[#6b7494]"><tr>
+                    {["파일 · 시트", "AI 결과 행", "일자 · 유형", "종목명 · 티커", "확인 필드", "사유"].map(label => <th key={label} className="p-2 text-left font-normal">{label}</th>)}
+                  </tr></thead>
+                  <tbody>{importIssues.map((issue, index) => (
+                    <tr key={index} className="border-t border-white/7 align-top">
+                      <td className="p-2 min-w-36 max-w-48 break-all text-[#a0a8c0]">
+                        <div>{issue.source.file}</div>
+                        {issue.source.sheet && <div>{issue.source.sheet}</div>}
+                        <div className="text-[#6b7494]">분할 {issue.source.chunk}</div>
+                      </td>
+                      <td className="p-2 font-mono" title="해당 분할 구간의 AI 응답 순서입니다. 원본 Excel 행 번호가 아닙니다.">{issue.responseRow ?? "—"}</td>
+                      <td className="p-2 min-w-28 max-w-40 break-all text-[#a0a8c0]">
+                        <div>{issue.date || "일자 미확인"}</div>
+                        <div>{issue.kind === "dividend" ? "배당" : "거래"}</div>
+                      </td>
+                      <td className="p-2 min-w-36 max-w-48 break-words">
+                        <div>{issue.name || "종목명 미확인"}</div>
+                        <div className="mt-1 font-mono break-all text-[#6b7494]">{issue.ticker || "티커 없음"}</div>
+                      </td>
+                      <td className="p-2 max-w-32 break-words text-[#ff5c6a]">{issue.fields.join(", ")}</td>
+                      <td className="p-2 min-w-52 max-w-72 text-[#a0a8c0]"><ul className="space-y-1">{issue.reasons.map((reason, reasonIndex) => <li key={reasonIndex}>{reason}</li>)}</ul></td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </section>
+          )}
           <button onClick={doUpload} disabled={uploading || confirming || files.length === 0 || !consent || !connections?.geminiAvailable}
             className="w-full bg-[#00d4a1] text-[#0a0d14] font-semibold text-sm py-2.5 rounded-sm hover:bg-[#00d4a1]/90 transition-colors disabled:opacity-50">
             {uploading ? "AI가 분석 중…" : "업로드 & AI 분석"}
@@ -287,6 +324,23 @@ export default function DataSources({ onChanged }: { onChanged?: (data: DSData) 
               </div>
             ))}
           </div>
+          {d && d.unmappedCount > 0 && (
+            <section aria-label="미매핑 종목" className="mt-4 border-t border-white/10 pt-3">
+              <h3 className="text-sm font-medium text-[#e8eaf0] mb-2">미매핑 종목 {d.unmappedCount}개</h3>
+              <div className="overflow-x-auto max-h-64">
+                <table aria-label="미매핑 종목 목록" className="w-full min-w-[360px] text-xs">
+                  <thead><tr>{["티커", "사유"].map(label => <th key={label} className="p-2 text-left font-normal text-[#6b7494]">{label}</th>)}</tr></thead>
+                  <tbody>{(d.unmappedTickers || []).map(row => (
+                    <tr key={row.ticker} className="border-t border-white/7 align-top">
+                      <td className="p-2 font-mono text-[#ff5c6a] max-w-40 break-all">{row.ticker}</td>
+                      <td className="p-2 text-[#a0a8c0]">{row.reason}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </section>
+          )}
+          {d && d.unmappedCount === 0 && <p role="status" className="mt-3 text-xs text-[#6b7494]">{d.tickerCount ? "미매핑 종목이 없습니다." : "매핑할 종목이 없습니다."}</p>}
         </div>
       </Card>
 

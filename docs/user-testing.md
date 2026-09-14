@@ -83,6 +83,17 @@ An unavailable IP lookup is displayed as unknown, not guessed.
   Text is split at line boundaries with its header retained. Excel includes all
   sheets. CSV decoding is strict UTF-8 with CP949 fallback. Scanned PDFs need OCR
   outside this flow. Structured-field validation does not guarantee AI accuracy.
+- Unmapped ticker and invalid-field reports list every affected AI result row,
+  including file, Excel sheet, chunk number, date, symbol/name, fields and reasons.
+  The result row number is local to that chunk and transaction/dividend response;
+  it is not an original Excel/CSV row number. Unknown tickers must remain blank
+  rather than being invented or omitted by the model. Rows omitted by the model
+  cannot be diagnosed by field validation alone.
+- Any validation issue blocks the whole upload from saving. A new analysis
+  invalidates that user's previous draft, so failed retries cannot confirm stale
+  results. Correct the source and retry. The mapping summary separately lists
+  saved ticker-to-name lookup failures; these are not missing trade amounts or
+  evidence that market-price lookup failed. Zero issues has an explicit empty state.
 - Confirmation merges new rows with existing history rather than replacing an
   entire broker. Identical repeated rows retain their multiplicity. Without a
   broker execution ID, truly distinct but identical fills across different

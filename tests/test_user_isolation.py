@@ -1,5 +1,6 @@
 import os
 import json
+import io
 import tempfile
 import unittest
 from contextvars import Context
@@ -218,6 +219,93 @@ class UserConnectionApiTests(unittest.TestCase):
                                        files={"files": ("trades.csv", b"TEST", "text/csv")})
         self.assertEqual(response.status_code, 422)
         self.assertNotIn("alice", webapp._IMPORT_DRAFTS)
+
+    def test_import_reports_every_unmapped_row_and_its_source(self):
+        trades = [dict(self.parsed_trade("")[0], 종목명="Unknown fund"),
+                  dict(self.parsed_trade("AAPL")[0], 일자="bad-date", 수량=-1)]
+        dividends = [{"일자": "2025-01-02", "티커": "", "종목명": "Unknown dividend",
+                      "통화": "USD", "배당금": 5, "private_field": "not-for-display"}]
+        with patch.object(ai_copilot, "parse_brokerage_full_transactions", return_value=(trades, None)), \
+                patch.object(ai_copilot, "parse_brokerage_dividends", return_value=(dividends, None)):
+            response = self.alice.post("/api/app/import", data={"consent": "true"},
+                                       files={"files": ("MyTrades.CSV", b"TEST", "text/csv")})
+        self.assertEqual(response.status_code, 422)
+        issues = response.json()["issues"]
+        self.assertEqual(len(issues), 3)
+        self.assertEqual([issue["name"] for issue in issues], ["Unknown fund", "AAPL", "Unknown dividend"])
+        self.assertEqual([issue["responseRow"] for issue in issues], [1, 2, 1])
+        self.assertEqual([issue["kind"] for issue in issues], ["transaction", "transaction", "dividend"])
+        self.assertTrue(all(issue["source"]["file"] == "MyTrades.CSV" for issue in issues))
+        self.assertIn("티커", issues[0]["fields"])
+        self.assertEqual(set(issues[1]["fields"]), {"일자", "수량"})
+        self.assertTrue(all(issue["reasons"] for issue in issues))
+        self.assertNotIn("not-for-display", response.text)
+        self.assertNotIn("alice", webapp._IMPORT_DRAFTS)
+        self.assertFalse(Path(self.directory, "alice", "manual_transactions.csv").exists())
+
+    def test_datasources_lists_unmapped_symbols_instead_of_only_a_count(self):
+        data = {"detail_df": pd.DataFrame(), "dividends_rows": [],
+                "name_map": {"AAPL": "Apple", "UNKNOWN": "UNKNOWN"},
+                "breakdown": pd.DataFrame([{"티커": "AAPL"}, {"티커": "UNKNOWN"}])}
+        with patch.object(webapp, "get_portfolio", return_value=data):
+            response = self.alice.get("/api/app/datasources")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["unmappedCount"], len(payload["unmappedTickers"]))
+        self.assertEqual([row["ticker"] for row in payload["unmappedTickers"]], ["UNKNOWN"])
+        self.assertTrue(payload["unmappedTickers"][0]["reason"])
+
+    def test_unmapped_details_preserve_workbook_sheets_and_chunk_numbers(self):
+        content = io.BytesIO()
+        with pd.ExcelWriter(content, engine="openpyxl") as writer:
+            pd.DataFrame({"종목명": ["Unknown investment fund"] * 1200}).to_excel(writer, sheet_name="매매", index=False)
+            pd.DataFrame({"종목명": ["Unknown distribution"]}).to_excel(writer, sheet_name="분배", index=False)
+        with patch.object(ai_copilot, "parse_brokerage_full_transactions", return_value=(self.parsed_trade(""), None)), \
+                patch.object(ai_copilot, "parse_brokerage_dividends", return_value=([], None)):
+            response = self.alice.post("/api/app/import", data={"consent": "true"},
+                files=[("files", ("Report.XLSX", content.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
+                       ("files", ("Second.CSV", b"TEST", "text/csv"))])
+        self.assertEqual(response.status_code, 422)
+        issues = response.json()["issues"]
+        workbook_issues = [issue for issue in issues if issue["source"]["file"] == "Report.XLSX"]
+        self.assertEqual({issue["source"]["sheet"] for issue in workbook_issues}, {"매매", "분배"})
+        self.assertGreater(max(issue["source"]["chunk"] for issue in workbook_issues), 1)
+        self.assertEqual(issues[-1]["source"], {"file": "Second.CSV", "sheet": "", "chunk": 1})
+        self.assertTrue(all(issue["responseRow"] == 1 for issue in issues))
+        self.assertEqual(response.json()["issueCount"], len(issues))
+
+    def test_unmapped_details_are_not_limited_to_the_thirty_row_preview(self):
+        trades = [dict(self.parsed_trade("")[0], 종목명=f"Unknown {number}") for number in range(40)]
+        with patch.object(ai_copilot, "parse_brokerage_full_transactions", return_value=(trades, None)), \
+                patch.object(ai_copilot, "parse_brokerage_dividends", return_value=([], None)):
+            response = self.alice.post("/api/app/import", data={"consent": "true"},
+                                       files={"files": ("Trades.CSV", b"TEST", "text/csv")})
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["issueCount"], 40)
+        self.assertEqual(response.json()["issues"][-1]["name"], "Unknown 39")
+        retry = self.preview(self.alice, "AAPL")
+        self.assertEqual(retry.status_code, 200)
+        self.assertEqual(retry.json().get("issues", []), [])
+
+    def test_invalid_new_import_discards_only_its_owners_previous_draft(self):
+        previous = self.preview(self.alice, "AAPL").json()["draftId"]
+        bob = self.preview(self.bob, "MSFT").json()["draftId"]
+        self.assertEqual(self.preview(self.alice, "").status_code, 422)
+        self.assertNotIn("alice", webapp._IMPORT_DRAFTS)
+        self.assertEqual(webapp._IMPORT_DRAFTS["bob"]["id"], bob)
+        response = self.alice.post("/api/app/import/confirm", json={"draftId": previous})
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(Path(self.directory, "alice", "manual_transactions.csv").exists())
+
+    def test_complete_and_empty_mapping_lists_have_no_unmapped_items(self):
+        for symbols in ([], ["AAPL"]):
+            data = {"detail_df": pd.DataFrame(), "dividends_rows": [], "name_map": {"AAPL": "Apple"},
+                    "breakdown": pd.DataFrame({"티커": symbols})}
+            with self.subTest(symbols=symbols), patch.object(webapp, "get_portfolio", return_value=data):
+                payload = self.alice.get("/api/app/datasources").json()
+                self.assertEqual(payload["unmappedCount"], 0)
+                self.assertEqual(payload["unmappedTickers"], [])
+                self.assertEqual(payload["mappedCount"], len(symbols))
 
     def test_shared_ai_quota_is_user_scoped_and_enforced(self):
         with patch.dict(os.environ, {"PFM_AI_REQUESTS_PER_HOUR": "1"}):
