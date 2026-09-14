@@ -55,7 +55,7 @@ export default function Login({ onLogin }: Props) {
               <path d="M2 13L6 8L10 11L15 4" stroke="#0a0d14" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
           </div>
-          <h1 className="font-['DM_Serif_Display',serif] text-3xl text-[#e8eaf0] mb-1">PortfolioAI</h1>
+          <h1 className="font-['DM_Serif_Display',serif] text-3xl text-[#e8eaf0] mb-1">Portfolio Lens</h1>
           <p className="text-xs text-[#6b7494] font-mono">개인 자산관리 · 성과 분석</p>
         </div>
 

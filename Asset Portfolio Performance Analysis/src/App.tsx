@@ -92,7 +92,7 @@ export default function App() {
     return (
       <header className="min-h-14 border-b border-white/7 flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-3 sm:px-6 flex-shrink-0 bg-[#0d1019]">
         <Logo />
-        <span className="font-['DM_Serif_Display',serif] text-base whitespace-nowrap">PortfolioAI</span>
+        <span className="font-['DM_Serif_Display',serif] text-base whitespace-nowrap">Portfolio Lens</span>
         <div className="order-last w-full sm:order-none sm:w-auto flex items-center gap-2 sm:ml-4 flex-wrap">
           {STEPS.map((s, i) => (
             <div key={s.id} className="flex items-center gap-2">
@@ -129,7 +129,7 @@ export default function App() {
       <aside className={`${sidebarOpen ? "fixed inset-y-0 left-0 z-30 w-56 md:static" : "hidden md:flex md:w-14"} flex-shrink-0 bg-[#0d1019] border-r border-white/7 flex flex-col transition-all duration-200 overflow-hidden`}>
         <div className={`flex items-center gap-3 px-4 h-14 border-b border-white/7 ${!sidebarOpen && "justify-center"}`}>
           <Logo />
-          {sidebarOpen && <span className="font-['DM_Serif_Display',serif] text-base tracking-tight whitespace-nowrap">PortfolioAI</span>}
+          {sidebarOpen && <span className="font-['DM_Serif_Display',serif] text-base tracking-tight whitespace-nowrap">Portfolio Lens</span>}
         </div>
         <nav className="flex-1 py-4 space-y-0.5 px-2">
           {NAV.map(item => (

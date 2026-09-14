@@ -1,5 +1,6 @@
 {
-  "description": "Analyze and track asset portfolio performance with detailed insights to help investors optimize their investment strategies effectively.",
+  "title": "Portfolio Lens",
+  "description": "Track your investments, returns, dividends, and benchmark performance with Portfolio Lens.",
   "robots": {
     "index": false
   },
