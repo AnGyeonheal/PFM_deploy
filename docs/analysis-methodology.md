@@ -3,6 +3,34 @@
 Audited: 2026-09-14. Applies to the React benchmark, dashboard and performance
 views, and the shared growth/XIRR/regression functions in `pme.py`.
 
+## Current Account Balances
+
+The dashboard's `accountBalances` response separates `cash`, `invested` and
+`total`. Each includes `krw` (native KRW), `usd` (native USD) and `totalKrw`
+(KRW conversion at the response's `fxRate`). Total native balances are cash
+plus investments in the same currency; conversion is KRW + USD * fxRate.
+
+Cash comes from the connected brokerage's `cashBuyingPower` values for each
+currency. The UI identifies this as cash available for orders, which need not
+equal a bank withdrawal balance or settled deposit balance. Imported trade and
+holding files do not establish a cash balance. Disconnected accounts, failed
+queries and missing cash fields are unavailable, distinct from an actual zero.
+If one cash currency is unavailable, its cash conversion and combined total
+remain unavailable; known cash and investment amounts can still be shown.
+
+Investments are current holding market values, not purchase principal. Native
+values from the brokerage and imported holdings are preserved through merging.
+Legacy USD holdings with only a KRW valuation are converted back only when a
+valid FX rate is present. KRW-listed overseas ETFs count as KRW holdings here,
+regardless of their underlying FX exposure for performance attribution.
+
+This section always covers all current holdings and connected-account cash.
+Dividend/FX performance toggles, selected symbols and historical periods do
+not filter it or replace current FX with purchase FX. It is separate from the
+period-end valuation and profit metrics below it. Native USD is displayed to
+the cent, and KRW conversions to the won; rounding can cause small differences
+between displayed components and aggregates derived from unrounded values.
+
 ## Shared Ledger
 
 `build_asset_value_growth` reconstructs positions in execution-time order.

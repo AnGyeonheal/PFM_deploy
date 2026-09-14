@@ -6,6 +6,7 @@
 import io
 import os
 import json
+import math
 import time
 import secrets as _secrets
 from datetime import datetime
@@ -261,6 +262,51 @@ def _analysis_status(frame, cutoff=None):
             "benchmarkAsOf": attributes.get("benchmark_price_date")}
 
 
+def _account_balances(data):
+    def amount(value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return number if math.isfinite(number) else None
+
+    fx_rate = amount(data.get("fx_rate"))
+    if fx_rate is not None and fx_rate <= 0:
+        fx_rate = None
+
+    def bucket(krw, usd):
+        total = None
+        if krw is not None and usd is not None and (fx_rate is not None or usd == 0):
+            total = krw + usd * (fx_rate or 0)
+        return {"krw": round(krw, 2) if krw is not None else None,
+                "usd": round(usd, 2) if usd is not None else None,
+                "totalKrw": round(total, 2) if total is not None else None}
+
+    summary = data.get("summary") or {}
+    cash_krw = amount(summary.get("cash_krw_native"))
+    cash_usd = amount(summary.get("cash_usd_native"))
+    if summary.get("cash_available") is False:
+        cash_krw = cash_usd = None
+    invested = {"KRW": 0.0, "USD": 0.0}
+    for holding in data.get("holdings") or []:
+        currency = str(holding.get("currency") or "KRW").upper()
+        if currency not in invested:
+            continue
+        value = amount(holding.get("eval_native"))
+        if value is None:
+            value = amount(holding.get("eval_krw"))
+            if currency == "USD":
+                value = value / fx_rate if value is not None and fx_rate is not None else None
+        if value is None or invested[currency] is None:
+            invested[currency] = None
+        else:
+            invested[currency] += value
+    total_krw = cash_krw + invested["KRW"] if cash_krw is not None and invested["KRW"] is not None else None
+    total_usd = cash_usd + invested["USD"] if cash_usd is not None and invested["USD"] is not None else None
+    return {"cash": bucket(cash_krw, cash_usd), "invested": bucket(invested["KRW"], invested["USD"]),
+            "total": bucket(total_krw, total_usd), "fxRate": fx_rate}
+
+
 @app.get("/api/app/dashboard")
 def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str = "", period: str = "", year: int = 0):
     user = _current_user(request)
@@ -446,7 +492,7 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
             changes = None
     return JSONResponse({"metrics": metrics, "stocks": stocks, "allocation": allocation, "fx": fx_rate,
                          "growth": growth, "tickers": all_tickers, "changes": changes, "analysis": analysis,
-                         "years": _available_years(data["combined_orders"])})
+                         "years": _available_years(data["combined_orders"]), "accountBalances": _account_balances(data)})
 
 
 @app.get("/api/app/tickers")

@@ -1,12 +1,16 @@
 import json
 import unittest
 from itertools import product
+from unittest.mock import patch
 
 import pandas as pd
 
 from analysis_fixture import AnalysisFixture
 import pme
+import pipeline
+import pm
 import webapp
+from analytics_engine import transform_to_mvp_json
 
 
 class ApiOptionTests(unittest.TestCase):
@@ -118,6 +122,100 @@ class ApiOptionTests(unittest.TestCase):
         with self.assertRaises(webapp.HTTPException) as error:
             webapp._period_bounds("YOY", 2027, today="2026-09-13")
         self.assertEqual(error.exception.status_code, 422)
+
+
+class AccountBalanceTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = self.enterContext(AnalysisFixture())
+        self.fixture.data["fx_rate"] = 1300.0
+        self.fixture.data["summary"].update(cash_krw_native=1000000, cash_usd_native=500.15)
+        self.fixture.data["holdings"] = [
+            {"ticker": "005930", "currency": "KRW", "quantity": 10, "eval_native": 3000000, "eval_krw": 3000000},
+            {"ticker": "360750", "currency": "KRW", "quantity": 20, "eval_native": 500000, "eval_krw": 500000},
+            {"ticker": "NVDA", "currency": "USD", "quantity": 10, "eval_native": 2000.25, "eval_krw": 2600325},
+            {"ticker": "AAPL", "currency": "USD", "quantity": 5, "eval_krw": 1300000},
+        ]
+
+    def balances(self, **options):
+        response = webapp.api_app_dashboard(None, **options)
+        self.assertEqual(response.status_code, 200)
+        return json.loads(response.body)["accountBalances"]
+
+    def test_cash_and_investments_are_separate_in_original_currency(self):
+        balances = self.balances()
+        self.assertEqual(balances["cash"], {"krw": 1000000, "usd": 500.15, "totalKrw": 1650195})
+        self.assertEqual(balances["invested"], {"krw": 3500000, "usd": 3000.25, "totalKrw": 7400325})
+        self.assertEqual(balances["total"], {"krw": 4500000, "usd": 3500.4, "totalKrw": 9050520})
+        self.assertEqual(balances["fxRate"], 1300)
+
+    def test_account_balances_do_not_change_with_performance_filters(self):
+        expected = self.balances()
+        for dividend, fx, period, ticker in product((0, 1), (0, 1), ("ALL", "1M", "YOY"), ("", "NVDA")):
+            with self.subTest(dividend=dividend, fx=fx, period=period, ticker=ticker):
+                self.assertEqual(self.balances(div=dividend, fx=fx, period=period, ticker=ticker,
+                                               year=self.fixture.index[0].year), expected)
+
+    def test_missing_cash_is_distinct_from_zero_balance(self):
+        self.fixture.data["summary"].pop("cash_usd_native")
+        balances = self.balances()
+        self.assertIsNone(balances["cash"]["usd"])
+        self.assertIsNone(balances["cash"]["totalKrw"])
+        self.assertIsNone(balances["total"]["totalKrw"])
+        self.assertEqual(balances["invested"]["usd"], 3000.25)
+        self.fixture.data["summary"]["cash_usd_native"] = 0
+        self.assertEqual(self.balances()["cash"]["usd"], 0)
+
+    def test_unlinked_account_does_not_report_known_zero_cash(self):
+        self.fixture.data["summary"] = pipeline.empty_portfolio("test")["asset_summary"]
+        balances = self.balances()
+        self.assertIsNone(balances["cash"]["krw"])
+        self.assertIsNone(balances["cash"]["usd"])
+        self.assertEqual(balances["invested"]["krw"], 3500000)
+
+
+class AccountBalanceSourceTests(unittest.TestCase):
+    def test_native_dollar_valuation_survives_account_merging(self):
+        fx_rate = 1333.37
+        source = {"result": {"marketValue": {"amount": {"krw": 0, "usd": 123.45}},
+                              "items": [{"symbol": "NVDA", "currency": "USD", "quantity": 1,
+                                         "marketValue": {"amount": 123.45}}]}}
+        portfolio = transform_to_mvp_json("test", source, fx_rate=fx_rate)
+        portfolio["asset_summary"]["fx_rate"] = fx_rate
+        self.assertEqual(portfolio["holdings"][0]["eval_native"], 123.45)
+        manual = pd.DataFrame([{"티커": "NVDA", "통화": "USD", "수량": 0.3, "현재가": 15.27,
+                                "평균매수가": 10, "평가액(원)": round(0.3 * 15.27 * fx_rate)}])
+        merged = pipeline.merge_manual_into_portfolio(portfolio, manual)
+        self.assertAlmostEqual(merged["holdings"][0]["eval_native"], 123.45 + 0.3 * 15.27)
+
+    def test_missing_native_value_is_not_misread_as_dollars(self):
+        portfolio = {"asset_summary": {}, "holdings": [
+            {"ticker": "NVDA", "currency": "USD", "quantity": 5, "eval_krw": 1300000}]}
+        manual = pd.DataFrame([{"티커": "005930", "통화": "KRW", "수량": 1, "현재가": 100,
+                                "평균매수가": 100, "평가액(원)": 100}])
+        merged = pipeline.merge_manual_into_portfolio(portfolio, manual)
+        balances = webapp._account_balances({"summary": merged["asset_summary"],
+                                             "holdings": merged["holdings"], "fx_rate": 1300})
+        self.assertEqual(balances["invested"]["usd"], 1000)
+        self.assertEqual(balances["invested"]["krw"], 100)
+
+    def test_buying_power_zero_and_missing_response_are_distinct(self):
+        with patch.object(pm.requests, "get") as request:
+            request.return_value.json.return_value = {"result": {"cashBuyingPower": 0}}
+            self.assertEqual(pm.get_buying_power("test", default=None), 0)
+            request.return_value.json.return_value = {"result": {}}
+            self.assertIsNone(pm.get_buying_power("test", default=None))
+            self.assertEqual(pm.get_buying_power("test"), 0)
+
+    def test_failed_cash_currency_remains_unavailable_in_portfolio(self):
+        source = {"result": {"items": []}}
+        with patch.object(pipeline, "get_access_token", return_value="test"), \
+                patch.object(pipeline, "get_holdings", return_value=source), \
+                patch.object(pipeline, "get_buying_power", side_effect=[1000.0, None]), \
+                patch.object(pipeline, "get_exchange_rate", return_value=1300.0):
+            portfolio, error = pipeline.toss_portfolio({"TOSS_CLIENT_ID": "test", "TOSS_CLIENT_SECRET": "test"})
+        self.assertIsNone(error)
+        self.assertEqual(portfolio["asset_summary"]["cash_krw_native"], 1000)
+        self.assertIsNone(portfolio["asset_summary"]["cash_usd_native"])
 
 
 if __name__ == "__main__":

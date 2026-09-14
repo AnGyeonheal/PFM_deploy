@@ -4,6 +4,56 @@ import { Card, CardHeader, formatKRW, ReturnBadge, PnLText, CustomTooltip, Analy
 
 const ALLOC_COLORS = ["#00d4a1", "#4f8cff", "#6b7494", "#a78bfa", "#f0a500", "#ff5c6a", "#12b981", "#ff9f40"];
 
+type CurrencyBalance = { krw: number | null; usd: number | null; totalKrw: number | null };
+type AccountBalances = { cash: CurrencyBalance; invested: CurrencyBalance; total: CurrencyBalance; fxRate: number | null };
+
+function CurrentAccountBalances({ balances }: { balances?: AccountBalances }) {
+  if (!balances) return null;
+  const formatBalance = (value: number | null, currency: "KRW" | "USD") => {
+    if (value == null || !Number.isFinite(value)) return "미조회";
+    return currency === "USD"
+      ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value)
+      : `${value.toLocaleString("ko-KR", { maximumFractionDigits: 0 })}원`;
+  };
+  return (
+    <section aria-label="현재 계좌 자산" className="border-y border-white/10 py-4">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 mb-4">
+        <h2 className="text-sm font-medium text-[#e8eaf0]">현재 계좌 자산 <span className="text-xs font-normal text-[#6b7494] ml-2">전체 계좌 · 현재 기준</span></h2>
+        <span className="text-xs text-[#6b7494] font-mono">{balances.fxRate == null ? "환율 미조회" : `$1 = ${balances.fxRate.toLocaleString("ko-KR", { maximumFractionDigits: 2 })}원`}</span>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-white/10">
+        {([
+          { key: "cash", label: "예수금", detail: "연동 계좌 · 현금 주문가능금액", color: "#4f8cff" },
+          { key: "invested", label: "투자 중인 금액", detail: "보유 종목의 현재 평가액", color: "#00d4a1" },
+          { key: "total", label: "총 보유금액", detail: "예수금 + 투자 평가액", color: "#e8eaf0" },
+        ] as const).map(item => {
+          const balance = balances[item.key];
+          return (
+            <div key={item.key} role="group" aria-label={item.label} className="min-w-0 py-4 first:pt-0 last:pb-0 md:py-0 md:px-5 md:first:pl-0 md:last:pr-0">
+              <h3 className="text-xs font-medium" style={{ color: item.color }}>{item.label}</h3>
+              <div className="text-xs text-[#6b7494] mt-1">{item.detail}</div>
+              <dl className="space-y-2 my-4 text-sm">
+                <div className="flex items-baseline justify-between gap-3">
+                  <dt className="shrink-0 text-[#a0a8c0]">원화 <span className="text-[10px] font-mono text-[#6b7494]">KRW</span></dt>
+                  <dd className="font-mono tabular-nums text-right break-all text-[#e8eaf0]">{formatBalance(balance.krw, "KRW")}</dd>
+                </div>
+                <div className="flex items-baseline justify-between gap-3">
+                  <dt className="shrink-0 text-[#a0a8c0]">달러 <span className="text-[10px] font-mono text-[#6b7494]">USD</span></dt>
+                  <dd className="font-mono tabular-nums text-right break-all text-[#e8eaf0]">{formatBalance(balance.usd, "USD")}</dd>
+                </div>
+              </dl>
+              <div className="flex flex-wrap items-baseline justify-between gap-2 border-t border-white/7 pt-3">
+                <span className="text-xs text-[#6b7494]">원화 환산</span>
+                <span className="font-mono tabular-nums text-sm font-medium break-all" style={{ color: item.color }}>{formatBalance(balance.totalKrw, "KRW")}</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 const DeltaText = ({ value, digits }: { value: number; digits: number }) => {
   if (!value) return <span className="font-mono text-xs text-[#6b7494]">±0</span>;
   const pos = value > 0;
@@ -62,6 +112,7 @@ export default function Dashboard({ opts, onTickers, onYears }: { opts: Analysis
 
   return (
     <div className="space-y-6">
+      <CurrentAccountBalances balances={d.accountBalances} />
       <AnalysisPeriodLabel opts={opts} asOf={d.analysis?.asOf} benchmarkAsOf={d.analysis?.benchmarkAsOf} />
       <AnalysisNotice analysis={d.analysis} />
       {/* KPI Row - D1 */}

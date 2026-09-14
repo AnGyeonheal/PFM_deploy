@@ -40,7 +40,7 @@ def empty_portfolio(user, fx=1400.0):
     return {
         "user_profile": {"user_id": user, "target_benchmark": "S&P 500"},
         "asset_summary": {"total_asset_krw": 0, "stock_eval_krw": 0, "purchase_krw": 0,
-                          "cash_krw": 0, "cash_krw_native": 0, "cash_usd_native": 0, "fx_rate": fx},
+                          "cash_krw": 0, "cash_krw_native": 0, "cash_usd_native": 0, "cash_available": False, "fx_rate": fx},
         "holdings": [],
     }
 
@@ -69,10 +69,10 @@ def toss_portfolio(creds, account="1"):
     toss_data = get_holdings(token, acc)
     if not toss_data:
         return None, "계좌·자산 데이터를 불러오지 못했습니다."
-    krw_cash = get_buying_power(token, acc, "KRW")
-    usd_cash = get_buying_power(token, acc, "USD")
+    krw_cash = get_buying_power(token, acc, "KRW", default=None)
+    usd_cash = get_buying_power(token, acc, "USD", default=None)
     fx = get_exchange_rate(token)
-    cash_krw = krw_cash + usd_cash * fx
+    cash_krw = (krw_cash or 0.0) + (usd_cash or 0.0) * fx
     pj = transform_to_mvp_json("usr_web", toss_data, cash_krw, fx)
     pj.setdefault("asset_summary", {})
     pj["asset_summary"]["cash_krw_native"] = krw_cash
@@ -173,14 +173,19 @@ def merge_manual_into_portfolio(portfolio_json, manual_df):
         return portfolio_json
     out = dict(portfolio_json)
     summary = dict(portfolio_json.get("asset_summary", {}))
+    base_fx = float(summary.get("fx_rate") or 0)
     merged = {}
     for h in portfolio_json.get("holdings", []):
         tk = h.get("ticker")
         eval_krw = float(h.get("eval_krw", 0) or 0)
+        eval_native = h.get("eval_native")
+        if eval_native is None:
+            eval_native = (eval_krw / base_fx if base_fx > 0 else None) if h.get("currency") == "USD" else eval_krw
         ret = float(h.get("return_pct", 0) or 0)
         cost = eval_krw / (1 + ret / 100) if (1 + ret / 100) != 0 else eval_krw
         merged[tk] = {"ticker": tk, "name": h.get("name"), "currency": h.get("currency"),
                       "quantity": float(h.get("quantity", 0) or 0), "eval_krw": eval_krw,
+                      "eval_native": float(eval_native) if eval_native is not None else None,
                       "cost_krw": cost, "sector": h.get("sector", "Unknown"), "brokers": {"토스증권"}}
     add_eval = add_purchase = 0.0
     for _, r in manual_df.iterrows():
@@ -189,6 +194,8 @@ def merge_manual_into_portfolio(portfolio_json, manual_df):
         qty = float(r.get("수량", 0) or 0)
         avg = float(r.get("평균매수가", 0) or 0)
         cur = str(r.get("통화", "KRW")).upper()
+        current_price = r.get("현재가")
+        eval_native = (qty * float(current_price) if current_price is not None and pd.notna(current_price) else None) if cur == "USD" else eval_krw
         purchase_native = qty * avg
         if cur == "USD" and float(r.get("현재가", 0) or 0) > 0:
             fx_implied = eval_krw / (qty * float(r["현재가"])) if qty else 1
@@ -202,11 +209,12 @@ def merge_manual_into_portfolio(portfolio_json, manual_df):
             m = merged[tk]
             m["quantity"] += qty
             m["eval_krw"] += eval_krw
+            m["eval_native"] = m["eval_native"] + eval_native if m["eval_native"] is not None and eval_native is not None else None
             m["cost_krw"] += purchase_krw
             m["brokers"].add(broker)
         else:
             merged[tk] = {"ticker": tk, "name": r.get("종목명"), "currency": cur, "quantity": qty,
-                          "eval_krw": eval_krw, "cost_krw": purchase_krw, "sector": "Unknown",
+                          "eval_krw": eval_krw, "eval_native": eval_native, "cost_krw": purchase_krw, "sector": "Unknown",
                           "brokers": {broker}}
     new_stock = sum(m["eval_krw"] for m in merged.values())
     holdings = []
@@ -214,6 +222,7 @@ def merge_manual_into_portfolio(portfolio_json, manual_df):
         ret = (m["eval_krw"] / m["cost_krw"] - 1) * 100 if m["cost_krw"] else 0
         holdings.append({"ticker": m["ticker"], "name": m["name"], "currency": m["currency"],
                          "quantity": round(m["quantity"], 4), "eval_krw": round(m["eval_krw"]),
+                         "eval_native": m["eval_native"],
                          "weight_pct": round(m["eval_krw"] / new_stock * 100, 2) if new_stock else 0,
                          "sector": m["sector"], "return_pct": round(ret, 2),
                          "brokers": ", ".join(sorted(m["brokers"]))})

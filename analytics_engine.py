@@ -138,6 +138,7 @@ def transform_to_mvp_json(user_id, toss_holdings, cash_krw=0.0, fx_rate=1400.0):
             "name": item.get("name"),
             "currency": currency,
             "quantity": item.get("quantity"),
+            "eval_native": eval_amount_native,
             "eval_krw": round(eval_amount_krw),
             "weight_pct": round(weight_pct, 2),
             "sector": "Unknown", # ETF/종목 카테고라이징 추가 구현 시 할당

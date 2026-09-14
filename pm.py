@@ -98,7 +98,7 @@ def get_accounts(access_token):
         print(f"[에러] 계좌 목록 조회 중 예외 발생: {e}")
     return []
 
-def get_buying_power(access_token, account="1", currency="KRW"):
+def get_buying_power(access_token, account="1", currency="KRW", *, default: float | None = 0.0):
     """5) 매수 가능 금액(예수금/현금) 조회"""
     url = 'https://openapi.tossinvest.com/api/v1/buying-power'
     headers = {
@@ -109,12 +109,13 @@ def get_buying_power(access_token, account="1", currency="KRW"):
         response = requests.get(url, headers=headers, params={'currency': currency}, timeout=5)
         response.raise_for_status()
         result = response.json().get("result", {})
-        return float(result.get("cashBuyingPower", 0))
+        cash = result.get("cashBuyingPower")
+        return float(cash) if cash is not None else default
     except requests.exceptions.HTTPError as e:
         print(f"[에러] 예수금({currency}) 조회 실패: {e.response.status_code}")
     except Exception as e:
         print(f"[에러] 예수금 조회 중 예외 발생: {e}")
-    return 0.0
+    return default
 
 def get_exchange_rate(access_token):
     """6) 원/달러 환율 조회 (USD 자산 환산용)"""

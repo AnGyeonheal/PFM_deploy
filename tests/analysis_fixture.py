@@ -34,6 +34,16 @@ class AnalysisFixture:
                      "name_map": self.name_map, "stock_analytics": pd.DataFrame(), "holdings": [],
                      "breakdown": pd.DataFrame([{"티커": symbol, "통화": currency, "보유수량": 11, "상태": "보유중"}
                                                 for symbol, currency in (("NVDA", "USD"), ("360750", "KRW"))])}
+        self.data["summary"].update(cash_krw_native=500000, cash_usd_native=300.5)
+        for symbol, currency, price in (("NVDA", "USD", self.stock), ("360750", "KRW", self.spy * self.fx)):
+            native_value = float(price.iloc[-1] * 11)
+            self.data["holdings"].append({"ticker": symbol, "name": self.name_map[symbol], "currency": currency,
+                                          "quantity": 11, "eval_native": native_value,
+                                          "eval_krw": round(native_value * (self.fx.iloc[-1] if currency == "USD" else 1)),
+                                          "weight_pct": 50.0})
+        invested_krw = sum(holding["eval_krw"] for holding in self.data["holdings"])
+        self.data["summary"].update(stock_eval_krw=invested_krw,
+                                      total_asset_krw=invested_krw + 500000 + 300.5 * self.fx.iloc[-1])
 
     def __enter__(self):
         self.stack = ExitStack()
