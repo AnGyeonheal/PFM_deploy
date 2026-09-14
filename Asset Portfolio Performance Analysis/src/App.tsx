@@ -6,23 +6,25 @@ import Verify from "./pages/Verify";
 import Dashboard from "./pages/Dashboard";
 import Performance from "./pages/Performance";
 import Benchmark from "./pages/Benchmark";
+import PerformanceDiagnosis from "./pages/PerformanceDiagnosis";
 import FxRates from "./pages/FxRates";
 import AIAssistant from "./pages/AIAssistant";
 
 type Phase = "onboard" | "verify" | "analysis";
-type Page = "dashboard" | "performance" | "benchmark" | "fx" | "ai";
+type Page = "dashboard" | "performance" | "benchmark" | "diagnosis" | "fx" | "ai";
 
 const NAV: { id: Page; label: string; sub: string; icon: string; badge?: string }[] = [
   { id: "dashboard", label: "대시보드", sub: "자산 현황", icon: "◈" },
   { id: "performance", label: "성과 분석", sub: "손익 분해", icon: "▲" },
   { id: "benchmark", label: "벤치마크", sub: "S&P500 비교", icon: "⊿", badge: "핵심" },
+  { id: "diagnosis", label: "성과 진단", sub: "성장·위험·효율", icon: "◎" },
   { id: "fx", label: "환율", sub: "USD/KRW", icon: "$" },
   { id: "ai", label: "AI 진단", sub: "진단·Q&A", icon: "✦" },
 ];
 const PAGE_LABELS: Record<Page, string> = {
-  dashboard: "대시보드", performance: "성과 분석", benchmark: "벤치마크 비교", fx: "환율", ai: "AI 진단",
+  dashboard: "대시보드", performance: "성과 분석", benchmark: "벤치마크 비교", diagnosis: "성과 진단", fx: "환율", ai: "AI 진단",
 };
-const ANALYSIS_PAGES: Page[] = ["dashboard", "performance", "benchmark"];
+const ANALYSIS_PAGES: Page[] = ["dashboard", "performance", "benchmark", "diagnosis"];
 const STEPS: { id: Phase; label: string }[] = [
   { id: "onboard", label: "데이터 준비" },
   { id: "verify", label: "검증·수정" },
@@ -125,7 +127,7 @@ export default function App() {
         </div>
         <nav className="flex-1 py-4 space-y-0.5 px-2">
           {NAV.map(item => (
-            <button key={item.id} onClick={() => { setPage(item.id); if (!window.matchMedia("(min-width: 768px)").matches) setSidebarOpen(false); }}
+            <button key={item.id} title={item.label} onClick={() => { setPage(item.id); if (!window.matchMedia("(min-width: 768px)").matches) setSidebarOpen(false); }}
               className={`w-full flex items-center gap-3 px-2.5 py-2.5 rounded-sm text-left transition-colors relative ${page === item.id ? "bg-white/8 text-[#e8eaf0]" : "text-[#6b7494] hover:text-[#a0a8c0] hover:bg-white/4"}`}>
               <span className={`text-base flex-shrink-0 w-5 text-center ${page === item.id ? "text-[#00d4a1]" : ""}`}>{item.icon}</span>
               {sidebarOpen && (
@@ -171,6 +173,7 @@ export default function App() {
           {page === "dashboard" && <Dashboard opts={opts} onTickers={setTickers} onYears={setYears} />}
           {page === "performance" && <Performance opts={opts} onTickers={setTickers} onYears={setYears} />}
           {page === "benchmark" && <Benchmark opts={opts} onTickers={setTickers} onYears={setYears} />}
+          {page === "diagnosis" && <PerformanceDiagnosis opts={opts} onTickers={setTickers} onYears={setYears} />}
           {page === "fx" && <FxRates />}
           {page === "ai" && <AIAssistant />}
         </main>

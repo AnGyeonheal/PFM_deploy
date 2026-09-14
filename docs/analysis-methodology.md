@@ -207,6 +207,69 @@ Selecting a historical year does not update daily comparison snapshots.
   scenario, not a forecast guarantee; selecting a short chart window must not
   annualize the entire historical profit over that short window.
 
+## Growth-Risk Diagnosis
+
+The **Performance Diagnosis** page below Benchmark uses method `twr-risk-v1`.
+It evaluates four separate axes instead of a weighted score: growth,
+drawdown defense, variability, and efficiency of active returns. This is a
+descriptive view of historical results, not a recommendation or prediction.
+The endpoint is `GET /api/app/diagnosis`; authentication, dividend/FX options,
+symbol selection, calendar-year boundaries and partial-data coverage are the
+same as the benchmark page. The account's uninvested buying power is not part
+of this strategy return; retained dividends follow the existing ledger.
+
+All metrics derive from the existing daily TWR, not from changes in raw
+portfolio value or purchase principal. Let W0=1 and Wt be the compounded daily
+TWR factors within the selected interval:
+
+$$ W_t = \prod_{i=1}^{t}(1+r_i) $$
+$$ AnnualizedTWR = W_T^{365/D} - 1 $$
+$$ Drawdown_t = W_t / \max(1,W_1,\ldots,W_t) - 1 $$
+$$ Volatility = s(r_p)\sqrt{252} $$
+$$ TrackingError = s(r_p-r_b)\sqrt{252} $$
+$$ InformationRatio = \overline{(r_p-r_b)} / s(r_p-r_b)\sqrt{252} $$
+
+Here D is actual calendar days from opening valuation to the last exposed
+date, with a minimum of 365 days for annualized TWR. For an initial purchase,
+elapsed time starts on that purchase date; if already invested, the prior
+valuation supplies the opening date. Empty days before initial investment or
+after complete withdrawal do not lengthen the observation window. Calendar
+gaps inside the window remain part of elapsed time.
+
+Drawdown includes the initial baseline, so a first-day loss is not missed.
+Maximum drawdown is the daily minimum, not the minimum of monthly samples.
+Both full-resolution TWR and drawdown paths are returned; the initial chart
+point is a baseline rather than an additional return observation.
+
+Risk statistics use the sample standard deviation (`ddof=1`) of weekdays
+with opening/closing capital or cash-flow activity. Volatility needs at least
+20 observations; information ratio and tracking error need at least 60.
+Information ratio is unavailable when daily active standard deviation is no
+greater than 1e-12. It uses arithmetic daily active returns, whereas cumulative
+excess TWR is the difference of two compounded returns. They are not the same
+calculation. Public-holiday forward fills and Korea/US close timing still
+affect the observations; this is not an exchange-calendar synchronized model.
+
+Monthly returns compound those same daily factors. Start/end months with only
+partial coverage remain visible and marked partial, but are excluded from the
+monthly outperformance frequency. The numerator is strictly outperforming
+complete months (difference > 1e-10 pp to ignore numerical noise); ties count
+in the denominator but are not wins. Months without exposure are not counted.
+
+The comparison headline reports the signs of cumulative excess TWR and the
+difference in maximum drawdown. A 0.005 pp display tolerance labels effectively
+equal values as similar; there is no hidden aggregation or optimized weight.
+Insufficient samples return null, not a neutral score. Nonfinite daily factors
+or daily returns below -100% produce an unavailable diagnostic with a warning.
+Existing cash-flow valuation assumptions and source-data limitations still apply.
+
+Tests cover known drawdowns and recovery, contributions/withdrawals without
+market gains, calendar-day annualization (including leap years), independently
+calculated information ratios, zero variance, partial months, liquidation,
+invalid inputs and 48 API option combinations. The UI includes both comparison
+charts, monthly results, formula tooltips, method assumptions and retry/empty
+states, with no changes to the pre-existing performance metrics.
+
 ## Limits
 
 The model covers KRW/USD long-only trades. It does not separately model fees,

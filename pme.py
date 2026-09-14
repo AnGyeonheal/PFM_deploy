@@ -399,6 +399,86 @@ def comparison_statistics(frame, start=None):
     return stats
 
 
+def performance_diagnosis(frame, start=None):
+    """입출금 제거 TWR의 성장·낙폭·변동성·초과수익 효율을 동일 평가기간으로 비교합니다."""
+    empty_metrics = {"totalReturnPct": None, "annualizedReturnPct": None,
+                     "maxDrawdownPct": None, "currentDrawdownPct": None, "volatilityPct": None}
+    result = {"portfolio": dict(empty_metrics), "benchmark": dict(empty_metrics),
+              "relative": {"excessReturnPp": None, "trackingErrorPct": None, "informationRatio": None,
+                           "monthlyWinRatePct": None, "winningMonths": 0, "comparableMonths": 0},
+              "sample": {"start": None, "end": None, "calendarDays": 0, "observations": 0},
+              "series": [], "monthly": [], "warnings": []}
+    if frame is None or frame.empty:
+        return result
+    daily = daily_returns_from_growth(frame)
+    daily.columns = ["portfolio", "benchmark"]
+    if start is not None:
+        daily = daily.loc[daily.index >= pd.Timestamp(start)]
+    if daily.empty:
+        return result
+    purchases = frame["누적매수금액"].diff().fillna(frame["누적매수금액"])
+    sales = frame["누적매도금액"].diff().fillna(frame["누적매도금액"])
+    activity = ((frame["내 자산가치"].shift(1) > 0) | (frame["내 자산가치"] > 0)
+                | (purchases > 0) | (sales > 0)).reindex(daily.index)
+    active_dates = activity[activity].index
+    if active_dates.empty:
+        return result
+    daily = daily.loc[active_dates[0]:active_dates[-1]]
+    if (daily < -1).any().any() or not all(math.isfinite(value) for value in daily.to_numpy().flat):
+        result["warnings"].append("일별 수익률에 유효하지 않은 값이 있어 성과 진단을 계산할 수 없습니다.")
+        return result
+    wealth = (1.0 + daily).cumprod()
+    if not all(math.isfinite(value) for value in wealth.to_numpy().flat):
+        result["warnings"].append("누적 수익률이 계산 범위를 벗어났습니다.")
+        return result
+    peaks = wealth.cummax().clip(lower=1.0)
+    drawdown = (wealth / peaks - 1.0) * 100
+    first, last = daily.index[0], daily.index[-1]
+    before = frame.loc[frame.index < first]
+    origin = before.index[-1] if not before.empty and before["내 자산가치"].iloc[-1] > 0 else first
+    elapsed_days = (last - origin).days
+    observations = daily.loc[(daily.index.dayofweek < 5) & activity.reindex(daily.index)]
+    result["sample"] = {"start": first.strftime("%Y-%m-%d"), "end": last.strftime("%Y-%m-%d"),
+                        "calendarDays": elapsed_days, "observations": len(observations)}
+    for side in ("portfolio", "benchmark"):
+        terminal = float(wealth[side].iloc[-1])
+        volatility = float(observations[side].std(ddof=1) * math.sqrt(252) * 100) if len(observations) >= 20 else None
+        result[side] = {
+            "totalReturnPct": (terminal - 1.0) * 100,
+            "annualizedReturnPct": (terminal ** (365.0 / elapsed_days) - 1.0) * 100 if elapsed_days >= 365 else None,
+            "maxDrawdownPct": float(drawdown[side].min()),
+            "currentDrawdownPct": float(drawdown[side].iloc[-1]),
+            "volatilityPct": volatility,
+        }
+    active_returns = observations["portfolio"] - observations["benchmark"]
+    relative = result["relative"]
+    relative["excessReturnPp"] = result["portfolio"]["totalReturnPct"] - result["benchmark"]["totalReturnPct"]
+    if len(observations) >= 60:
+        dispersion = float(active_returns.std(ddof=1))
+        relative["trackingErrorPct"] = dispersion * math.sqrt(252) * 100
+        if dispersion > 1e-12:
+            relative["informationRatio"] = float(active_returns.mean() / dispersion * math.sqrt(252))
+    for month, group in daily.groupby(daily.index.to_period("M")):
+        returns = ((1.0 + group).prod() - 1.0) * 100
+        partial = first > month.start_time or last < month.end_time.normalize()
+        excess = float(returns["portfolio"] - returns["benchmark"])
+        result["monthly"].append({"month": str(month), "portfolio": float(returns["portfolio"]),
+                                  "benchmark": float(returns["benchmark"]), "excessPp": excess, "partial": partial})
+        if not partial and activity.reindex(group.index).any():
+            relative["comparableMonths"] += 1
+            relative["winningMonths"] += int(excess > 1e-10)
+    if relative["comparableMonths"]:
+        relative["monthlyWinRatePct"] = relative["winningMonths"] / relative["comparableMonths"] * 100
+    result["series"].append({"date": origin.strftime("%Y-%m-%d"), "portfolio": 100.0, "benchmark": 100.0,
+                             "portfolioDrawdown": 0.0, "benchmarkDrawdown": 0.0, "baseline": True})
+    for date in daily.index:
+        result["series"].append({"date": date.strftime("%Y-%m-%d"), "portfolio": float(wealth.loc[date, "portfolio"] * 100),
+                                 "benchmark": float(wealth.loc[date, "benchmark"] * 100),
+                                 "portfolioDrawdown": float(drawdown.loc[date, "portfolio"]),
+                                 "benchmarkDrawdown": float(drawdown.loc[date, "benchmark"]), "baseline": False})
+    return result
+
+
 def profit_from_growth(frame, start=None):
     if frame is None or frame.empty:
         return {}

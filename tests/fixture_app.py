@@ -15,6 +15,7 @@ app = FastAPI()
 app.mount("/app", StaticFiles(directory=webapp._FIGMA_DIST, html=True))
 app.add_api_route("/api/app/benchmark", webapp.api_app_benchmark)
 app.add_api_route("/api/app/dashboard", webapp.api_app_dashboard)
+app.add_api_route("/api/app/diagnosis", webapp.api_app_diagnosis)
 app.add_api_route("/api/app/tickers", webapp.api_app_tickers)
 
 

@@ -36,7 +36,7 @@ from ai_copilot import generate_rebalancing_report, chat_with_portfolio
 from advanced_analytics import compute_fx_pnl
 from names import register_krw_foreign
 from pme import (compute_usd_avg_cost, build_usdkrw_history_frame, comparison_statistics,
-                 xirr_from_growth, profit_from_growth)
+                 xirr_from_growth, profit_from_growth, performance_diagnosis)
 
 load_dotenv()
 
@@ -809,6 +809,29 @@ def api_app_benchmark(request: Request, div: int = 1, fx: int = 1, start: str = 
         **result, "perStock": per_stock, "simulation": simulation,
         "tickers": all_tickers, "years": _available_years(orders),
     })
+
+
+@app.get("/api/app/diagnosis")
+def api_app_diagnosis(request: Request, div: int = 1, fx: int = 1, ticker: str = "", period: str = "", year: int = 0):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    cutoff, period_end = _period_bounds(period, year)
+    data = get_portfolio(user, include_div=bool(div), include_fx=bool(fx))
+    orders = data["combined_orders"]
+    frame = pipeline.growth_frame(orders, data["fx_rate"], ticker or None,
+                                   include_div=bool(div), include_fx=bool(fx), end=period_end)
+    analysis = _analysis_status(frame, cutoff)
+    usable = analysis["status"] in ("complete", "partial")
+    report = performance_diagnosis(frame if usable else None, cutoff)
+    if report["warnings"]:
+        analysis = dict(analysis, status="unavailable", warnings=analysis["warnings"] + report["warnings"])
+    names = data.get("name_map") or {}
+    tickers = [{"ticker": symbol, "name": names.get(symbol) or symbol}
+               for symbol in sorted({order["symbol"] for order in orders if order.get("symbol")})]
+    return JSONResponse({**report, "method": "twr-risk-v1", "analysis": analysis,
+                         "scopeName": names.get(ticker, ticker) if ticker else "전체 포트폴리오",
+                         "tickers": tickers, "years": _available_years(orders)})
 
 
 @app.get("/api/app/datasources")
