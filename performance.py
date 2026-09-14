@@ -223,9 +223,9 @@ def build_holdings_breakdown(orders, fx_now=1400.0, name_map=None, div_krw_by_ti
 
         if buy_qty <= 1e-9:
             continue
-        avg_buy_native = buy_native / buy_qty
-        avg_buy_krw = buy_krw / buy_qty
         held_qty = qty if qty > 1e-9 else 0.0
+        avg_buy_native = cost_native / held_qty if held_qty else buy_native / buy_qty
+        avg_buy_krw = cost_krw / held_qty if held_qty else buy_krw / buy_qty
 
         pn = price_now.get(s)
         unreal_pnl_krw = unreal_pnl_native = 0.0

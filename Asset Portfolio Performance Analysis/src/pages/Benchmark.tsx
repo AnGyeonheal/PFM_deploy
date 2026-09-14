@@ -81,7 +81,7 @@ export default function Benchmark({ opts, onTickers, onYears }: { opts: Analysis
 
   return (
     <div className="space-y-6">
-      <AnalysisPeriodLabel opts={opts} asOf={d.analysis?.asOf} />
+      <AnalysisPeriodLabel opts={opts} asOf={d.analysis?.asOf} benchmarkAsOf={d.analysis?.benchmarkAsOf} />
       <AnalysisNotice analysis={d.analysis} />
       {/* F1/F2 Summary */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">

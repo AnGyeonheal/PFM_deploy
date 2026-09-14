@@ -62,7 +62,7 @@ export default function Dashboard({ opts, onTickers, onYears }: { opts: Analysis
 
   return (
     <div className="space-y-6">
-      <AnalysisPeriodLabel opts={opts} asOf={d.analysis?.asOf} />
+      <AnalysisPeriodLabel opts={opts} asOf={d.analysis?.asOf} benchmarkAsOf={d.analysis?.benchmarkAsOf} />
       <AnalysisNotice analysis={d.analysis} />
       {/* KPI Row - D1 */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
@@ -86,7 +86,7 @@ export default function Dashboard({ opts, onTickers, onYears }: { opts: Analysis
           },
           {
             label: opts.period === "YOY" ? "기말 주식 평가액" : d.analysis?.status === "partial" ? "분석 종목 평가액" : "주식 평가액", value: formatKRW(m.totalCurrent),
-            sub: `매입원가 ${formatKRW(m.totalBuy, true)}`, highlight: false,
+            sub: `매입원가 ${formatKRW(m.totalBuy, true)}${m.holdingReturnPct == null ? "" : ` · 보유분 ${m.holdingReturnPct >= 0 ? "+" : ""}${m.holdingReturnPct.toFixed(2)}%`}`, highlight: false,
           },
           {
             label: "환율 (USD/KRW)", value: Math.round(d.fx).toLocaleString(),
@@ -273,8 +273,8 @@ export default function Dashboard({ opts, onTickers, onYears }: { opts: Analysis
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-white/7">
-                {(opts.period === "YOY" ? ["종목", "현재가", "현재 평단가", "매입환율", "현재 수량", "기말 평가액", "기말 원가", "기간 평가손익", "연간 수익률"] : ["종목", "현재가", "평단가", "매입환율", "수량", "평가액", "매입원가", "평가손익", "수익률"]).map(h => (
-                  <th key={h} className="px-4 py-3 text-left text-xs text-[#6b7494] font-mono uppercase tracking-wider">{h}</th>
+                {(opts.period === "YOY" ? ["종목", "현재가", "현재 평단가", "매입환율", "현재 수량", "기말 평가액", "기말 원가", "기말 평가손익", "기말 보유분 수익률", "연간 투입금 대비 수익률"] : ["종목", "현재가", "평단가", "매입환율", "수량", "평가액", "매입원가", "보유분 평가손익", "보유분 수익률", "투입금 대비 총수익률"]).map(h => (
+                  <th key={h} title={h.includes("보유분 수익률") ? "평가손익 / 잔여 보유원가. 실현손익과 배당은 제외." : h.includes("투입금") ? "선택기간의 기초 평가액과 총 매수금액 대비 실현손익·평가손익·배당 합계." : undefined} className="px-4 py-3 text-left text-xs text-[#6b7494] font-mono uppercase tracking-wider">{h}</th>
                 ))}
               </tr>
             </thead>
@@ -305,7 +305,8 @@ export default function Dashboard({ opts, onTickers, onYears }: { opts: Analysis
                     <td className="px-4 py-3 font-mono text-xs text-[#a0a8c0]">{s.quantity}</td>
                     <td className="px-4 py-3 font-mono text-xs text-[#e8eaf0]">{formatKRW(s.currentTotal, true)}</td>
                     <td className="px-4 py-3 font-mono text-xs text-[#a0a8c0]">{formatKRW(s.buyTotal, true)}</td>
-                    <td className="px-4 py-3"><PnLText value={s.unrealizedPnL} /></td>
+                    <td className="px-4 py-3"><PnLText value={s.holdingUnrealizedPnL} /></td>
+                    <td className="px-4 py-3"><ReturnBadge value={s.holdingReturnPct} /></td>
                     <td className="px-4 py-3"><ReturnBadge value={s.returnPct} /></td>
                   </tr>
               ))}

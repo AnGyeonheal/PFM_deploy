@@ -23,12 +23,15 @@ export type AnalysisCoverage = {
   excludedSymbols: string[];
   warnings: string[];
   asOf?: string | null;
+  priceDates?: Record<string, string>;
+  benchmarkAsOf?: string | null;
 };
 
-export function AnalysisPeriodLabel({ opts, asOf }: { opts: AnalysisOptions; asOf?: string | null }) {
-  if (opts.period !== "YOY") return null;
+export function AnalysisPeriodLabel({ opts, asOf, benchmarkAsOf }: { opts: AnalysisOptions; asOf?: string | null; benchmarkAsOf?: string | null }) {
+  if (opts.period !== "YOY" && !asOf) return null;
   return <div aria-label="분석 기간" className="text-xs text-[#a0a8c0] font-mono">
-    {opts.year ?? new Date().getFullYear()}년 · {opts.year ?? new Date().getFullYear()}-01-01 ~ {asOf ?? "데이터 없음"}
+    {opts.period === "YOY" ? `${opts.year ?? new Date().getFullYear()}년 · ${opts.year ?? new Date().getFullYear()}-01-01 ~ ${asOf ?? "데이터 없음"}` : `평가 기준 ${asOf}`}
+    {benchmarkAsOf && benchmarkAsOf !== asOf && ` · S&P500 종가 ${benchmarkAsOf}`}
   </div>;
 }
 

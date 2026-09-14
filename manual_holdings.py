@@ -579,8 +579,10 @@ def derive_holdings_from_tx(tx_df, fx_rate=1400.0):
     """
     if tx_df is None or tx_df.empty:
         return pd.DataFrame()
+    ordered = tx_df.assign(_trade_date=pd.to_datetime(tx_df["일자"], errors="coerce", utc=True))
+    ordered = ordered.sort_values("_trade_date", kind="stable")
     agg = {}
-    for _, r in tx_df.iterrows():
+    for _, r in ordered.iterrows():
         try:
             qty = float(r.get("수량", 0) or 0)
             price = float(r.get("단가", 0) or 0)
@@ -591,14 +593,16 @@ def derive_holdings_from_tx(tx_df, fx_rate=1400.0):
                 "증권사": r.get("증권사"), "티커": str(r.get("티커")),
                 "종목명": r.get("종목명"), "시장": r.get("시장", "US"),
                 "통화": str(r.get("통화", "KRW")).upper(),
-                "net_qty": 0.0, "buy_qty": 0.0, "buy_cost": 0.0,
+                "net_qty": 0.0, "remaining_cost": 0.0,
             })
             if str(r.get("구분", "")).strip() in ("매도", "SELL", "sell"):
+                if e["net_qty"] > 0:
+                    sold_quantity = min(qty, e["net_qty"])
+                    e["remaining_cost"] *= 1.0 - sold_quantity / e["net_qty"]
                 e["net_qty"] -= qty
             else:
                 e["net_qty"] += qty
-                e["buy_qty"] += qty
-                e["buy_cost"] += qty * price
+                e["remaining_cost"] += qty * price
         except Exception:
             continue
 
@@ -606,7 +610,7 @@ def derive_holdings_from_tx(tx_df, fx_rate=1400.0):
     for e in agg.values():
         if e["net_qty"] <= 1e-9:  # 청산 종목은 보유 목록에서 제외
             continue
-        avg_price = e["buy_cost"] / e["buy_qty"] if e["buy_qty"] else 0
+        avg_price = e["remaining_cost"] / e["net_qty"]
         market = str(e["시장"] or "US")
         country = "KR" if market.upper() in ("KOSPI", "KOSDAQ", "KR") else "US"
         yft = to_yf_ticker(e["티커"], country, market)

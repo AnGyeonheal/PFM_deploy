@@ -1,6 +1,6 @@
 # Performance and Benchmark Methodology
 
-Audited: 2026-09-13. Applies to the React benchmark, dashboard and performance
+Audited: 2026-09-14. Applies to the React benchmark, dashboard and performance
 views, and the shared growth/XIRR/regression functions in `pme.py`.
 
 ## Shared Ledger
@@ -10,6 +10,12 @@ Closed positions remain in performance history. Purchases, sales, remaining
 average-cost basis and cash dividends are recorded separately. Korean stock
 codes use the KRX listing's market to select .KS (KOSPI) or .KQ (KOSDAQ), unless
 the caller explicitly specifies the market or Yahoo ticker.
+
+Imported holdings are processed chronologically, using remaining average cost:
+a sale removes its quantity's share of cost, and full liquidation resets cost to
+zero. A subsequent purchase must not inherit the cost of previously sold shares.
+Displayed holding average prices likewise use remaining cost / remaining shares,
+not the average of all historical purchases.
 
 A missing quote, insufficient history or unmatched sale excludes that symbol's
 entire transaction ledger from the aggregate, including its purchases, sales
@@ -32,6 +38,14 @@ dividends are added once. Imported dividends take precedence for a symbol;
 otherwise estimates use shares held BEFORE the ex-dividend date. Historical
 USD dividends are converted at the event-date exchange rate.
 
+The valuation calendar ends at the latest available date among the included
+securities and SPY, subject to an explicitly selected end date. A new Korean
+trading session is not discarded just because the US session has not started.
+On dates without a new quote, each asset carries its last known close forward.
+`analysis.priceDates` and `analysis.benchmarkAsOf` identify actual quote dates;
+`analysis.asOf` identifies the ledger's valuation date. Live quotes can change
+intraday and may differ slightly from a recently cached historical quote.
+
 For the SPY equivalent, a purchase invests the same KRW contribution. A sale
 withdraws the same fraction of the portfolio's pre-sale market value from SPY.
 This is a proportional-withdrawal PME, NOT identical cash withdrawals. SPY's
@@ -50,6 +64,19 @@ For inception-to-date, V0 is zero. Sales never reduce the denominator. This
 is a cumulative gross-capital ROI, not an annualized return and not TWR.
 Reinvesting sales proceeds counts as another purchase. Each comparison side
 uses its own V0 and S. A nonpositive denominator yields no return, not zero.
+
+The holdings table and editor also show **holding return**, a separate measure:
+
+$$ HoldingReturn = (HoldingValue - RemainingCost) / RemainingCost $$
+
+It excludes realized profit and dividends and uses the closing position's cost,
+not cumulative purchases. For example, buying 10 shares at 100, selling them
+at 100, then buying another 10 at 100 and valuing them at 80 produces a -20%
+holding return but a -10% gross-capital ROI. The difference is a denominator
+choice, not missing losses. Date-range selection changes period profit/ROI;
+holding return remains the closing position's return (year-end for a past year).
+`holdingUnrealizedPnL` and `holdingReturnPct` are separate API fields, while
+`returnPct` continues to mean the selected period's gross-capital ROI.
 
 Remaining basis C provides the identities:
 
@@ -189,6 +216,13 @@ To exercise mixed quote availability in the UI, use the same test server with
 quotes and retains a healthy synthetic ETF. Regression tests cover 72 mixed-data
 option combinations in addition to the 48 complete-data combinations, and
 KOSDAQ routing, unmatched sales, empty periods and liquidation boundaries.
+
+Transaction-preprocessing regressions cover full liquidation and re-entry,
+partial sales followed by additional purchases, displayed cost reconciliation,
+buy-only averages, Korean quotes newer than the latest US session, explicit
+historical end dates, and holding return versus period ROI under dividend
+and date-range options. Real-account spot checks compared imported and API
+trades, split/override stages and independently reconstructed average cost.
 
 Browser checks covered 48 option combinations, chart modes, ETF selection,
 rapid toggling and 390px/1440px layouts. A gated-response interception test did

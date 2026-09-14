@@ -214,7 +214,8 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
         unavailable.attrs.update(coverage)
         return unavailable
     start = min(r["date"] for r in recs)
-    valuation_end = min(end_date, spy_hist.index.max()) if end_date is not None else spy_hist.index.max()
+    latest_price_date = max([spy_hist.index.max()] + [history.index.max() for history in native_history.values()])
+    valuation_end = min(end_date, latest_price_date) if end_date is not None else latest_price_date
     idx = pd.date_range(start=start, end=valuation_end, freq="D")
 
     def align(series):
@@ -326,6 +327,9 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
     if ticker and ticker in sym_hist:
         out["주가"] = sym_hist[ticker] * (fx_daily if is_krw_foreign(ticker) else 1.0)
     out.attrs.update(coverage)
+    out.attrs["price_dates"] = {symbol: history.loc[:valuation_end].index[-1].strftime("%Y-%m-%d")
+                               for symbol, history in native_history.items()}
+    out.attrs["benchmark_price_date"] = spy_hist.loc[:valuation_end].index[-1].strftime("%Y-%m-%d")
     return out
 
 

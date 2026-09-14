@@ -256,7 +256,9 @@ def _analysis_status(frame, cutoff=None):
     else:
         status = "partial" if excluded else "complete"
     return {"status": status, "includedSymbols": included, "excludedSymbols": excluded,
-            "warnings": warnings, "asOf": frame.index[-1].strftime("%Y-%m-%d") if frame is not None and not frame.empty else None}
+            "warnings": warnings, "asOf": frame.index[-1].strftime("%Y-%m-%d") if frame is not None and not frame.empty else None,
+            "priceDates": attributes.get("price_dates", {}),
+            "benchmarkAsOf": attributes.get("benchmark_price_date")}
 
 
 @app.get("/api/app/dashboard")
@@ -337,6 +339,11 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
                 closing = profit_from_growth(analysis_frame(tk, bool(fx)))
                 stocks[-1].update(currentTotal=closing.get("totalCurrent"), buyTotal=closing.get("totalBuy"))
         stocks[-1]["analysis"] = stock_analysis
+        closing = profit_from_growth(analysis_frame(tk, bool(fx)))
+        holding_cost = closing.get("totalBuy")
+        holding_pnl = closing["totalCurrent"] - holding_cost if holding_cost is not None else None
+        stocks[-1].update(holdingUnrealizedPnL=holding_pnl,
+                  holdingReturnPct=holding_pnl / holding_cost * 100 if holding_cost and holding_cost > 0 else None)
     holdings = data["holdings"]
     allocation = [{"name": (h.get("name") or h.get("ticker")), "value": round(float(h.get("weight_pct") or 0), 1)}
                   for h in holdings if float(h.get("weight_pct") or 0) > 0]
@@ -386,6 +393,10 @@ def api_app_dashboard(request: Request, div: int = 1, fx: int = 1, ticker: str =
             closing = profit_from_growth(frame)
             metrics.update(totalCurrent=closing.get("totalCurrent"), totalBuy=closing.get("totalBuy"))
     metrics["xirr"] = xirr_from_growth(frame, cutoff)
+    closing = profit_from_growth(frame)
+    holding_cost = closing.get("totalBuy")
+    metrics["holdingReturnPct"] = ((closing["totalCurrent"] - holding_cost) / holding_cost * 100
+                                   if holding_cost and holding_cost > 0 else None)
     projection_frame = pipeline.growth_frame(data["combined_orders"], fx_rate, ticker or None,
                                                include_div=bool(div), include_fx=bool(fx)) if period_end is not None else frame
     metrics["projectionRate"] = xirr_from_growth(projection_frame) if not projection_frame.attrs.get("excluded_symbols") else None
