@@ -2,6 +2,7 @@ import json
 import asyncio
 import io
 import tempfile
+import copy
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,8 @@ from unittest.mock import AsyncMock, patch
 import pandas as pd
 
 import manual_holdings
+import advanced_analytics
+import benchmark
 import performance
 import pme
 import pipeline
@@ -155,6 +158,297 @@ class TransactionPreprocessingTests(unittest.TestCase):
             response = asyncio.run(webapp.api_app_edit_transactions(request))
             self.assertTrue(json.loads(response.body)["ok"])
             self.assertEqual(write.call_args.args[0]["계좌"].tolist(), ["001", "002", "002"])
+
+    def test_edit_api_includes_toss_and_saves_edits_outside_manual_csv(self):
+        original = {"orderId": "order-1", "symbol": "AAPL", "currency": "USD", "broker": "토스증권",
+                    "account": "001", "side": "BUY", "execution": {"filledQuantity": 3,
+                    "averageFilledPrice": 100, "filledAmount": 300, "commission": 0.3,
+                    "filledAt": "2025-01-02T13:04:05+09:00"}}
+        data = {"toss_orders_raw": [original], "name_map": {"AAPL": "Apple"},
+            "toss_name_map": {"AAPL": "Apple"}, "dividends_rows": []}
+        overrides = {}
+        with patch.object(webapp, "_current_user", return_value="test"), \
+                patch.object(pipeline, "apply_credentials"), \
+                patch.object(webapp, "get_portfolio", return_value=data), \
+                patch.object(webapp, "read_transactions_csv", return_value=self.account_trades()), \
+                patch.object(webapp, "read_dividends_csv", return_value=pd.DataFrame()), \
+                patch.object(webapp, "list_snapshots", return_value=[]), \
+                patch.object(webapp, "snapshot_imports"), \
+                patch.object(pipeline, "read_toss_overrides", side_effect=lambda: dict(overrides)), \
+                patch.object(pipeline, "write_toss_overrides", side_effect=lambda value: overrides.update(value)), \
+                patch.object(webapp, "write_transactions_csv", return_value=3) as write:
+            payload = json.loads(webapp.api_app_edit_data(None).body)
+            self.assertEqual(len(payload["transactions"]), 4)
+            row = next(row for row in payload["transactions"] if row["source"] == "toss")
+            self.assertTrue(row["sourceId"])
+            row["price"] = 110
+            row["name"] = "Edited Apple"
+            request = SimpleNamespace(json=AsyncMock(return_value={"rows": payload["transactions"]}))
+            response = asyncio.run(webapp.api_app_edit_transactions(request))
+            self.assertEqual(response.status_code, 200)
+            self.assertNotIn("AAPL", write.call_args.args[0]["티커"].tolist())
+            reloaded = pipeline.apply_toss_overrides([original], overrides)
+            self.assertEqual(len(reloaded), 1)
+            self.assertEqual(reloaded[0]["execution"]["averageFilledPrice"], 110)
+            self.assertEqual(reloaded[0]["execution"]["filledAmount"], 330)
+            self.assertEqual(reloaded[0]["execution"]["filledAt"], original["execution"]["filledAt"])
+            self.assertEqual(reloaded[0]["execution"]["commission"], 0.3)
+            self.assertEqual(original["execution"]["averageFilledPrice"], 100)
+            data["name_map"] = {"AAPL": "Edited Apple"}
+            unchanged = json.loads(webapp.api_app_edit_data(None).body)
+            request.json = AsyncMock(return_value={"rows": unchanged["transactions"]})
+            self.assertEqual(asyncio.run(webapp.api_app_edit_transactions(request)).status_code, 200)
+            self.assertEqual(overrides[row["sourceId"]]["종목명"], "Edited Apple")
+
+    def test_toss_edits_survive_resync_and_preserve_distinct_executions(self):
+        original = {"orderId": "same-id", "symbol": "TEST", "broker": "토스증권", "account": "1",
+                    "currency": "USD", "side": "BUY", "execution": {"filledQuantity": 2,
+                    "averageFilledPrice": 100, "filledAmount": 200, "filledAt": "2025-01-02T09:30:00+09:00"}}
+        another_account = dict(original, account="2")
+        another_fill = dict(original, orderId="second-id")
+        overrides = {pipeline.toss_trade_key(original): {"단가": 125}}
+        refreshed = copy.deepcopy(original)
+        refreshed["execution"].update(averageFilledPrice=105, commission=0.5)
+        result = pipeline.apply_toss_overrides([refreshed, refreshed, another_account, another_fill], overrides)
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result[0]["execution"]["averageFilledPrice"], 125)
+        self.assertEqual(result[0]["execution"]["commission"], 0.5)
+        self.assertEqual(result[1]["execution"]["averageFilledPrice"], 100)
+        self.assertEqual(result[2]["execution"]["averageFilledPrice"], 100)
+        key = pipeline.toss_trade_key(original)
+        self.assertEqual(pipeline.apply_toss_overrides([original], {key: {"deleted": True}}), [])
+        self.assertEqual(pipeline.apply_toss_overrides([original], {}), [original])
+        legacy = {pipeline._legacy_toss_trade_key(original): {"단가": 120}}
+        self.assertEqual(pipeline.apply_toss_overrides([original], legacy)[0]["execution"]["averageFilledPrice"], 120)
+        no_id = {field: value for field, value in original.items() if field != "orderId"}
+        self.assertEqual(len(pipeline.apply_toss_overrides([no_id, no_id], {})), 2)
+
+    def test_toss_date_edit_keeps_intraday_time_and_original_order(self):
+        original = {"symbol": "TEST", "currency": "USD", "side": "SELL", "orderedAt": "2025-01-01",
+                    "execution": {"filledQuantity": 2, "averageFilledPrice": 100, "filledAmount": 200,
+                                  "filledAt": "2025-01-02T14:15:16+09:00", "tax": 0.1}}
+        result = pipeline._override_to_order(original, {"일자": "2025-02-03"})
+        self.assertEqual(result["execution"]["filledAt"], "2025-02-03T14:15:16+09:00")
+        self.assertEqual(result["orderedAt"], "2025-01-01")
+        self.assertEqual(result["side"], "SELL")
+        self.assertEqual(result["execution"]["tax"], 0.1)
+        named = pipeline._override_to_order(original, {"종목명": "Display name"})
+        self.assertEqual(named["execution"], original["execution"])
+        updated = copy.deepcopy(original)
+        updated["execution"]["averageFilledPrice"] = 101
+        self.assertNotEqual(pipeline.toss_override_revision({}, original), pipeline.toss_override_revision({}, updated))
+
+    def test_unknown_or_stale_toss_edit_does_not_write_any_data(self):
+        original = {"orderId": "order-1", "symbol": "TEST", "broker": "토스증권", "account": "1",
+                    "currency": "USD", "side": "BUY", "execution": {"filledQuantity": 1,
+                    "averageFilledPrice": 100, "filledAmount": 100, "filledAt": "2025-01-02"}}
+        with patch.object(webapp, "_current_user", return_value="test"), patch.object(pipeline, "apply_credentials"), \
+                patch.object(webapp, "get_portfolio", return_value={"toss_orders_raw": [original]}), \
+                patch.object(pipeline, "read_toss_overrides", return_value={}), \
+                patch.object(pipeline, "write_toss_overrides") as write_overrides, \
+                patch.object(webapp, "write_transactions_csv") as write_manual, \
+                patch.object(webapp, "snapshot_imports") as snapshot:
+            for key, revision in (("not-owned", "stale"), (pipeline.toss_trade_key(original), "stale")):
+                request = SimpleNamespace(json=AsyncMock(return_value={"rows": [
+                    {"source": "toss", "sourceId": key, "revision": revision, "deleted": True}]}))
+                self.assertEqual(asyncio.run(webapp.api_app_edit_transactions(request)).status_code, 409)
+            write_overrides.assert_not_called()
+            write_manual.assert_not_called()
+            snapshot.assert_not_called()
+
+    def test_api_deletion_restore_and_new_synced_orders_preserve_other_overrides(self):
+        original = {"orderId": "old", "symbol": "TEST", "broker": "토스증권", "account": "001",
+                    "currency": "USD", "side": "BUY", "execution": {"filledQuantity": 1,
+                    "averageFilledPrice": 100, "filledAmount": 100, "filledAt": "2025-01-02"}}
+        data = {"toss_orders_raw": [original], "dividends_rows": []}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(manual_holdings, "TOSS_OVR_JSON", str(Path(directory) / "overrides.json")), \
+                patch.object(webapp, "_current_user", return_value="test"), patch.object(pipeline, "apply_credentials"), \
+                patch.object(webapp, "get_portfolio", return_value=data), \
+                patch.object(webapp, "read_transactions_csv", return_value=pd.DataFrame()), \
+                patch.object(webapp, "read_dividends_csv", return_value=pd.DataFrame()), \
+                patch.object(webapp, "list_snapshots", return_value=[]), patch.object(webapp, "snapshot_imports"), \
+                patch.object(webapp, "write_transactions_csv", return_value=0):
+            pipeline.write_toss_overrides({"outside-current-page": {"단가": 50}})
+            row = json.loads(webapp.api_app_edit_data(None).body)["transactions"][0]
+            data["toss_orders_raw"].append(dict(original, orderId="new"))
+            row["deleted"] = True
+            request = SimpleNamespace(json=AsyncMock(return_value={"rows": [row]}))
+            self.assertEqual(asyncio.run(webapp.api_app_edit_transactions(request)).status_code, 200)
+            overrides = pipeline.read_toss_overrides()
+            self.assertIn("outside-current-page", overrides)
+            self.assertEqual([order["orderId"] for order in pipeline.apply_toss_overrides(data["toss_orders_raw"], overrides)], ["new"])
+            restored = json.loads(webapp.api_app_edit_data(None).body)["transactions"][0]
+            restored["reset"] = True
+            request.json = AsyncMock(return_value={"rows": [restored]})
+            self.assertEqual(asyncio.run(webapp.api_app_edit_transactions(request)).status_code, 200)
+            overrides = pipeline.read_toss_overrides()
+            self.assertEqual(overrides, {"outside-current-page": {"단가": 50}})
+            self.assertEqual(len(pipeline.apply_toss_overrides(data["toss_orders_raw"], overrides)), 2)
+
+    def test_legacy_transaction_editor_reuses_safe_override_save(self):
+        row = {"_src": "토스", "_key": "order-key", "_revision": "version", "_deleted": True,
+               "일자": "2025-01-02", "티커": "TEST", "구분": "매수", "수량": 1, "단가": 100}
+        request = SimpleNamespace(json=AsyncMock(return_value={"rows": [row]}))
+        with patch.object(webapp, "_current_user", return_value="test"), \
+                patch.object(webapp, "_save_transaction_edits", return_value="saved") as save:
+            self.assertEqual(asyncio.run(webapp.edit_data_tx(request)), "saved")
+        forwarded = save.call_args.args[1]["rows"][0]
+        self.assertEqual(forwarded["source"], "toss")
+        self.assertEqual(forwarded["sourceId"], "order-key")
+        self.assertEqual(forwarded["revision"], "version")
+        self.assertTrue(forwarded["deleted"])
+
+
+class DividendPaymentTests(unittest.TestCase):
+    def setUp(self):
+        self.fx = pd.Series([1000.0, 1200.0], index=pd.to_datetime(["2025-01-01", "2025-01-20"]))
+        self.enterContext(patch.object(advanced_analytics, "get_usdkrw_history", return_value=self.fx))
+        self.schedule = [{"exDate": "2025-01-10", "recordDate": "2025-01-13", "payDate": "2025-01-20", "amount": 1.0},
+                         {"exDate": "2025-04-10", "recordDate": "2025-04-11", "payDate": "2025-04-21", "amount": 2.0}]
+        self.enterContext(patch.object(advanced_analytics, "get_dividend_schedule", side_effect=lambda *args: self.schedule))
+        self.orders = [{"symbol": "TEST", "currency": "USD", "broker": "test", "account": "001", "side": side,
+                        "execution": {"filledQuantity": quantity, "averageFilledPrice": 100, "filledAt": date}}
+                       for date, side, quantity in (("2025-01-02", "BUY", 10), ("2025-01-10", "BUY", 5), ("2025-01-15", "SELL", 12))]
+
+    def test_pay_date_and_entitlement_date_are_separate(self):
+        records = advanced_analytics.build_dividend_records(self.orders, as_of="2025-04-30")
+        self.assertEqual(records[0]["shares"], 10)
+        self.assertEqual(records[0]["payDate"], "2025-01-20")
+        self.assertEqual(records[0]["recordDate"], "2025-01-13")
+        self.assertEqual(records[0]["amountKrw"], 12000)
+        self.assertEqual(records[1]["shares"], 3)
+        earlier = advanced_analytics.build_dividend_records(self.orders, as_of="2025-01-19")
+        self.assertFalse(earlier[0]["received"])
+        self.assertIsNone(earlier[0]["amountKrw"])
+
+    def test_actual_receipt_replaces_only_matching_dividend(self):
+        receipt = {"증권사": "test", "계좌": "001", "티커": "TEST", "통화": "USD", "배당금": 8.5, "일자": "2025-01-21"}
+        records = advanced_analytics.build_dividend_records(self.orders, actual_rows=[receipt, receipt], as_of="2025-04-30")
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["source"], "actual")
+        self.assertEqual(records[0]["amount"], 8.5)
+        self.assertEqual(records[0]["payDate"], "2025-01-21")
+        self.assertEqual(records[0]["exDate"], "2025-01-10")
+        self.assertEqual(records[1]["source"], "estimated")
+        self.assertEqual(records[1]["exDate"], "2025-04-10")
+        receipt["일자"] = "2025-02-03"
+        delayed = advanced_analytics.build_dividend_records(self.orders, actual_rows=[receipt], as_of="2025-04-30")
+        self.assertEqual(len(delayed), 2)
+        self.assertEqual(delayed[0]["source"], "actual")
+        self.assertEqual(delayed[0]["payDate"], "2025-02-03")
+
+    def test_missing_pay_dates_are_estimated_only_with_evidence(self):
+        self.schedule[1]["payDate"] = None
+        records = advanced_analytics.build_dividend_records(self.orders, as_of="2025-04-30")
+        self.assertEqual(records[1]["dateSource"], "estimated")
+        self.assertEqual(records[1]["payDate"], "2025-04-21")
+        self.schedule[0]["payDate"] = None
+        records = advanced_analytics.build_dividend_records(self.orders, as_of="2025-04-30")
+        self.assertTrue(all(row["dateSource"] == "unknown" and not row["received"] for row in records))
+
+    def test_unambiguous_actual_receipt_supplies_missing_payment_lag(self):
+        for row in self.schedule:
+            row["payDate"] = None
+        receipt = {"증권사": "test", "계좌": "001", "티커": "TEST", "통화": "USD", "배당금": 8.5, "일자": "2025-01-20"}
+        rows = advanced_analytics.build_dividend_records(self.orders, actual_rows=[receipt], as_of="2025-04-30")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1]["dateSource"], "estimated")
+        self.assertEqual(rows[1]["payDate"], "2025-04-21")
+
+    def test_actual_for_one_account_does_not_hide_anothers_dividend(self):
+        orders = self.orders + [dict(self.orders[0], account="002")]
+        receipt = {"증권사": "test", "계좌": "001", "티커": "TEST", "통화": "USD", "배당금": 8.5,
+                   "일자": "2025-01-21", "배당락일": "2025-01-10"}
+        records = advanced_analytics.build_dividend_records(orders, actual_rows=[receipt], as_of="2025-04-30")
+        january = [row for row in records if row["payDate"].startswith("2025-01")]
+        self.assertEqual(len(january), 2)
+        self.assertEqual({row["account"] for row in january}, {"001", "002"})
+
+    def test_provider_duplicate_ex_dates_are_not_paid_twice(self):
+        self.schedule.append(dict(self.schedule[0]))
+        records = advanced_analytics.build_dividend_records(self.orders, as_of="2025-04-30")
+        self.assertEqual(len(records), 2)
+
+    def test_distinct_actual_payment_ids_are_preserved(self):
+        receipt = {"증권사": "test", "계좌": "001", "티커": "TEST", "통화": "USD",
+                   "배당금": 5, "일자": "2025-01-20", "배당락일": "2025-01-10", "배당ID": "ordinary"}
+        special = dict(receipt, 배당ID="special")
+        records = advanced_analytics.build_dividend_records(self.orders, actual_rows=[receipt, special, receipt], as_of="2025-04-30")
+        self.assertEqual(len([record for record in records if record["source"] == "actual"]), 2)
+        self.assertEqual(len([record for record in records if record["source"] == "estimated"]), 1)
+
+    def test_yahoo_calendar_is_joined_to_its_own_ex_date(self):
+        history = pd.Series([1.0, 1.0, 2.0], index=pd.to_datetime(["2025-01-10", "2025-01-10", "2025-04-10"]))
+        with patch.object(benchmark, "get_dividends", return_value=history), \
+                patch.object(benchmark, "_memo", side_effect=lambda key, producer: producer()), \
+                patch.object(benchmark.yf, "Ticker") as ticker:
+            ticker.return_value.calendar = {"Ex-Dividend Date": "2025-04-10", "Dividend Date": "2025-04-21"}
+            schedule = benchmark.get_dividend_schedule("TEST")
+        self.assertEqual(len(schedule), 2)
+        self.assertIsNone(schedule[0]["payDate"])
+        self.assertEqual(schedule[1]["payDate"], pd.Timestamp("2025-04-21"))
+
+    def test_pipeline_summary_and_cash_events_use_same_payment_records(self):
+        receipt = pd.DataFrame([{"증권사": "test", "계좌": "001", "티커": "TEST", "통화": "USD",
+                                  "배당금": 8.5, "일자": "2025-01-21"}])
+        with patch.object(pipeline, "read_dividends_csv", return_value=receipt):
+            native_krw, native_usd, totals, rows = pipeline._dividends(self.orders, 2000)
+            events = pipeline._dated_div_events(self.orders, 2000)
+        self.assertEqual(native_krw, 0)
+        self.assertEqual(native_usd, 14.5)
+        self.assertEqual(totals["TEST"], 17400)
+        self.assertEqual([row["일자"] for row in rows], ["2025-01-21", "2025-04-21"])
+        self.assertEqual(sum(event[1] for event in events), totals["TEST"])
+        self.assertEqual(events[0][0], pd.Timestamp("2025-01-21"))
+        with patch.object(performance, "get_usdkrw_history", return_value=self.fx), \
+            patch.object(performance, "get_native_price_now", return_value=100):
+            summary = performance.compute_performance_summary(self.orders, 2000, native_krw, native_usd,
+                                       dividend_krw=sum(totals.values()))
+        self.assertEqual(summary["div_krw"], sum(event[1] for event in events))
+
+    def test_ambiguous_actual_date_does_not_double_count_uncertain_estimates(self):
+        for row in self.schedule:
+            row["payDate"] = None
+        receipt = {"증권사": "test", "계좌": "001", "티커": "TEST", "통화": "USD", "배당금": 9, "일자": "2025-04-21"}
+        rows = advanced_analytics.build_dividend_records(self.orders, actual_rows=[receipt], as_of="2025-04-30")
+        self.assertEqual(sum(row["source"] == "actual" for row in rows), 1)
+        self.assertTrue(all(not row["received"] for row in rows if row["source"] == "estimated"))
+        self.assertTrue(all(row.get("matchingUncertain") for row in rows if row["source"] == "estimated"))
+
+    def test_cash_ledger_does_not_book_before_payment(self):
+        index = pd.date_range("2025-01-01", "2025-04-30")
+        with patch.object(pipeline, "read_dividends_csv", return_value=pd.DataFrame()), \
+                patch.object(pme, "get_history", return_value=pd.Series(100.0, index=index)), \
+                patch.object(pme, "get_usdkrw_history", return_value=self.fx), \
+                patch.object(pme, "get_dividends", return_value=pd.Series(dtype=float)):
+            events = pipeline._dated_div_events(self.orders, 2000)
+            frame = pme.build_asset_value_growth(self.orders, 2000, div_events=events)
+            fixed = pme.build_asset_value_growth(self.orders, 2000, div_events=events, include_fx=False)
+        self.assertEqual(frame.loc["2025-01-19", "누적배당금액"], 0)
+        self.assertEqual(frame.loc["2025-01-20", "누적배당금액"], 12000)
+        self.assertEqual(fixed.loc["2025-01-20", "누적배당금액"], 10000)
+
+    def test_dividend_edit_roundtrip_keeps_event_identity_and_actual_date(self):
+        record = advanced_analytics.build_dividend_records(self.orders, as_of="2025-04-30")[0]
+        row = {"date": "2025-01-21", "ticker": "TEST", "name": "TEST", "currency": "USD", "amount": 8.5,
+               "broker": "test", "account": "001", "exDate": record["exDate"], "recordDate": record["recordDate"],
+               "eventId": record["eventId"]}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(manual_holdings, "DIV_CSV", str(Path(directory) / "dividends.csv")), \
+                patch.object(webapp, "_current_user", return_value="test"), patch.object(pipeline, "apply_credentials"), \
+                patch.object(webapp, "snapshot_imports"):
+            request = SimpleNamespace(json=AsyncMock(return_value={"rows": [row, row]}))
+            response = asyncio.run(webapp.api_app_edit_dividends(request))
+            self.assertEqual(response.status_code, 200)
+            saved = manual_holdings.read_dividends_csv().to_dict("records")
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["계좌"], "001")
+        self.assertEqual(saved[0]["배당ID"], record["eventId"])
+        reconciled = advanced_analytics.build_dividend_records(self.orders, actual_rows=saved, as_of="2025-04-30")
+        self.assertEqual(len(reconciled), 2)
+        self.assertEqual(reconciled[0]["source"], "actual")
+        self.assertEqual(reconciled[0]["amount"], 8.5)
 
 
 class KoreanValuationDateTests(unittest.TestCase):

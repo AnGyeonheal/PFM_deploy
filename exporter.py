@@ -261,13 +261,15 @@ def build_import_template_xlsx():
 
     # 3) 배당내역
     ws2 = wb.create_sheet("배당내역")
-    div_cols = ["증권사", "일자", "티커", "종목명", "통화", "배당금"]
+    div_cols = ["증권사", "일자", "티커", "종목명", "통화", "배당금", "계좌", "배당락일", "기준일", "배당ID"]
     ws2.append(div_cols)
     ws2.append(["한화투자증권", "2024-04-20", "005930", "삼성전자", "KRW", 1500])
     ws2.append(["한화투자증권", "2024-06-10", "AAPL", "Apple", "USD", 2.4])
     _style_header(ws2, len(div_cols))
-    for i, w in enumerate([14, 12, 10, 16, 8, 12], start=1):
+    for i, w in enumerate([14, 12, 10, 16, 8, 12, 14, 12, 12, 18], start=1):
         ws2.column_dimensions[chr(64 + i)].width = w
+    for account_cells in ws2.iter_rows(min_row=2, max_row=1000, min_col=7, max_col=7):
+        account_cells[0].number_format = "@"
     dv_cur2 = DataValidation(type="list", formula1='"KRW,USD"', allow_blank=True)
     ws2.add_data_validation(dv_cur2); dv_cur2.add("E2:E1000")
 

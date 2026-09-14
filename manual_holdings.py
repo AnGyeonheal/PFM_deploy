@@ -39,7 +39,7 @@ TRASH_DIR = _DataPath("trash")
 
 COLUMNS = ["증권사", "티커", "종목명", "시장", "수량", "평균매수가", "통화", "매수일", "계좌"]
 TX_COLUMNS = ["증권사", "일자", "티커", "종목명", "시장", "구분", "수량", "단가", "통화", "계좌"]
-DIV_COLUMNS = ["증권사", "일자", "티커", "종목명", "통화", "배당금"]
+DIV_COLUMNS = ["증권사", "일자", "티커", "종목명", "통화", "배당금", "계좌", "배당락일", "기준일", "배당ID"]
 SPLIT_COLUMNS = ["티커", "종목명", "분할일", "비율"]
 
 
@@ -357,12 +357,12 @@ def read_dividends_csv():
     if not os.path.exists(DIV_CSV):
         return pd.DataFrame(columns=DIV_COLUMNS)
     try:
-        df = pd.read_csv(DIV_CSV, encoding="utf-8-sig", dtype={"티커": str})
+        df = pd.read_csv(DIV_CSV, encoding="utf-8-sig", dtype={"티커": str, "계좌": str, "배당ID": str})
         for c in DIV_COLUMNS:
             if c not in df.columns:
                 df[c] = ""
         df["배당금"] = pd.to_numeric(df["배당금"], errors="coerce")
-        for c in ("증권사", "일자", "티커", "종목명", "통화"):
+        for c in ("증권사", "일자", "티커", "종목명", "통화", "계좌", "배당락일", "기준일", "배당ID"):
             df[c] = df[c].fillna("").astype(str)
         df["티커"] = df["티커"].map(normalize_ticker)
         return df[DIV_COLUMNS]
@@ -432,7 +432,7 @@ def save_parsed_dividends(rows, replace_broker=None):
     new_df = new_df[DIV_COLUMNS]
     if replace_broker and os.path.exists(DIV_CSV):
         try:
-            old = pd.read_csv(DIV_CSV, encoding="utf-8-sig", dtype={"티커": str})
+            old = pd.read_csv(DIV_CSV, encoding="utf-8-sig", dtype={"티커": str, "계좌": str, "배당ID": str})
             old = old[old.get("증권사") != replace_broker]
             combined = pd.concat([old, new_df], ignore_index=True)
         except Exception:
@@ -521,6 +521,8 @@ def import_template_xlsx(file_bytes, replace_broker=None):
                 continue
             div_rows.append({
                 "증권사": str(r.get("증권사", "") or "").strip() or "직접입력",
+                "계좌": position_key(r)[1], "배당락일": _fmt_date(r.get("배당락일")),
+                "기준일": _fmt_date(r.get("기준일")), "배당ID": str(r.get("배당ID") or "") if pd.notna(r.get("배당ID")) else "",
                 "일자": _fmt_date(r.get("일자")),
                 "티커": normalize_ticker(tk),
                 "종목명": nm or tk,

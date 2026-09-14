@@ -107,6 +107,47 @@ def get_splits(yf_ticker):
     return _memo(("splits", yf_ticker), lambda: _get_splits_uncached(yf_ticker))
 
 
+def get_dividend_schedule(yf_ticker):
+    """배당락 이력에 대응하는 공시 지급일만 연결합니다. 과거 지급일 누락은 None입니다."""
+    dividends = get_dividends(yf_ticker)
+    if dividends is None or dividends.empty:
+        return []
+
+    def calendar_data():
+        try:
+            result = yf.Ticker(yf_ticker).calendar
+            return result if isinstance(result, dict) else {}
+        except Exception:
+            return {}
+
+    def day(value):
+        try:
+            parsed = pd.Timestamp(value)
+            return parsed.tz_localize(None).normalize() if pd.notna(parsed) else None
+        except (TypeError, ValueError):
+            return None
+
+    calendar = _memo(("dividend_calendar", yf_ticker), calendar_data)
+    calendar_ex = day(calendar.get("Ex-Dividend Date"))
+    calendar_pay = day(calendar.get("Dividend Date"))
+    calendar_record = day(calendar.get("Record Date"))
+    grouped = {}
+    for date, amount in dividends.items():
+        ex_date = day(date)
+        try:
+            amount = float(amount)
+        except (ValueError, TypeError):
+            continue
+        if ex_date is not None and 0 < amount < float("inf"):
+            grouped.setdefault(ex_date, set()).add(amount)
+    result = []
+    for ex_date, amounts in sorted(grouped.items()):
+        pay_date = calendar_pay if ex_date == calendar_ex and calendar_pay is not None and calendar_pay >= ex_date else None
+        result.append({"exDate": ex_date, "recordDate": calendar_record if ex_date == calendar_ex else None,
+                       "payDate": pay_date, "amount": sum(amounts), "dateSource": "announced" if pay_date is not None else "unknown"})
+    return result
+
+
 def _get_splits_uncached(yf_ticker):
     try:
         sp = yf.Ticker(yf_ticker).splits

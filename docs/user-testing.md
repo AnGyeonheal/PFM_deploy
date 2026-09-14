@@ -53,6 +53,20 @@ loopback; do not expose that mode through a separate public proxy.
    cannot be confirmed by a different account. Cancel leaves existing data intact.
 5. Verify/edit the imported rows and continue to portfolio analysis.
 
+Transaction verification also includes Toss API fills. Source labels distinguish
+Toss from imports. Toss changes are stored as local overrides, not sent to the
+broker; exclusion and original restoration apply after saving. Sync preserves the
+overrides and new orders. Reload when a save reports that the original or another
+editor changed. No-ID executions use a fallback fingerprint, so provider changes
+to those original fields may require manual reconciliation.
+
+Dividend verification lists payment date (announced/estimated/unknown), ex-date,
+record date when available, and entitled shares by account. Actual records take
+priority for the matching event, not the symbol's entire history. Review actual
+payment dates and net receipts before converting estimates. Unknown-date, future
+and ambiguous-match estimates are not counted as received. The methodology document
+describes Yahoo's limited historical payment dates and settlement assumptions.
+
 Toss connection accepts the tester's Client ID, Client Secret and account ID. It
 checks access before saving, never returns the credentials to the browser, and
 can be disconnected from the same screen. The tester must register the displayed

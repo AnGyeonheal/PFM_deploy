@@ -88,9 +88,63 @@ to the full account's asset projection; a manual scenario rate remains available
 
 Prices use Yahoo Close with `auto_adjust=False` (split-adjusted, not dividend-
 adjusted). Pipeline trade quantities/prices are normalized for splits. Cash
-dividends are added once. Imported dividends take precedence for a symbol;
-otherwise estimates use shares held BEFORE the ex-dividend date. Historical
-USD dividends are converted at the event-date exchange rate.
+dividends are reconciled by broker/account and distribution event, not by hiding
+all estimates for any symbol with one imported dividend. Actual payments take
+priority only for matched events; other periods and identified accounts remain.
+Historical USD payments are converted at the actual/estimated payment-date rate.
+
+Ordinary dividend entitlement uses the trade ledger BEFORE the ex-dividend date,
+which represents eligible holdings for the record date after settlement. Purchases
+on the ex-date do not acquire that distribution; selling after the ex-date does
+not remove it. The record date is displayed where the provider supplies it, but
+is not used as an unadjusted trade-date cutoff. Special due-bill arrangements and
+unrecorded transfers need actual receipts; they cannot be inferred from this model.
+
+Yahoo's dividend history is indexed by ex-date. Its current calendar can provide
+an `Ex-Dividend Date` / `Dividend Date` pair, not a complete historical pay-date
+table. A published pay date is joined only to that exact ex-date. Missing dates
+may be estimated from the median distinct completed ex-to-pay intervals for the
+same symbol/currency, rolling weekends forward. These dates are labelled estimated,
+not announced. Exchange holidays, broker processing delays and historical changes
+in payment policy are not modelled. Without observed evidence the pay date remains
+unknown, and those amounts are not counted as received. Future payments are also
+shown separately until their date arrives. Estimates are gross; actual amounts may
+be net of withholding tax.
+
+Reconciliation first uses an event ID or explicit ex-date. Legacy receipts without
+those fields match the uniquely closest pay date within seven calendar days. If
+there is no nearby pay date, only a unique ex-date in the prior 120 days is matched.
+Ambiguous candidates are marked for review and excluded from received estimates
+instead of double counting them. A receipt with unspecified account scope cannot
+establish account-specific allocation. Exact duplicate receipts are counted once;
+distinct explicit payment IDs and distinct accounts remain separate. The optional
+`계좌`, `배당락일`, `기준일`, `배당ID` columns preserve matches across edits/imports.
+Changing an estimate to an actual entry requires checking its payment date and net
+amount before saving. Existing files without these optional columns still load.
+
+The portfolio dividend summary, editor and dated cash ledger use these same
+reconciled records. The pre-existing SPY benchmark dividend model remains an
+ex-date total-return approximation; it is not a forecast of brokerage payment dates.
+
+### Transaction Edits
+
+The editor includes imported trades and original Toss trades. Imported rows remain
+in their CSV; Toss edits are field-level overrides in the existing per-user override
+store and never create an additional imported trade. Stable Toss order IDs are
+scoped by original broker/account, independently of edited values. Repeated API
+pages containing the same order ID are collapsed; distinct order IDs are retained.
+When no ID is available, a scoped execution fingerprint and occurrence index preserve
+identical fills rather than guessing that they are duplicates. This fallback cannot
+guarantee matching if the provider later changes the original execution fields.
+
+Resync applies overrides after loading original orders and before split adjustments.
+Unedited execution fields (including fees and timestamps) remain unchanged. Explicit
+exclusion creates a tombstone; original restoration removes that override. Missing
+rows in a submitted view do not delete newly synced orders or overrides outside the
+current view. A revision derived from the original order and its override rejects
+stale saves. Legacy overrides remain readable. Live brokerage balances stay live;
+transaction-derived performance uses the edited ledger. Separate manual imports
+are not automatically deduplicated against Toss by matching amount/date alone.
 
 The valuation calendar ends at the latest available date among the included
 securities and SPY, subject to an explicitly selected end date. A new Korean

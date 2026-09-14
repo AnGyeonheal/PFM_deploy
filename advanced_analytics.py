@@ -1,11 +1,18 @@
 """배당 수익 및 환차손익(FX 손익) 계산 모듈.
 토스 API에는 배당 내역이 없어 yfinance 배당/환율 데이터로 추정합니다.
-- 배당: 주문 이력으로 보유 수량 타임라인을 복원한 뒤, 각 배당락일의 보유수량 × 주당배당으로 수령액 추정
+- 배당: 계좌별 권리수량 × 주당배당, 실제 입금 우선 및 지급일 기준 수령액 추정
 - 환차손익: USD 매수 시점의 환율과 현재 환율 차이를 매수 원금(USD)에 적용
 """
+import hashlib
+import json
+import math
+from statistics import median
+
 import pandas as pd
 
-from benchmark import to_yf_ticker, get_dividends, get_usdkrw_history
+from benchmark import to_yf_ticker, get_dividend_schedule, get_usdkrw_history
+from pme import _trade_records, position_key
+from names import normalize_kr_ticker
 
 
 def _shares_held_on(buy_sell_events, as_of_date):
@@ -37,80 +44,169 @@ def _symbol_events(orders):
 
 
 def compute_dividends(orders, current_fx=1400.0):
-    """보유 이력 기반으로 종목별 누적 배당 수령액(원화 환산)을 추정합니다.
-    반환: DataFrame(종목, 통화, 배당수령(원화), 배당건수)
-    """
-    by_symbol = _symbol_events(orders)
-    rows = []
-    for sym, info in by_symbol.items():
-        events = sorted(info["events"], key=lambda x: x[0])
-        currency = info["currency"]
-        # 현재 보유수량 > 0 또는 과거 보유가 있었던 종목만
-        country = "KR" if currency == "KRW" else "US"
-        yft = to_yf_ticker(sym, country)
-        divs = get_dividends(yft)
-        if divs.empty:
+    """수령일이 지난 추정 배당을 종목별로 집계합니다."""
+    totals = {}
+    for record in build_dividend_records(orders, current_fx):
+        if not record["received"]:
             continue
-
-        first_buy = events[0][0]
-        total_div_native = 0.0
-        count = 0
-        for ex_date, dps in divs.items():
-            if ex_date < first_buy:
-                continue
-            shares = _shares_held_on(events, ex_date)
-            if shares > 0:
-                total_div_native += shares * float(dps)
-                count += 1
-
-        if total_div_native <= 0:
-            continue
-        div_krw = total_div_native * current_fx if currency == "USD" else total_div_native
-        rows.append({
-            "종목": sym,
-            "통화": currency,
-            "배당수령(원본)": round(total_div_native, 2),
-            "배당수령(원)": round(div_krw),
-            "배당횟수": count,
-        })
-
-    return pd.DataFrame(rows).sort_values("배당수령(원)", ascending=False).reset_index(drop=True) if rows else pd.DataFrame()
+        key = (record["ticker"], record["currency"])
+        total = totals.setdefault(key, {"종목": key[0], "통화": key[1], "배당수령(원본)": 0.0,
+                                        "배당수령(원)": 0.0, "배당횟수": 0})
+        total["배당수령(원본)"] += record["amount"]
+        total["배당수령(원)"] += record["amountKrw"]
+        total["배당횟수"] += 1
+    return pd.DataFrame(totals.values())
 
 
 def compute_dividend_events(orders, current_fx=1400.0, ticker=None):
-    """배당 지급 이력을 (배당락일, 원화금액, 종목) 이벤트 리스트로 반환합니다.
-    각 배당락일의 보유수량 × 주당배당(yfinance)으로 추정. ticker 지정 시 해당 종목만.
-    """
-    by_symbol = _symbol_events(orders)
+    """보유 권리와 수령일을 분리한 (지급일, 원화금액, 종목) 이벤트입니다."""
+    return [(pd.Timestamp(row["payDate"]), row["amountKrw"], row["ticker"])
+            for row in build_dividend_records(orders, current_fx)
+            if row["received"] and (not ticker or row["ticker"] == ticker)]
+
+
+def _day(value):
+    if value is None or str(value).strip() in ("", "NaT", "nan"):
+        return None
+    try:
+        parsed = pd.Timestamp(value)
+        return parsed.tz_localize(None).normalize() if pd.notna(parsed) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _event_id(position, ex_date):
+    return hashlib.sha256(json.dumps([*position, str(ex_date.date())], ensure_ascii=True).encode()).hexdigest()
+
+
+def build_dividend_records(orders, current_fx=1400.0, actual_rows=None, as_of=None, include_est=True):
+    """계좌·배당 사건별 실제 입금 우선 원장. 지급일 미확인·미도래분은 수령액에서 제외합니다."""
+    today = _day(as_of) if as_of is not None else pd.Timestamp.now().normalize()
     fx_history = get_usdkrw_history("10y")
-    events = []
-    for sym, info in by_symbol.items():
-        if ticker and sym != ticker:
+    actual, estimates, seen_actual = [], [], set()
+    for row in actual_rows or []:
+        try:
+            amount = float(row.get("배당금") or 0)
+        except (ValueError, TypeError):
             continue
-        evs = sorted(info["events"], key=lambda x: x[0])
-        if not evs:
+        if not math.isfinite(amount) or amount <= 0:
             continue
-        currency = info["currency"]
-        yft = to_yf_ticker(sym, "KR" if currency == "KRW" else "US")
-        divs = get_dividends(yft)
-        if divs is None or divs.empty:
+        symbol = normalize_kr_ticker(str(row.get("티커") or ""))
+        position = position_key(dict(row, 티커=symbol))
+        pay_date, ex_date = _day(row.get("일자")), _day(row.get("배당락일"))
+        identity = (position, pay_date, ex_date, amount, str(row.get("배당ID") or ""))
+        if identity in seen_actual:
             continue
-        first_buy = evs[0][0]
-        for ex_date, dps in divs.items():
-            try:
-                ed = pd.to_datetime(ex_date).tz_localize(None).normalize()
-            except Exception:
-                continue
-            if ed < first_buy:
-                continue
-            shares = _shares_held_on(evs, ed)
-            if shares > 0:
-                native = shares * float(dps)
-                event_fx = fx_history.asof(ed) if not fx_history.empty else current_fx
-                event_fx = float(event_fx) if pd.notna(event_fx) else current_fx
-                krw = native * event_fx if currency == "USD" else native
-                events.append((ed, krw, sym))
-    return sorted(events, key=lambda x: x[0])
+        seen_actual.add(identity)
+        actual.append({"ticker": symbol, "name": row.get("종목명") or symbol,
+                       "broker": str(row.get("증권사") or ""), "account": position[1], "currency": position[2],
+                       "position": position, "payDate": pay_date, "exDate": ex_date,
+                       "recordDate": _day(row.get("기준일")), "amount": amount, "shares": None,
+                       "eventId": str(row.get("배당ID") or ""), "source": "actual", "dateSource": "actual"})
+    positions = {}
+    for record in _trade_records(orders):
+        position = record["position"]
+        info = positions.setdefault(position, {"events": [], "broker": position[0], "account": position[1]})
+        info["events"].append((record["date"], record["qty"] if record["side"] == "BUY" else -record["qty"]))
+    schedules = {}
+    if include_est:
+        for position, info in positions.items():
+            currency, symbol = position[2:]
+            if (symbol, currency) not in schedules:
+                schedules[(symbol, currency)] = get_dividend_schedule(to_yf_ticker(symbol, "KR" if currency == "KRW" else "US"))
+            seen = set()
+            for entry in schedules[(symbol, currency)]:
+                ex_date = _day(entry.get("exDate"))
+                if ex_date is None or ex_date > today or ex_date in seen:
+                    continue
+                seen.add(ex_date)
+                shares = _shares_held_on(info["events"], ex_date)
+                amount = shares * float(entry["amount"])
+                if shares <= 0 or not math.isfinite(amount) or amount <= 0:
+                    continue
+                pay_date = _day(entry.get("payDate"))
+                if pay_date is not None and pay_date < ex_date:
+                    pay_date = None
+                estimates.append({"ticker": symbol, "name": symbol, "broker": info["broker"], "account": info["account"],
+                                  "currency": currency, "position": position, "exDate": ex_date,
+                                  "recordDate": _day(entry.get("recordDate")), "payDate": pay_date,
+                                  "dateSource": "announced" if pay_date is not None else "unknown",
+                                  "amount": amount, "shares": shares, "eventId": _event_id(position, ex_date), "source": "estimated"})
+
+    def scope_matches(receipt, estimate):
+        return (receipt["ticker"] == estimate["ticker"] and receipt["currency"] == estimate["currency"]
+                and (not receipt["position"][0] or receipt["position"][0] == estimate["position"][0])
+                and (not receipt["account"] or receipt["account"] == estimate["account"]))
+
+    lags = {}
+    for entry in actual + estimates:
+        if entry["payDate"] is not None and entry["exDate"] is not None and entry["payDate"] <= today:
+            lag = (entry["payDate"] - entry["exDate"]).days
+            if 0 <= lag <= 180:
+                lags.setdefault((entry["ticker"], entry["currency"]), set()).add(lag)
+    for estimate in estimates:
+        observed = lags.get((estimate["ticker"], estimate["currency"]))
+        if estimate["payDate"] is None and observed:
+            estimate["payDate"] = (estimate["exDate"] + pd.Timedelta(days=round(median(observed))) + pd.offsets.BDay(0)).normalize()
+            estimate["dateSource"] = "estimated"
+    matched, uncertain = set(), set()
+    def link_receipt(receipt, indexes):
+        matched.update(indexes)
+        first = estimates[indexes[0]]
+        receipt["exDate"] = receipt["exDate"] or first["exDate"]
+        receipt["recordDate"] = receipt["recordDate"] or first["recordDate"]
+        if len(indexes) == 1:
+            receipt["eventId"] = receipt["eventId"] or first["eventId"]
+
+    for receipt in actual:
+        candidates = [index for index, estimate in enumerate(estimates) if scope_matches(receipt, estimate)]
+        explicit = [index for index in candidates if receipt["eventId"] and receipt["eventId"] == estimates[index]["eventId"]]
+        if not explicit:
+            explicit = [index for index in candidates if receipt["exDate"] is not None
+                        and receipt["exDate"] == estimates[index]["exDate"]]
+        if explicit:
+            link_receipt(receipt, explicit)
+            continue
+        if receipt["exDate"] is not None or receipt["payDate"] is None:
+            continue
+        near = [index for index in candidates if estimates[index]["payDate"] is not None
+                and abs((receipt["payDate"] - estimates[index]["payDate"]).days) <= 7]
+        if near:
+            difference = min(abs((receipt["payDate"] - estimates[index]["payDate"]).days) for index in near)
+            near = [index for index in near if abs((receipt["payDate"] - estimates[index]["payDate"]).days) == difference]
+        else:
+            near = [index for index in candidates
+                if 0 <= (receipt["payDate"] - estimates[index]["exDate"]).days <= 120]
+        if len({estimates[index]["exDate"] for index in near}) == 1:
+            link_receipt(receipt, near)
+        else:
+            uncertain.update(near)
+    for receipt in actual:
+        if receipt["payDate"] is not None and receipt["exDate"] is not None and receipt["payDate"] <= today:
+            lag = (receipt["payDate"] - receipt["exDate"]).days
+            if 0 <= lag <= 180:
+                lags.setdefault((receipt["ticker"], receipt["currency"]), set()).add(lag)
+    for estimate in estimates:
+        observed = lags.get((estimate["ticker"], estimate["currency"]))
+        if estimate["payDate"] is None and observed:
+            estimate["payDate"] = (estimate["exDate"] + pd.Timedelta(days=round(median(observed))) + pd.offsets.BDay(0)).normalize()
+            estimate["dateSource"] = "estimated"
+    unique_actual = {}
+    for receipt in actual:
+        key = (receipt["position"], receipt["payDate"], receipt["exDate"], receipt["amount"], receipt["eventId"])
+        unique_actual[key] = receipt
+    result = list(unique_actual.values()) + [dict(row, matchingUncertain=index in uncertain)
+                       for index, row in enumerate(estimates) if index not in matched]
+    for row in result:
+        pay_date = row["payDate"]
+        row["received"] = pay_date is not None and pay_date <= today and not row.get("matchingUncertain", False)
+        rate = fx_history.asof(pay_date) if pay_date is not None and not fx_history.empty else current_fx
+        rate = float(rate) if pd.notna(rate) else current_fx
+        row["amountKrw"] = row["amount"] * rate if row["currency"] == "USD" else row["amount"]
+        row["amountKrw"] = row["amountKrw"] if row["received"] else None
+        for field in ("payDate", "exDate", "recordDate"):
+            row[field] = row[field].strftime("%Y-%m-%d") if row[field] is not None else ""
+    return sorted(result, key=lambda row: (row["payDate"] or "9999", row["ticker"], row["account"], row["eventId"]))
 
 
 def compute_fx_pnl(orders, current_fx=1400.0):

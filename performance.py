@@ -34,7 +34,7 @@ def _records(orders):
 
 
 def compute_performance_summary(orders, fx_now=1400.0, div_krw_native=0.0, div_usd_native=0.0,
-                                include_div=True, include_fx=True):
+                                include_div=True, include_fx=True, dividend_krw=None):
     """전체/보유/실현 성과를 원화·외화로 분해한 요약 dict를 반환합니다.
     배당은 검증된 임포트 기록(div_krw_native 원화·div_usd_native 달러)만 사용합니다.
     분해: 총손익(원) = 순수 주가손익(원) + 환차손익(원) + 배당(원).
@@ -110,8 +110,7 @@ def compute_performance_summary(orders, fx_now=1400.0, div_krw_native=0.0, div_u
             t["cur_value_krw"] += cur_val_krw
             t["cost_krw_remaining"] += cost_krw
 
-    # 배당은 검증된 임포트 기록만 사용 (yfinance 추정 미사용)
-    div_krw = (div_krw_native + div_usd_native * fx_now) if include_div else 0.0
+    div_krw = (dividend_krw if dividend_krw is not None else div_krw_native + div_usd_native * fx_now) if include_div else 0.0
 
     fx_total_krw = (t["realized_fx_krw"] + t["unreal_fx_krw"]) if include_fx else 0.0
     realized_total_krw = t["realized_price_krw"] + (t["realized_fx_krw"] if include_fx else 0.0)

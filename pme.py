@@ -100,7 +100,7 @@ def compute_rolling_beta(orders, fx_now=1400.0, ticker=None, window=60, period="
 
 def _avg_buy_fx_series(sym_recs, idx, fx_hist, fx_now):
     """USD 종목의 보유분 가중평균 매수환율 시계열(평균법). 환차손익 제거용."""
-    eff = pd.Series(fx_now, index=idx)
+    eff = pd.Series(fx_now, index=idx, dtype=float)
     positions = {}
     current = fx_now
     for record in sorted(sym_recs, key=lambda item: item["date"]):
@@ -261,7 +261,7 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
     gross_buy = pd.Series(0.0, index=idx)
     sell_cash = pd.Series(0.0, index=idx)
     spy_sell_cash = pd.Series(0.0, index=idx)
-    spy_buy_fx = pd.Series(fx_now, index=idx)
+    spy_buy_fx = pd.Series(fx_now, index=idx, dtype=float)
     holding_cost = pd.Series(0.0, index=idx)
     positions = {record["position"]: record["symbol"] for record in recs_sorted}
     held = dict.fromkeys(positions, 0.0)
@@ -329,8 +329,13 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
                     continue
                 if not include_fx and symbol and sym_cur.get(symbol) == "USD":
                     records = [record for record in recs_sorted if record["symbol"] == symbol]
+                    if len(ev) > 3 and ev[3]:
+                        records = [record for record in records
+                                   if (not ev[3][0] or record["position"][0] == ev[3][0])
+                                   and (not ev[3][1] or record["position"][1] == ev[3][1])]
+                    basis_date = pd.Timestamp(ev[4]) - pd.Timedelta(days=1) if len(ev) > 4 and ev[4] else d
                     average_fx = _avg_buy_fx_series(records, idx, fx_hist, fx_now)
-                    amt *= _safe_asof(average_fx, d, fx_now) / _safe_asof(fx_hist, d, fx_now)
+                    amt *= _safe_asof(average_fx, basis_date, fx_now) / _safe_asof(fx_hist, d, fx_now)
             except Exception:
                 continue
             div_cum.loc[div_cum.index >= d] += amt

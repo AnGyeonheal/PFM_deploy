@@ -90,10 +90,17 @@ function rowHtml(cols, data) {
   const src = data._src || '임포트';
   const key = data._key || '';
   const badge = src === '토스' ? 'bg-primary' : (src === '추정' ? 'bg-warning text-dark' : (src === '검증' ? 'bg-success' : 'bg-secondary'));
-  return `<tr data-src="${src}" data-key="${String(key).replace(/"/g, '&quot;')}">` +
+  return `<tr data-src="${src}" data-key="${String(key).replace(/"/g, '&quot;')}" data-revision="${data._revision || ''}">` +
     `<td><span class="badge ${badge}">${src}</span></td>` +
     cols.map(c => cell(c, data[c])).join('') +
-    '<td><button class="btn btn-sm btn-outline-danger" title="행 삭제" onclick="this.closest(\'tr\').remove()">✕</button></td></tr>';
+    '<td><button class="btn btn-sm btn-outline-danger" title="행 삭제" onclick="removeRow(this)">✕</button></td></tr>';
+}
+function removeRow(button) {
+  const row = button.closest('tr');
+  if (row.dataset.src !== '토스') { row.remove(); return; }
+  row.dataset.deleted = '1';
+  row.classList.add('opacity-50');
+  row.querySelectorAll('input,select,button').forEach(element => element.disabled = true);
 }
 function build(headId, bodyId, cols, data) {
   document.getElementById(headId).innerHTML = '<th>출처</th>' + cols.map(c => `<th>${c}</th>`).join('') + '<th></th>';
@@ -107,7 +114,7 @@ function addRow(kind) {
 function collect(bodyId) {
   const rows = [];
   document.querySelectorAll('#' + bodyId + ' tr').forEach(tr => {
-    const obj = {_src: tr.dataset.src || '', _key: tr.dataset.key || ''};
+    const obj = {_src: tr.dataset.src || '', _key: tr.dataset.key || '', _revision: tr.dataset.revision || '', _deleted: tr.dataset.deleted === '1'};
     tr.querySelectorAll('[data-col]').forEach(el => obj[el.dataset.col] = el.value.trim());
     if (obj['티커']) rows.push(obj);
   });
@@ -124,13 +131,14 @@ async function save(kind) {
     });
     const j = await r.json();
     if (j.ok) {
-      let m = (kind === 'tx') ? ('임포트 ' + j.count + '건 · 토스 수정 ' + (j.toss_edited || 0) + '건 · 삭제 ' + (j.toss_deleted || 0) + '건')
+      let m = (kind === 'tx') ? ('임포트 ' + j.manualCount + '건 · 토스 ' + (j.tossCount || 0) + '건')
                               : (j.count + '건');
       msg.className = 'text-success small';
       msg.textContent = m + ' 저장됨 · 대시보드에 반영됩니다';
+      if (kind === 'tx') window.location.reload();
     } else {
       msg.className = 'text-danger small';
-      msg.textContent = '저장 실패';
+      msg.textContent = j.error || '저장 실패';
     }
   } catch (e) {
     msg.className = 'text-danger small';

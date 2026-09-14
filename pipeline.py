@@ -4,6 +4,8 @@
 순수 함수로 옮긴 모듈입니다. 토스 API + 임포트 데이터를 합쳐 요약/보유/성과/배당을 계산합니다.
 """
 import os
+import hashlib
+import json
 
 import pandas as pd
 
@@ -21,7 +23,7 @@ from manual_holdings import (
     read_holdings_overrides, write_holdings_overrides,
 )
 from performance import compute_performance_summary, build_holdings_breakdown
-from advanced_analytics import compute_dividends, compute_dividend_events
+from advanced_analytics import build_dividend_records
 from pme import (
     compute_alpha_beta,
     build_trade_bars, build_asset_value_growth, build_stock_analytics, compute_rolling_beta,
@@ -98,11 +100,42 @@ TOSS_OVR_FIELDS = ["일자", "티커", "종목명", "구분", "수량", "단가"
 
 
 def toss_trade_key(o):
-    """토스 주문의 안정적 식별키(심볼|체결시각|매매구분|수량|금액). 새로고침해도 동일."""
+    """원본 주문 ID와 계좌로 편집값과 독립적인 식별자를 생성합니다."""
+    identity = o.get("orderId") or o.get("id")
+    scope = position_key(o)[:2]
+    if identity is not None:
+        value = json.dumps([*scope, str(identity)], ensure_ascii=True)
+        return "toss:id:" + hashlib.sha256(value.encode()).hexdigest()
+    value = json.dumps([*scope, _legacy_toss_trade_key(o)], ensure_ascii=True)
+    return "toss:fill:" + hashlib.sha256(value.encode()).hexdigest()
+
+
+def _legacy_toss_trade_key(o):
     ex = o.get("execution") or {}
     raw = ex.get("filledAt") or o.get("orderedAt") or ""
     return "|".join(str(x) for x in [o.get("symbol"), raw, o.get("side"),
                                      ex.get("filledQuantity"), ex.get("filledAmount")])
+
+
+def indexed_toss_orders(orders):
+    indexed, occurrences = {}, {}
+    for order in orders:
+        key = toss_trade_key(order)
+        if key.startswith("toss:fill:"):
+            occurrences[key] = occurrences.get(key, 0) + 1
+            if occurrences[key] > 1:
+                key = f"{key}:{occurrences[key]}"
+        indexed[key] = order
+    return indexed
+
+
+def toss_override(overrides, key, order):
+    return overrides.get(key, overrides.get(_legacy_toss_trade_key(order)))
+
+
+def toss_override_revision(override, original=None):
+    content = {"override": override or {}, "original": original or {}}
+    return hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=True, default=str).encode()).hexdigest()
 
 
 def toss_display_row(o, name_map=None):
@@ -119,7 +152,7 @@ def toss_display_row(o, name_map=None):
             d = ""
     sym = o.get("symbol")
     return {"증권사": o.get("broker", "토스증권"), "계좌": position_key(o)[1], "일자": d, "티커": sym,
-            "종목명": name_map.get(sym, sym), "시장": "",
+            "종목명": o.get("name") or name_map.get(sym, sym), "시장": o.get("market") or "",
             "구분": "매도" if o.get("side") == "SELL" else "매수",
             "수량": float(ex.get("filledQuantity") or 0),
             "단가": float(ex.get("averageFilledPrice") or 0),
@@ -128,32 +161,47 @@ def toss_display_row(o, name_map=None):
 
 def _override_to_order(orig, e):
     """오버라이드 dict(e)를 원본 주문(orig) 기반의 토스 주문으로 재구성합니다."""
-    qty = float(e.get("수량") or 0)
-    price = float(e.get("단가") or 0)
-    d = str(e.get("일자") or "").strip()
+    original_execution = orig.get("execution") or {}
+    qty = float(e.get("수량", original_execution.get("filledQuantity")) or 0)
+    price = float(e.get("단가", original_execution.get("averageFilledPrice")) or 0)
+    raw = original_execution.get("filledAt") or orig.get("orderedAt")
+    filled_at = raw
     try:
-        filled_at = pd.to_datetime(d).strftime("%Y-%m-%dT00:00:00+09:00")
+        timestamp = pd.Timestamp(raw)
+        selected_date = str(e.get("일자") or timestamp.strftime("%Y-%m-%d"))
+        if selected_date != timestamp.strftime("%Y-%m-%d"):
+            day = pd.Timestamp(selected_date)
+            filled_at = (timestamp + (day - timestamp.tz_localize(None).normalize())).isoformat()
     except Exception:
-        filled_at = (orig.get("execution") or {}).get("filledAt") or orig.get("orderedAt")
-    side = "SELL" if str(e.get("구분")) in ("매도", "SELL", "sell") else "BUY"
+        pass
+    side = orig.get("side")
+    if "구분" in e:
+        side = "SELL" if str(e["구분"]) in ("매도", "SELL", "sell") else "BUY"
     ex = dict(orig.get("execution") or {})
-    ex.update({"filledQuantity": qty, "averageFilledPrice": price,
-               "filledAmount": qty * price, "filledAt": filled_at})
+    if "수량" in e:
+        ex["filledQuantity"] = qty
+    if "단가" in e:
+        ex["averageFilledPrice"] = price
+    if "수량" in e or "단가" in e:
+        ex["filledAmount"] = qty * price
+    if filled_at != raw:
+        ex["filledAt"] = filled_at
     out = dict(orig)
     out.update({"symbol": str(e.get("티커") or orig.get("symbol")),
                 "currency": str(e.get("통화") or orig.get("currency", "KRW")).upper(),
-                "side": side, "orderedAt": filled_at, "execution": ex, "_edited": True})
+                "side": side, "execution": ex, "_edited": True})
+    for field, target in (("증권사", "broker"), ("계좌", "account"), ("종목명", "name"), ("시장", "market")):
+        if field in e:
+            out[target] = e[field]
     return out
 
 
 def apply_toss_overrides(orders, overrides=None):
     """토스 주문 리스트에 사용자 수정/삭제 오버라이드를 적용합니다."""
     overrides = read_toss_overrides() if overrides is None else overrides
-    if not overrides:
-        return list(orders)
     out = []
-    for o in orders:
-        e = overrides.get(toss_trade_key(o))
+    for key, o in indexed_toss_orders(orders).items():
+        e = toss_override(overrides, key, o)
         if e is None:
             out.append(o)
         elif e.get("deleted"):
@@ -238,43 +286,25 @@ def _dividends(combined_orders, fx_rate, include_est=True):
     div_krw_native = div_usd_native = 0.0
     by_ticker = {}
     rows = []
-    verified = set()
-    recs = read_dividends_csv()
-    if recs is not None and not recs.empty:
-        for _, r in recs.iterrows():
-            amt = float(r.get("배당금", 0) or 0)
-            if amt <= 0:
-                continue
-            tk = str(r.get("티커"))
-            is_usd = str(r.get("통화", "KRW")).upper() == "USD"
-            krw = amt * fx_rate if is_usd else amt
-            verified.add(tk)
-            by_ticker[tk] = by_ticker.get(tk, 0.0) + krw
-            if is_usd:
-                div_usd_native += amt
+    for record in _dividend_records(combined_orders, fx_rate, include_est):
+        label = "검증" if record["source"] == "actual" else "추정"
+        if record.get("matchingUncertain"):
+            label += "(실제 내역 대응 확인 필요)"
+        elif not record["payDate"]:
+            label += "(수령일 미확인)"
+        elif not record["received"]:
+            label += "(지급 예정)"
+        if record["received"]:
+            by_ticker[record["ticker"]] = by_ticker.get(record["ticker"], 0.0) + record["amountKrw"]
+            if record["currency"] == "USD":
+                div_usd_native += record["amount"]
             else:
-                div_krw_native += amt
-            rows.append({"일자": str(r.get("일자", "")), "종목": r.get("종목명") or tk, "티커": tk,
-                         "통화": "USD" if is_usd else "KRW", "배당금": amt, "원화환산": round(krw), "구분": "검증"})
-    if include_est and combined_orders:
-        est = compute_dividends(combined_orders, fx_rate)
-        if est is not None and not est.empty:
-            for _, r in est.iterrows():
-                tk = str(r.get("종목"))
-                if tk in verified:
-                    continue
-                amt = float(r.get("배당수령(원본)", 0) or 0)
-                if amt <= 0:
-                    continue
-                is_usd = str(r.get("통화", "KRW")).upper() == "USD"
-                krw = float(r.get("배당수령(원)", 0) or 0)
-                by_ticker[tk] = by_ticker.get(tk, 0.0) + krw
-                if is_usd:
-                    div_usd_native += amt
-                else:
-                    div_krw_native += amt
-                rows.append({"일자": "", "종목": tk, "티커": tk, "통화": "USD" if is_usd else "KRW",
-                             "배당금": round(amt, 2), "원화환산": round(krw), "구분": f"추정({int(r.get('배당횟수', 0))}회)"})
+                div_krw_native += record["amount"]
+        rows.append({"일자": record["payDate"], "종목": record["name"], "티커": record["ticker"],
+                     "증권사": record["broker"], "계좌": record["account"], "통화": record["currency"],
+                     "배당금": record["amount"], "원화환산": record["amountKrw"], "구분": label,
+                     "배당락일": record["exDate"], "기준일": record["recordDate"], "배당ID": record["eventId"],
+                     "권리수량": record["shares"], "지급일구분": record["dateSource"], "수령반영": record["received"]})
     return div_krw_native, div_usd_native, by_ticker, rows
 
 
@@ -346,6 +376,9 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True,
     set_price_overrides(holdings_price_overrides(), replace=True)  # 보유 표 현재가 수정 주입
 
     name_map = dict(toss_name_map)
+    for order in toss_orders:
+        if order.get("_edited") and order.get("name"):
+            name_map[order["symbol"]] = order["name"]
     if has_manual:
         for _, r in manual_df.iterrows():
             name_map.setdefault(str(r.get("티커")), r.get("종목명"))
@@ -368,7 +401,7 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True,
 
     div_events = _dated_div_events(combined_orders, fx_rate) if has_data else []
     perf = compute_performance_summary(combined_orders, fx_rate, dkn, dun,
-                                       include_div, include_fx) if has_data else None
+                                       include_div, include_fx, dividend_krw=sum(div_by_ticker.values())) if has_data else None
     ab = compute_alpha_beta(combined_orders, fx_rate, div_events=div_events,
                             include_div=include_div, include_fx=include_fx) if has_data else None
     breakdown = (build_holdings_breakdown(combined_orders, fx_rate, name_map, dict(div_by_ticker),
@@ -390,6 +423,7 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True,
         "holdings": holdings,
         "combined_orders": combined_orders,
         "name_map": name_map,
+        "toss_name_map": toss_name_map,
         "toss_orders_raw": toss_orders_raw,
         "detail_df": detail_df,
         "dividends_rows": div_rows,
@@ -403,34 +437,16 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True,
     }
 
 
-def _dated_div_events(orders, fx, ticker=None):
-    """배당 지급 이벤트 [(date, krw, symbol)] — 검증(임포트) 날짜 우선, 없는 종목은 yfinance 추정."""
-    events = []
-    fx_history = get_usdkrw_history("10y")
-    verified = set()
+def _dividend_records(orders, fx, include_est=True):
     recs = read_dividends_csv()
-    if recs is not None and not recs.empty:
-        for _, r in recs.iterrows():
-            tk = normalize_kr_ticker(str(r.get("티커")))
-            if ticker and tk != ticker:
-                continue
-            amt = float(r.get("배당금", 0) or 0)
-            if amt <= 0:
-                continue
-            try:
-                d = pd.to_datetime(r.get("일자")).tz_localize(None).normalize()
-            except Exception:
-                continue
-            is_usd = str(r.get("통화", "KRW")).upper() == "USD"
-            event_fx = fx_history.asof(d) if not fx_history.empty else fx
-            event_fx = float(event_fx) if pd.notna(event_fx) else fx
-            events.append((d, amt * event_fx if is_usd else amt, tk))
-            verified.add(tk)
-    for ed, krw, sym in compute_dividend_events(orders, fx, ticker):
-        if sym in verified:
-            continue
-        events.append((ed, krw, sym))
-    return sorted(events, key=lambda x: x[0])
+    return build_dividend_records(orders, fx, actual_rows=recs.fillna("").to_dict("records")
+                                  if recs is not None and not recs.empty else [], include_est=include_est)
+
+
+def _dated_div_events(orders, fx, ticker=None):
+    """동일 배당 원장의 수령일·금액과 계좌·권리 기준일을 성과 계산에 전달합니다."""
+    return [(pd.Timestamp(row["payDate"]), row["amountKrw"], row["ticker"], row["position"], row["exDate"])
+            for row in _dividend_records(orders, fx) if row["received"] and (not ticker or row["ticker"] == ticker)]
 
 
 def _split_map(symbol, currency, manual_df=None):

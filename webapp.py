@@ -674,7 +674,7 @@ def api_app_transactions(request: Request):
     return JSONResponse({"transactions": txs, "dividends": divs})
 
 
-# ─── React 앱 전용: 임포트(수동) 거래·배당 편집 (토스 원본은 읽기전용) ───
+# ─── React 앱 전용: 거래·배당 편집 ───
 @app.get("/api/app/edit/data")
 def api_app_edit_data(request: Request):
     user = _current_user(request)
@@ -700,7 +700,20 @@ def api_app_edit_data(request: Request):
                 "quantity": _num(r.get("수량")), "price": _num(r.get("단가")),
                 "currency": str(r.get("통화") or "KRW"), "broker": str(r.get("증권사") or ""),
                 "account": str(r.get("계좌") or ""),
+                "source": "manual",
             })
+    overrides = pipeline.read_toss_overrides()
+    for key, order in pipeline.indexed_toss_orders(data.get("toss_orders_raw") or []).items():
+        override = pipeline.toss_override(overrides, key, order)
+        original = pipeline.toss_display_row(order, data.get("toss_name_map", data.get("name_map")))
+        effective = dict(original, **(override or {}))
+        row = {"date": effective["일자"], "ticker": effective["티커"], "name": effective["종목명"],
+               "market": effective["시장"], "type": "sell" if effective["구분"] == "매도" else "buy",
+               "quantity": _num(effective["수량"]), "price": _num(effective["단가"]),
+               "currency": effective["통화"], "broker": effective["증권사"], "account": effective["계좌"],
+               "source": "toss", "sourceId": key, "revision": pipeline.toss_override_revision(override, order),
+               "edited": bool(override), "deleted": bool((override or {}).get("deleted"))}
+        tx_rows.append(row)
     dv = read_dividends_csv()
     div_rows = []
     if dv is not None and not dv.empty:
@@ -709,6 +722,8 @@ def api_app_edit_data(request: Request):
                 "date": str(r.get("일자") or ""), "ticker": str(r.get("티커") or ""),
                 "name": str(r.get("종목명") or ""), "currency": str(r.get("통화") or "KRW"),
                 "amount": _num(r.get("배당금")), "broker": str(r.get("증권사") or ""),
+                "account": str(r.get("계좌") or ""), "exDate": str(r.get("배당락일") or ""),
+                "recordDate": str(r.get("기준일") or ""), "eventId": str(r.get("배당ID") or ""),
             })
     est = []
     for r in (data.get("dividends_rows") or []):
@@ -717,6 +732,10 @@ def api_app_edit_data(request: Request):
                 "date": str(r.get("일자") or ""), "ticker": str(r.get("티커") or ""),
                 "name": r.get("종목") or "", "currency": r.get("통화") or "KRW",
                 "amount": _num(r.get("배당금")),
+                "broker": r.get("증권사") or "", "account": r.get("계좌") or "",
+                "exDate": r.get("배당락일") or "", "recordDate": r.get("기준일") or "",
+                "eventId": r.get("배당ID") or "", "shares": r.get("권리수량"),
+                "dateSource": r.get("지급일구분") or "unknown", "status": r.get("구분"),
             })
     snaps = [{"id": s["id"], "label": s.get("label") or "", "time": s.get("time") or "",
               "tx": s.get("counts", {}).get("manual_transactions.csv", 0),
@@ -731,26 +750,76 @@ async def api_app_edit_transactions(request: Request):
     user = _current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    pipeline.apply_credentials(user)
     payload = await request.json()
+    return _save_transaction_edits(user, payload)
+
+
+def _save_transaction_edits(user, payload):
+    pipeline.apply_credentials(user)
     rows = payload.get("rows", [])
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        return JSONResponse({"error": "거래 목록 형식이 올바르지 않습니다."}, status_code=422)
+    toss_rows = [row for row in rows if row.get("source") == "toss"]
+    data = get_portfolio(user) if toss_rows else {}
+    raw_orders = pipeline.indexed_toss_orders(data.get("toss_orders_raw") or [])
+    overrides = dict(pipeline.read_toss_overrides()) if toss_rows else {}
+    submitted = set()
+
+    def normalize(row):
+        return {
+            "증권사": str(row.get("broker") or "").strip(), "계좌": str(row.get("account") or "").strip(),
+            "일자": str(row.get("date") or "").strip(), "티커": str(row.get("ticker") or "").strip(),
+            "종목명": str(row.get("name") or "").strip(), "시장": str(row.get("market") or "").strip(),
+            "구분": "매도" if row.get("type") == "sell" else "매수",
+            "수량": row.get("quantity") or 0, "단가": row.get("price") or 0,
+            "통화": str(row.get("currency") or "KRW").upper(),
+        }
+
+    out = []
+    for row in rows:
+        if row.get("source", "manual") not in ("manual", "toss"):
+            return JSONResponse({"error": "알 수 없는 거래 출처입니다."}, status_code=422)
+        if row.get("source") != "toss":
+            out.append(normalize(row))
+            continue
+        key = row.get("sourceId")
+        if key not in raw_orders or key in submitted:
+            return JSONResponse({"error": "토스 원본 거래를 확인할 수 없습니다. 다시 불러오세요."}, status_code=409)
+        submitted.add(key)
+        original = raw_orders[key]
+        previous = pipeline.toss_override(overrides, key, original)
+        if row.get("revision") != pipeline.toss_override_revision(previous, original):
+            return JSONResponse({"error": "원본 재동기화 또는 다른 창의 수정이 있습니다. 다시 불러온 후 저장하세요."}, status_code=409)
+        if row.get("reset"):
+            overrides.pop(key, None)
+            overrides.pop(pipeline._legacy_toss_trade_key(original), None)
+            continue
+        if row.get("deleted"):
+            overrides[key] = {"deleted": True}
+            continue
+        values = normalize(row)
+        try:
+            values = _validate_import_rows([values], values["증권사"])[0]
+        except ValueError as error:
+            return JSONResponse({"error": str(error)}, status_code=422)
+        base = pipeline.toss_display_row(original, data.get("toss_name_map", data.get("name_map")))
+        changes = {field: value for field, value in values.items() if value != base.get(field, "")}
+        if changes:
+            overrides[key] = changes
+        else:
+            overrides.pop(key, None)
+        overrides.pop(pipeline._legacy_toss_trade_key(original), None)
+    try:
+        out = [entry for row in out for entry in _validate_import_rows([row], row["증권사"])]
+    except ValueError as error:
+        return JSONResponse({"error": str(error)}, status_code=422)
     snapshot_imports("거래 편집 전")
-    out = [{
-        "증권사": str(r.get("broker") or "").strip(),
-        "계좌": str(r.get("account") or "").strip(),
-        "일자": str(r.get("date") or "").strip(),
-        "티커": str(r.get("ticker") or "").strip(),
-        "종목명": str(r.get("name") or "").strip(),
-        "시장": str(r.get("market") or "").strip(),
-        "구분": "매도" if str(r.get("type")) == "sell" else "매수",
-        "수량": r.get("quantity") or 0,
-        "단가": r.get("price") or 0,
-        "통화": str(r.get("currency") or "KRW").upper(),
-    } for r in rows]
     df = pd.DataFrame(out, columns=TX_COLUMNS) if out else pd.DataFrame(columns=TX_COLUMNS)
     n = write_transactions_csv(df)
+    if toss_rows:
+        pipeline.write_toss_overrides(overrides)
     _CACHE.pop(user, None)
-    return JSONResponse({"ok": True, "count": n})
+    return JSONResponse({"ok": True, "count": n + len(toss_rows), "manualCount": n, "tossCount": len(toss_rows)})
 
 
 @app.post("/api/app/edit/dividends")
@@ -761,16 +830,23 @@ async def api_app_edit_dividends(request: Request):
     pipeline.apply_credentials(user)
     payload = await request.json()
     rows = payload.get("rows", [])
-    snapshot_imports("배당 편집 전")
     out = [{
         "증권사": str(r.get("broker") or "").strip(),
+        "계좌": str(r.get("account") or "").strip(), "배당락일": str(r.get("exDate") or "").strip(),
+        "기준일": str(r.get("recordDate") or "").strip(), "배당ID": str(r.get("eventId") or "").strip(),
         "일자": str(r.get("date") or "").strip(),
         "티커": str(r.get("ticker") or "").strip(),
         "종목명": str(r.get("name") or "").strip(),
         "통화": str(r.get("currency") or "KRW").upper(),
         "배당금": r.get("amount") or 0,
     } for r in rows]
+    try:
+        out = [entry for row in out for entry in _validate_import_rows([row], row["증권사"], dividend=True)]
+    except ValueError as error:
+        return JSONResponse({"error": str(error)}, status_code=422)
+    snapshot_imports("배당 편집 전")
     df = pd.DataFrame(out, columns=DIV_COLUMNS) if out else pd.DataFrame(columns=DIV_COLUMNS)
+    df = df.drop_duplicates(ignore_index=True)
     n = write_dividends_csv(df)
     _CACHE.pop(user, None)
     return JSONResponse({"ok": True, "count": n})
@@ -1045,6 +1121,17 @@ def _validate_import_rows(rows, broker, dividend=False):
         if not dividend and result["구분"] not in ("매수", "매도"):
             fields.append("구분")
             reasons.append("매수·매도 구분을 확인하지 못했습니다.")
+        if dividend:
+            for date_field in ("배당락일", "기준일"):
+                if not result[date_field]:
+                    continue
+                try:
+                    parsed_date = datetime.strptime(result[date_field], "%Y-%m-%d")
+                    if date_field == "배당락일" and not fields and parsed_date.strftime("%Y-%m-%d") > result["일자"]:
+                        raise ValueError()
+                except ValueError:
+                    fields.append(date_field)
+                    reasons.append(f"{date_field}과 실제 수령일을 확인해 주세요.")
         for field in (("배당금",) if dividend else ("수량", "단가")):
             try:
                 if isinstance(row.get(field), bool):
@@ -1678,16 +1765,16 @@ def edit_data_page(request: Request, msg: str = ""):
             r["_src"] = "임포트"; r["_key"] = ""
             tx_rows.append(r)
     overrides = pipeline.read_toss_overrides()
-    for o in data.get("toss_orders_raw", []):
-        k = pipeline.toss_trade_key(o)
-        e = overrides.get(k)
+    for k, o in pipeline.indexed_toss_orders(data.get("toss_orders_raw") or []).items():
+        e = pipeline.toss_override(overrides, k, o)
         if e and e.get("deleted"):
             continue
-        base = pipeline.toss_display_row(o, name_map)
+        base = pipeline.toss_display_row(o, data.get("toss_name_map", name_map))
         row = dict(base)
         if e:
-            row.update({f: e.get(f, base.get(f)) for f in pipeline.TOSS_OVR_FIELDS})
+            row.update({field: e.get(field, base.get(field)) for field in TX_COLUMNS})
         row["_src"] = "토스"; row["_key"] = k
+        row["_revision"] = pipeline.toss_override_revision(e, o)
         tx_rows.append(row)
 
     # 배당: 검증(CSV) + 추정(토스 보유 기반 yfinance 추정)
@@ -1717,38 +1804,15 @@ async def edit_data_tx(request: Request):
     user = _current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    data = get_portfolio(user)
-    pipeline.apply_credentials(user)
     payload = await request.json()
-    rows = payload.get("rows", [])
-    manual_rows = [r for r in rows if r.get("_src") != "토스"]
-    toss_rows = [r for r in rows if r.get("_src") == "토스"]
-
-    # 임포트(CSV) 거래 저장
-    snapshot_imports("거래 편집 전")
-    df = pd.DataFrame([{c: r.get(c, "") for c in TX_COLUMNS} for r in manual_rows], columns=TX_COLUMNS)
-    n = write_transactions_csv(df)
-
-    # 토스 거래: 원본과 다른 행만 오버라이드, 삭제된 행은 deleted 표시
-    raw_by_key = {pipeline.toss_trade_key(o): o for o in data.get("toss_orders_raw", [])}
-    submitted = set()
-    ov = {}
-    for r in toss_rows:
-        k = r.get("_key")
-        if not k or k not in raw_by_key:
-            continue
-        submitted.add(k)
-        orig = pipeline.toss_display_row(raw_by_key[k], data.get("name_map", {}))
-        if _toss_row_differs(r, orig):
-            ov[k] = {f: r.get(f, "") for f in pipeline.TOSS_OVR_FIELDS}
-    for k in raw_by_key:
-        if k not in submitted:
-            ov[k] = {"deleted": True}
-    pipeline.write_toss_overrides(ov)
-    _CACHE.pop(user, None)
-    edited = sum(1 for v in ov.values() if not v.get("deleted"))
-    deleted = sum(1 for v in ov.values() if v.get("deleted"))
-    return JSONResponse({"ok": True, "count": n, "toss_edited": edited, "toss_deleted": deleted})
+    rows = [{"source": "toss" if row.get("_src") == "토스" else "manual",
+             "sourceId": row.get("_key"), "revision": row.get("_revision"), "deleted": bool(row.get("_deleted")),
+             "date": row.get("일자"), "ticker": row.get("티커"), "name": row.get("종목명"),
+             "market": row.get("시장"), "type": "sell" if row.get("구분") == "매도" else "buy",
+             "quantity": row.get("수량"), "price": row.get("단가"), "currency": row.get("통화"),
+             "broker": row.get("증권사"), "account": row.get("계좌")}
+            for row in payload.get("rows", [])]
+    return _save_transaction_edits(user, {"rows": rows})
 
 
 @app.post("/edit-data/div")
