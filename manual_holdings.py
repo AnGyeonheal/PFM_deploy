@@ -4,7 +4,9 @@ CSV 컬럼: 증권사, 티커, 종목명, 시장(KOSPI/KOSDAQ/US), 수량, 평�
 """
 import os
 import json
+import re
 import shutil
+from contextvars import ContextVar
 from datetime import datetime
 
 import pandas as pd
@@ -13,13 +15,27 @@ from benchmark import to_yf_ticker, get_history
 from names import resolve_kr_code
 from pme import position_key
 
-MANUAL_CSV = os.path.join(os.path.dirname(__file__), "manual_holdings.csv")
-TX_CSV = os.path.join(os.path.dirname(__file__), "manual_transactions.csv")
-DIV_CSV = os.path.join(os.path.dirname(__file__), "manual_dividends.csv")
-SPLIT_CSV = os.path.join(os.path.dirname(__file__), "manual_splits.csv")
-TOSS_OVR_JSON = os.path.join(os.path.dirname(__file__), "toss_overrides.json")
-HOLDINGS_OVR_JSON = os.path.join(os.path.dirname(__file__), "holdings_overrides.json")
-TRASH_DIR = os.path.join(os.path.dirname(__file__), "trash")
+_DATA_DIR = ContextVar("manual_data_dir", default=os.path.dirname(__file__))
+
+
+class _DataPath(os.PathLike):
+    def __init__(self, filename):
+        self.filename = filename
+
+    def __fspath__(self):
+        return os.path.join(_DATA_DIR.get(), self.filename)
+
+    def __str__(self):
+        return os.fspath(self)
+
+
+MANUAL_CSV = _DataPath("manual_holdings.csv")
+TX_CSV = _DataPath("manual_transactions.csv")
+DIV_CSV = _DataPath("manual_dividends.csv")
+SPLIT_CSV = _DataPath("manual_splits.csv")
+TOSS_OVR_JSON = _DataPath("toss_overrides.json")
+HOLDINGS_OVR_JSON = _DataPath("holdings_overrides.json")
+TRASH_DIR = _DataPath("trash")
 
 COLUMNS = ["증권사", "티커", "종목명", "시장", "수량", "평균매수가", "통화", "매수일", "계좌"]
 TX_COLUMNS = ["증권사", "일자", "티커", "종목명", "시장", "구분", "수량", "단가", "통화", "계좌"]
@@ -28,15 +44,8 @@ SPLIT_COLUMNS = ["티커", "종목명", "분할일", "비율"]
 
 
 def set_data_dir(directory):
-    """사용자별 데이터 폴더로 CSV 저장 경로를 변경합니다(로그인 시 호출)."""
-    global MANUAL_CSV, TX_CSV, DIV_CSV, SPLIT_CSV, TOSS_OVR_JSON, HOLDINGS_OVR_JSON, TRASH_DIR
-    MANUAL_CSV = os.path.join(directory, "manual_holdings.csv")
-    TX_CSV = os.path.join(directory, "manual_transactions.csv")
-    DIV_CSV = os.path.join(directory, "manual_dividends.csv")
-    SPLIT_CSV = os.path.join(directory, "manual_splits.csv")
-    TOSS_OVR_JSON = os.path.join(directory, "toss_overrides.json")
-    HOLDINGS_OVR_JSON = os.path.join(directory, "holdings_overrides.json")
-    TRASH_DIR = os.path.join(directory, "trash")
+    """현재 요청 컨텍스트의 사용자 데이터 폴더만 선택합니다."""
+    _DATA_DIR.set(os.fspath(directory))
 
 
 def read_toss_overrides():
@@ -248,8 +257,10 @@ def restore_snapshot(snap_id):
     """스냅샷 시점 상태로 임포트 데이터를 복원합니다(스냅샷에 없던 파일은 제거).
     복원 전 현재 상태도 자동 백업합니다. 반환: 복원된 파일 수."""
     snap_id = str(snap_id or "").strip()
+    if not re.fullmatch(r"[0-9]{8}_[0-9]{6}_[0-9]{3}", snap_id):
+        return 0
     dpath = os.path.join(TRASH_DIR, snap_id)
-    if not snap_id or ".." in snap_id or not os.path.isdir(dpath):
+    if not os.path.isdir(dpath) or os.path.islink(dpath):
         return 0
     snapshot_imports(label="복원 전 자동 백업")  # 되돌리기 대비
     restored = 0

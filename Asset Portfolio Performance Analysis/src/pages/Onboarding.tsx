@@ -15,6 +15,7 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
     fetch("/api/app/datasources", { credentials: "include" })
       .then(r => (r.ok ? r.json() : null))
       .then((j) => setD(j))
+      .catch(() => setD(null))
       .finally(() => setLoading(false));
   };
   useEffect(() => { load(); }, []);
@@ -59,12 +60,12 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
               증권사 거래내역·잔고·배당을 임포트하거나 토스 연동 상태를 확인하세요. 준비되면 아래 <b className="text-[#e8eaf0]">다음</b>을 눌러 검증 단계로 이동합니다.
             </div>
           </Card>
-          <DataSources />
+          <DataSources onChanged={data => { setD(data); setMode("import"); }} />
           <div className="flex justify-between">
             {hasData
               ? <button onClick={() => setMode("decide")} className="text-xs px-4 py-2 border border-white/10 rounded-sm text-[#6b7494] hover:text-[#a0a8c0]">← 데이터 결정으로</button>
               : <span />}
-            <button onClick={onDone} className="bg-[#00d4a1] text-[#0a0d14] font-semibold text-sm px-6 py-2.5 rounded-sm hover:bg-[#00d4a1]/90 transition-colors">다음: 데이터 검증 →</button>
+            <button onClick={onDone} disabled={!hasData} className="bg-[#00d4a1] text-[#0a0d14] font-semibold text-sm px-6 py-2.5 rounded-sm hover:bg-[#00d4a1]/90 transition-colors disabled:opacity-50">다음: 데이터 검증 →</button>
           </div>
         </>
       )}

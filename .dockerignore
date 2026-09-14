@@ -3,6 +3,7 @@
 .env.*
 user_data/
 admin_data/
+test_user_data/
 *.xlsx
 *.csv
 .streamlit/secrets.toml

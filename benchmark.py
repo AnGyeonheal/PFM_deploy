@@ -2,6 +2,7 @@
 토스 캔들 API(최근 200일 제한)를 넘어서는 과거 데이터와 S&P500 비교를 제공합니다.
 """
 import time
+from contextvars import ContextVar
 
 import pandas as pd
 import yfinance as yf
@@ -127,16 +128,16 @@ def get_usdkrw_history(period="2y"):
 # ─────────────────── 보유 종목 현재가(네이티브) 제공 ───────────────────
 # 우선순위: 토스 실시간 배치(_PRICE_OVERRIDE) → pykrx(국내 공식 종가) → yfinance 최근 종가.
 # pipeline이 로드 시 토스 배치 시세를 set_price_overrides()로 주입해 최고 싱크로율을 확보합니다.
-_PRICE_OVERRIDE = {}
+_PRICE_OVERRIDE = ContextVar("price_overrides", default={})
 
 
 def set_price_overrides(price_map, replace=False):
     """현재가 {symbol: price}를 주입합니다. replace=True면 기존 오버라이드를 먼저 비웁니다
     (보유 표 현재가 수정처럼 삭제분까지 정확히 반영해야 할 때 사용)."""
-    if replace:
-        _PRICE_OVERRIDE.clear()
+    prices = {} if replace else dict(_PRICE_OVERRIDE.get())
     if price_map:
-        _PRICE_OVERRIDE.update({str(k): v for k, v in price_map.items() if v})
+        prices.update({str(key): value for key, value in price_map.items() if value})
+    _PRICE_OVERRIDE.set(prices)
 
 
 def _pykrx_close(symbol):
@@ -167,7 +168,7 @@ def get_native_price_now(symbol, country="US", market=None):
     """
     if symbol is None:
         return None
-    ov = _PRICE_OVERRIDE.get(str(symbol))
+    ov = _PRICE_OVERRIDE.get().get(str(symbol))
     if ov:
         return float(ov)
     return _memo(("pxnow", str(symbol), (country or "US").upper()),

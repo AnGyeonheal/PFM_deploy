@@ -8,8 +8,12 @@ import os
 import json
 import math
 import time
+import asyncio
 import secrets as _secrets
+from collections import Counter
 from datetime import datetime
+from threading import RLock
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Form, UploadFile, File, HTTPException
@@ -17,6 +21,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse,
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.concurrency import run_in_threadpool
 
 import pandas as pd
 
@@ -32,7 +37,7 @@ from manual_holdings import (
 )
 from exporter import build_full_excel
 from report import build_portfolio_pdf
-from ai_copilot import generate_rebalancing_report, chat_with_portfolio
+from ai_copilot import generate_rebalancing_report, chat_with_portfolio, shared_gemini_available
 from advanced_analytics import compute_fx_pnl
 from names import register_krw_foreign
 from pme import (compute_usd_avg_cost, build_usdkrw_history_frame, comparison_statistics,
@@ -42,7 +47,36 @@ load_dotenv()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = FastAPI(title="자산관리 대시보드")
-app.add_middleware(SessionMiddleware, secret_key=os.getenv("WEB_SECRET_KEY", _secrets.token_hex(32)))
+_SHARE_MODE = os.getenv("PFM_SHARE_MODE") == "1"
+_USER_REQUEST_LOCKS = {}
+_REQUEST_LIMITS = {}
+_IMPORT_DRAFTS = {}
+_LIMIT_LOCK = RLock()
+
+
+def _allow_request(category, identifier, maximum, window):
+    now = time.monotonic()
+    with _LIMIT_LOCK:
+        expired = [key for key, entry in _REQUEST_LIMITS.items() if entry[0] <= now]
+        for key in expired:
+            _REQUEST_LIMITS.pop(key, None)
+        key = (category, identifier)
+        expires, count = _REQUEST_LIMITS.get(key, (now + window, 0))
+        if count >= maximum:
+            return False
+        _REQUEST_LIMITS[key] = (expires, count + 1)
+        return True
+
+
+def _consume_ai_quota(user):
+    if not shared_gemini_available():
+        raise HTTPException(status_code=503, detail="서버의 공용 Gemini 키가 설정되지 않았습니다.")
+    per_user = int(os.getenv("PFM_AI_REQUESTS_PER_HOUR", "20"))
+    total = int(os.getenv("PFM_AI_TOTAL_PER_HOUR", "100"))
+    if not _allow_request("ai-user", user, per_user, 3600) or not _allow_request("ai-total", "server", total, 3600):
+        raise HTTPException(status_code=429, detail="AI 시간당 사용량을 초과했습니다. 잠시 후 다시 시도하세요.")
+
+
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "web", "static")), name="static")
 
 # Figma 기반 React SPA(빌드 산출물)를 /app 에서 서빙
@@ -53,10 +87,48 @@ if os.path.isdir(_FIGMA_DIST):
 
 @app.middleware("http")
 async def _no_store_api(request: Request, call_next):
-    resp = await call_next(request)
-    if request.url.path.startswith("/api/"):
+    path = request.url.path
+    if _SHARE_MODE:
+        if path == "/" or path == "/login":
+            return RedirectResponse("/app/", status_code=302)
+        allowed = (path.startswith(("/app/", "/api/app/")) or path in
+                   ("/healthz", "/api/chat", "/api/rebalance", "/holdings/override",
+                    "/holdings/override/reset", "/export.xlsx", "/report.pdf", "/import/template.xlsx"))
+        if not allowed:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = request.headers.get("origin")
+        if _SHARE_MODE and origin and urlsplit(origin).netloc != request.headers.get("host"):
+            return JSONResponse({"error": "허용되지 않은 요청 출처입니다."}, status_code=403)
+        length = request.headers.get("content-length", "0")
+        if not length.isdigit() or int(length) > 12 * 1024 * 1024:
+            return JSONResponse({"error": "요청 크기는 12MB 이하여야 합니다."}, status_code=413)
+    if path in ("/login", "/register", "/api/app/login", "/api/app/register") and request.method == "POST":
+        address = request.client.host if request.client else "unknown"
+        if not _allow_request("login", address, 20, 60):
+            return JSONResponse({"error": "로그인·가입 요청이 너무 많습니다. 1분 후 다시 시도하세요."}, status_code=429)
+    user = request.session.get("user")
+    if user and not auth.get_user_info(user):
+        request.session.clear()
+        user = None
+    if user and not path.startswith(("/static/", "/app/")):
+        lock = _USER_REQUEST_LOCKS.setdefault(user, asyncio.Lock())
+        async with lock:
+            pipeline.apply_credentials(user)
+            resp = await call_next(request)
+    else:
+        resp = await call_next(request)
+    if not path.startswith("/static/") and "/assets/" not in path:
         resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Referrer-Policy"] = "same-origin"
+    resp.headers["X-Frame-Options"] = "SAMEORIGIN"
     return resp
+
+
+app.add_middleware(SessionMiddleware, secret_key=os.getenv("WEB_SECRET_KEY", _secrets.token_hex(32)),
+                   session_cookie="pfm_test_session" if _SHARE_MODE else "session",
+                   https_only=os.getenv("WEB_HTTPS_ONLY", "1" if _SHARE_MODE else "0") == "1", same_site="lax")
 
 
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "web", "templates"))
@@ -176,7 +248,7 @@ async def api_app_login(request: Request):
     body = await request.json()
     username = str(body.get("username", "")).strip()
     password = str(body.get("password", ""))
-    ok, message = auth.verify_user(username, password)
+    ok, message = await run_in_threadpool(auth.verify_user, username, password)
     if ok:
         request.session["user"] = username
         return JSONResponse({"ok": True, "user": username})
@@ -188,7 +260,7 @@ async def api_app_register(request: Request):
     body = await request.json()
     username = str(body.get("username", "")).strip()
     password = str(body.get("password", ""))
-    ok, message = auth.register_user(username, password)
+    ok, message = await run_in_threadpool(auth.register_user, username, password)
     if ok:
         request.session["user"] = username  # 가입 즉시 자동 로그인
         return JSONResponse({"ok": True, "user": username})
@@ -207,6 +279,61 @@ def api_app_me(request: Request):
     if not user:
         return JSONResponse({"ok": False}, status_code=401)
     return JSONResponse({"ok": True, "user": user})
+
+
+@app.get("/api/app/connections")
+def api_app_connections(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    credentials = auth.load_credentials(user)
+    return JSONResponse({"geminiAvailable": shared_gemini_available(), "geminiMode": "shared",
+                         "tossConfigured": auth.has_toss_credentials(user),
+                         "account": credentials.get("TOSS_ACCOUNT_NO") or "1",
+                         "outboundIp": os.getenv("PFM_OUTBOUND_IP", ""),
+                         "aiRequestsPerHour": int(os.getenv("PFM_AI_REQUESTS_PER_HOUR", "20"))})
+
+
+@app.post("/api/app/connections/toss")
+async def api_app_connect_toss(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not _allow_request("toss-connect", user, 5, 60):
+        return JSONResponse({"error": "연결 요청이 너무 많습니다. 1분 후 다시 시도하세요."}, status_code=429)
+    body = await request.json()
+    client_id = str(body.get("clientId") or "").strip()
+    client_secret = str(body.get("clientSecret") or "").strip()
+    account = str(body.get("account") or "1").strip()
+    if not client_id or not client_secret or not account or max(len(client_id), len(client_secret)) > 4096 or len(account) > 128:
+        return JSONResponse({"error": "본인의 Client ID, Client Secret과 계좌를 입력하세요."}, status_code=400)
+
+    def verify_and_save():
+        token = pipeline.get_access_token(client_id, client_secret)
+        if not token or not pipeline.get_holdings(token, account):
+            return False
+        auth.save_credentials(user, {"TOSS_CLIENT_ID": client_id, "TOSS_CLIENT_SECRET": client_secret,
+                                     "TOSS_ACCOUNT_NO": account})
+        _CACHE.pop(user, None)
+        return True
+
+    try:
+        connected = await run_in_threadpool(verify_and_save)
+    except Exception:
+        connected = False
+    if not connected:
+        return JSONResponse({"error": "토스 계좌 조회에 실패했습니다. 본인의 키와 서버 허용 IP를 확인하세요."}, status_code=400)
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/api/app/connections/toss")
+def api_app_disconnect_toss(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    auth.remove_toss_credentials(user)
+    _CACHE.pop(user, None)
+    return JSONResponse({"ok": True})
 
 
 def _daily_metrics_path(user):
@@ -861,49 +988,171 @@ def api_app_datasources(request: Request):
     })
 
 
+def _import_chunks(text, limit=12000):
+    lines = text.splitlines(keepends=True)
+    header = lines[0] if lines else ""
+    chunk = ""
+    for line in lines:
+        if len(line) + len(header) > limit:
+            raise ValueError("한 행이 너무 깁니다. CSV 또는 Excel 거래내역으로 변환해 주세요.")
+        if len(chunk) + len(line) > limit:
+            yield chunk
+            chunk = header
+        chunk += line
+    if chunk.strip():
+        yield chunk
+
+
+def _validate_import_rows(rows, broker, dividend=False):
+    if not isinstance(rows, list):
+        raise ValueError("AI 응답 형식이 올바르지 않습니다. 저장하지 않았습니다.")
+    columns = DIV_COLUMNS if dividend else TX_COLUMNS
+    normalized = []
+    for number, row in enumerate(rows, 1):
+        if not isinstance(row, dict):
+            raise ValueError(f"AI 응답 {number}행의 형식이 올바르지 않습니다.")
+        result = {column: str(row.get(column) or "").strip() for column in columns}
+        result["증권사"] = broker
+        try:
+            result["일자"] = datetime.strptime(result["일자"], "%Y-%m-%d").strftime("%Y-%m-%d")
+            if not result["티커"] or result["통화"] not in ("KRW", "USD"):
+                raise ValueError()
+            if not dividend and result["구분"] not in ("매수", "매도"):
+                raise ValueError()
+            for field in (("배당금",) if dividend else ("수량", "단가")):
+                if isinstance(row.get(field), bool):
+                    raise ValueError()
+                value = float(row.get(field))
+                if not math.isfinite(value) or value <= 0:
+                    raise ValueError()
+                result[field] = value
+        except (ValueError, TypeError, OverflowError):
+            kind = "배당" if dividend else "거래"
+            raise ValueError(f"{kind} {number}행의 날짜·종목·통화·수량·금액을 확인해야 합니다. 저장하지 않았습니다.") from None
+        normalized.append(result)
+    return normalized
+
+
+def _parse_import_files(uploads, broker):
+    from ai_copilot import parse_brokerage_full_transactions, parse_brokerage_dividends
+    raw_texts = []
+    for filename, content in uploads:
+        try:
+            if filename.endswith((".xlsx", ".xls")):
+                sheets = pd.read_excel(io.BytesIO(content), sheet_name=None, dtype=str)
+                raw_texts.extend(sheet.fillna("").to_csv(index=False) for sheet in sheets.values() if not sheet.empty)
+            elif filename.endswith(".pdf"):
+                raw_texts.append(_pdf_to_text(content))
+            else:
+                try:
+                    raw_texts.append(content.decode("utf-8-sig"))
+                except UnicodeDecodeError:
+                    raw_texts.append(content.decode("cp949"))
+        except Exception:
+            raise ValueError("파일을 읽지 못했습니다. 파일 형식과 문자 인코딩을 확인하세요.") from None
+    if not raw_texts or any(not text.strip() for text in raw_texts):
+        raise ValueError("내용을 읽지 못한 파일이 있습니다. 스캔 PDF 대신 CSV 또는 Excel을 사용해 주세요.")
+    chunks = [chunk for text in raw_texts for chunk in _import_chunks(text)]
+    if len(chunks) > 20:
+        raise ValueError("한 번에 분석할 수 있는 파일 분량을 초과했습니다. 파일을 나누어 업로드하세요.")
+    rows, dividends = [], []
+    for chunk in chunks:
+        parsed, error = parse_brokerage_full_transactions(chunk, broker)
+        if error:
+            raise ValueError("거래내역 AI 분석에 실패했습니다. 기존 데이터는 변경하지 않았습니다.")
+        parsed_dividends, dividend_error = parse_brokerage_dividends(chunk, broker)
+        if dividend_error:
+            raise ValueError("배당내역 AI 분석에 실패했습니다. 기존 데이터는 변경하지 않았습니다.")
+        rows.extend(_validate_import_rows(parsed, broker))
+        dividends.extend(_validate_import_rows(parsed_dividends, broker, dividend=True))
+    if not rows and not dividends:
+        raise ValueError("거래·배당 내역을 찾지 못했습니다.")
+    return rows, dividends
+
+
+def _merge_import_rows(existing, incoming, columns):
+    records = existing.fillna("").to_dict("records") if existing is not None and not existing.empty else []
+
+    def identity(row):
+        values = []
+        for column in columns:
+            value = row.get(column, "")
+            if column in ("수량", "단가", "배당금"):
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    value = str(value)
+            else:
+                value = str(value).strip()
+            values.append(value)
+        return tuple(values)
+
+    counts = Counter(identity(row) for row in records)
+    seen = Counter()
+    added = 0
+    for row in incoming:
+        key = identity(row)
+        seen[key] += 1
+        if seen[key] > counts[key]:
+            records.append(row)
+            added += 1
+    return pd.DataFrame(records, columns=columns), added
+
+
 @app.post("/api/app/import")
-async def api_app_import(request: Request, broker: str = Form("증권사"),
+async def api_app_import(request: Request, broker: str = Form("증권사"), consent: bool = Form(False),
                         files: list[UploadFile] = File(default=[])):
     user = _current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    from ai_copilot import parse_brokerage_full_transactions, parse_brokerage_dividends
-    from manual_holdings import save_parsed_transactions, save_parsed_dividends
+    if not consent:
+        return JSONResponse({"error": "거래내역의 Google Gemini 전송에 동의해야 AI 분석을 사용할 수 있습니다."}, status_code=400)
+    if not 1 <= len(files) <= 5 or not broker.strip() or len(broker) > 100:
+        return JSONResponse({"error": "증권사와 1~5개의 파일을 선택하세요."}, status_code=400)
+    uploads = []
+    for upload in files:
+        filename = (upload.filename or "").lower()
+        if not filename.endswith((".csv", ".txt", ".xlsx", ".xls", ".pdf")):
+            return JSONResponse({"error": "CSV·TXT·Excel·PDF 파일만 지원합니다."}, status_code=400)
+        content = await upload.read(5 * 1024 * 1024 + 1)
+        if len(content) > 5 * 1024 * 1024:
+            return JSONResponse({"error": "파일 한 개는 5MB 이하여야 합니다."}, status_code=413)
+        uploads.append((filename, content))
+    _consume_ai_quota(user)
     pipeline.apply_credentials(user)
-    raw_texts = []
-    for up in (files or []):
-        try:
-            content = await up.read()
-            fn = (up.filename or "").lower()
-            if fn.endswith((".xlsx", ".xls")):
-                raw_texts.append(pd.read_excel(io.BytesIO(content)).to_csv(index=False))
-            elif fn.endswith(".pdf"):
-                t = _pdf_to_text(content)
-                if t.strip():
-                    raw_texts.append(t)
-            else:
-                raw_texts.append(content.decode("utf-8", errors="ignore"))
-        except Exception:
-            continue
-    if not raw_texts:
-        return JSONResponse({"ok": False, "error": "업로드한 파일에서 내용을 읽지 못했습니다."}, status_code=400)
-    rows, divs, errors = [], [], []
-    for rt in raw_texts:
-        parsed, err = parse_brokerage_full_transactions(rt, broker)
-        if parsed:
-            rows.extend(parsed)
-        elif err:
-            errors.append(err)
-        dparsed, _derr = parse_brokerage_dividends(rt, broker)
-        if dparsed:
-            divs.extend(dparsed)
-    if not rows and not divs:
-        return JSONResponse({"ok": False, "error": (errors[0] if errors else "거래·배당 내역을 찾지 못했습니다.")}, status_code=502)
-    n = save_parsed_transactions(rows, replace_broker=broker) if rows else 0
-    dn = save_parsed_dividends(divs, replace_broker=broker) if divs else 0
+    try:
+        rows, dividends = await run_in_threadpool(_parse_import_files, uploads, broker.strip())
+    except ValueError as error:
+        return JSONResponse({"ok": False, "error": str(error)}, status_code=422)
+    now = time.monotonic()
+    for owner in [owner for owner, draft in _IMPORT_DRAFTS.items() if draft["expires"] <= now]:
+        _IMPORT_DRAFTS.pop(owner, None)
+    draft_id = _secrets.token_urlsafe(24)
+    _IMPORT_DRAFTS[user] = {"id": draft_id, "expires": now + 900, "rows": rows, "dividends": dividends}
+    return JSONResponse({"ok": True, "draftId": draft_id, "transactions": len(rows), "dividends": len(dividends),
+                         "txPreview": rows[:30], "divPreview": dividends[:30], "saved": False})
+
+
+@app.post("/api/app/import/confirm")
+async def api_app_confirm_import(request: Request):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    body = await request.json()
+    draft = _IMPORT_DRAFTS.get(user)
+    if not draft or draft["expires"] <= time.monotonic() or not _secrets.compare_digest(str(body.get("draftId") or ""), draft["id"]):
+        return JSONResponse({"error": "본인의 유효한 분석 결과가 없습니다. 다시 업로드하세요."}, status_code=409)
+    pipeline.apply_credentials(user)
+    transactions, transaction_count = _merge_import_rows(read_transactions_csv(), draft["rows"], TX_COLUMNS)
+    dividends, dividend_count = _merge_import_rows(read_dividends_csv(), draft["dividends"], DIV_COLUMNS)
+    snapshot_imports("AI 임포트 확정 전")
+    if transaction_count:
+        write_transactions_csv(transactions)
+    if dividend_count:
+        write_dividends_csv(dividends)
+    _IMPORT_DRAFTS.pop(user, None)
     _CACHE.pop(user, None)
-    return JSONResponse({"ok": True, "transactions": n, "dividends": dn,
-                         "txPreview": rows[:30], "divPreview": divs[:30]})
+    return JSONResponse({"ok": True, "saved": True, "transactions": transaction_count, "dividends": dividend_count})
 
 
 @app.post("/api/app/datasources/clear")
@@ -1629,6 +1878,7 @@ def report_pdf(request: Request, ai: int = 1, tickers: str = ""):
     ai_text = request.session.pop("rebal_report", None)
     if not ai_text and ai:
         try:
+            _consume_ai_quota(user)
             pj = {"user_profile": {"user_id": user}, "asset_summary": data["summary"], "holdings": data["holdings"]}
             ai_text = generate_rebalancing_report(pj, data["ab"], data["perf"])
         except Exception:
@@ -1649,6 +1899,7 @@ def api_rebalance(request: Request):
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     pipeline.apply_credentials(user)
+    _consume_ai_quota(user)
     data = get_portfolio(user)
     pj = {"user_profile": {"user_id": user}, "asset_summary": data["summary"], "holdings": data["holdings"]}
     text = generate_rebalancing_report(pj, data["ab"], data["perf"])
@@ -1666,13 +1917,17 @@ async def api_chat(request: Request):
     history = body.get("history") or []
     if not q:
         return JSONResponse({"error": "empty"}, status_code=400)
+    if len(q) > 8000 or not isinstance(history, list) or len(history) > 40:
+        return JSONResponse({"error": "질문이나 대화 이력이 너무 깁니다."}, status_code=400)
+    _consume_ai_quota(user)
     pipeline.apply_credentials(user)
-    data = get_portfolio(user)
+    data = await run_in_threadpool(get_portfolio, user)
     pj = {"user_profile": {"user_id": user}, "asset_summary": data["summary"], "holdings": data["holdings"]}
     ctx_lines = []
     if data["ab"]:
         ctx_lines.append(f"알파 {data['ab'].get('alpha_pct')}%p, 베타 {data['ab'].get('beta')}, XIRR {data['ab'].get('port_xirr_pct')}%")
-    answer = chat_with_portfolio(q, history, pj, "\n".join(ctx_lines))
+    answer = await run_in_threadpool(chat_with_portfolio, q, history, pj, "\n".join(ctx_lines),
+                                    toss_credentials=auth.load_credentials(user))
     return JSONResponse({"answer": answer})
 
 

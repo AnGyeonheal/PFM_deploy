@@ -67,15 +67,21 @@ export default function App() {
 
   useEffect(() => {
     if (!loggedIn) return;
-    fetch("/api/app/tickers", { credentials: "include" })
+    const controller = new AbortController();
+    fetch("/api/app/tickers", { credentials: "include", signal: controller.signal })
       .then(r => (r.ok ? r.json() : null))
-      .then(j => { if (j) setTickers(j.tickers || []); })
+      .then(j => { if (j && !controller.signal.aborted) setTickers(j.tickers || []); })
       .catch(() => {});
-  }, [loggedIn, phase]);
+    return () => controller.abort();
+  }, [loggedIn, user, phase]);
 
   const handleLogout = () => {
     fetch("/api/app/logout", { method: "POST", credentials: "include" })
-      .finally(() => { setLoggedIn(false); setUser(""); setPhase("onboard"); setPage("dashboard"); });
+      .finally(() => {
+        setLoggedIn(false); setUser(""); setPhase("onboard"); setPage("dashboard");
+        setTickers([]); setYears([]);
+        setOpts({ includeDividend: true, includeFx: true, period: "1Y", scope: "total", ticker: "", year: new Date().getFullYear() });
+      });
   };
 
   if (checking) return <div className="min-h-full bg-[#0a0d14]" />;
@@ -84,10 +90,10 @@ export default function App() {
   const StepHeader = () => {
     const cur = STEPS.findIndex(s => s.id === phase);
     return (
-      <header className="h-14 border-b border-white/7 flex items-center gap-4 px-6 flex-shrink-0 bg-[#0d1019]">
+      <header className="min-h-14 border-b border-white/7 flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-3 sm:px-6 flex-shrink-0 bg-[#0d1019]">
         <Logo />
         <span className="font-['DM_Serif_Display',serif] text-base whitespace-nowrap">PortfolioAI</span>
-        <div className="flex items-center gap-2 ml-4 flex-wrap">
+        <div className="order-last w-full sm:order-none sm:w-auto flex items-center gap-2 sm:ml-4 flex-wrap">
           {STEPS.map((s, i) => (
             <div key={s.id} className="flex items-center gap-2">
               <span className={`text-xs font-mono px-2 py-1 rounded-sm ${phase === s.id ? "bg-[#00d4a1]/15 text-[#00d4a1]" : cur > i ? "text-[#00d4a1]" : "text-[#6b7494]"}`}>
@@ -98,8 +104,8 @@ export default function App() {
           ))}
         </div>
         <div className="flex-1" />
-        <div className="text-xs text-[#a0a8c0]">{user}</div>
-        <button onClick={handleLogout} className="text-xs text-[#6b7494] hover:text-[#ff5c6a] font-mono">로그아웃</button>
+        <div className="max-w-[100px] sm:max-w-[160px] truncate text-xs text-[#a0a8c0]" title={user}>{user}</div>
+        <button onClick={handleLogout} className="flex-shrink-0 whitespace-nowrap text-xs text-[#6b7494] hover:text-[#ff5c6a] font-mono">로그아웃</button>
       </header>
     );
   };

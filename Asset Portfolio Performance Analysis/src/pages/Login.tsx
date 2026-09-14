@@ -67,6 +67,7 @@ export default function Login({ onLogin }: Props) {
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               autoComplete="username"
+              required maxLength={64}
               className="w-full bg-[#0a0d14] border border-white/10 rounded-sm px-3 py-2.5 text-sm text-[#e8eaf0] font-mono focus:outline-none focus:border-[#00d4a1]/50 transition-colors"
               placeholder="아이디를 입력하세요"
             />
@@ -78,8 +79,9 @@ export default function Login({ onLogin }: Props) {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete={mode === "register" ? "new-password" : "current-password"}
+              required minLength={mode === "register" ? 8 : undefined} maxLength={256}
               className="w-full bg-[#0a0d14] border border-white/10 rounded-sm px-3 py-2.5 text-sm text-[#e8eaf0] font-mono focus:outline-none focus:border-[#00d4a1]/50 transition-colors"
-              placeholder={mode === "register" ? "비밀번호 (4자 이상)" : "비밀번호를 입력하세요"}
+              placeholder={mode === "register" ? "비밀번호 (8자 이상)" : "비밀번호를 입력하세요"}
             />
           </div>
           {mode === "register" && (
@@ -90,12 +92,13 @@ export default function Login({ onLogin }: Props) {
                 value={password2}
                 onChange={(e) => setPassword2(e.target.value)}
                 autoComplete="new-password"
+                required minLength={8} maxLength={256}
                 className="w-full bg-[#0a0d14] border border-white/10 rounded-sm px-3 py-2.5 text-sm text-[#e8eaf0] font-mono focus:outline-none focus:border-[#00d4a1]/50 transition-colors"
                 placeholder="비밀번호를 다시 입력하세요"
               />
             </div>
           )}
-          {err && <div className="text-xs text-[#ff5c6a] font-mono">{err}</div>}
+          {err && <div role="alert" className="text-xs text-[#ff5c6a] font-mono">{err}</div>}
           <button
             type="submit"
             disabled={busy}

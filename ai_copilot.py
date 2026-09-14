@@ -12,6 +12,12 @@ from pm import (
 # Gemini API 키는 코드에 하드코딩하지 않습니다(공개 저장소 노출 방지).
 # 로컬은 .env, Streamlit Cloud는 Secrets(app.py에서 os.environ으로 브리지)에서 읽습니다.
 load_dotenv()
+_SHARED_GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+
+
+def shared_gemini_available():
+    return bool(_SHARED_GEMINI_KEY and _SHARED_GEMINI_KEY not in
+                ("your_gemini_api_key", "여기에_발급받으신_Gemini_API_Key를_입력하세요"))
 
 # 무료 한도(429/RPM) 대비: 여러 모델을 순서대로 폴백 (각 모델은 별도 한도 버킷).
 # '-latest' 별칭은 최신 안정 모델을 자동 추종하며, lite 계열이 무료 한도가 넉넉합니다.
@@ -53,7 +59,7 @@ def ai_resolve_tickers(names):
     """종목명 리스트를 Gemini로 조회해 거래소 티커를 채웁니다.
     국내=6자리 코드, 미국=영문 심볼. 반환: {종목명: 티커}. 불확실/실패는 제외."""
     load_dotenv()
-    gemini_key = os.getenv("GEMINI_API_KEY")
+    gemini_key = _SHARED_GEMINI_KEY
     uniq = sorted({str(n).strip() for n in (names or []) if str(n).strip()})
     if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요" or not uniq:
         return {}
@@ -90,7 +96,7 @@ def generate_portfolio_report(portfolio_json):
     AI 진단 리포트를 생성합니다.
     """
     load_dotenv()
-    gemini_key = os.getenv("GEMINI_API_KEY")
+    gemini_key = _SHARED_GEMINI_KEY
     if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요":
         return "[오류] .env 파일에 유효한 GEMINI_API_KEY가 없습니다. 설정 후 다시 시도해주세요."
         
@@ -129,7 +135,7 @@ def generate_rebalancing_report(portfolio_json, metrics=None, perf=None, extra_c
     extra_context: 추가 컨텍스트 문자열(선택)
     """
     load_dotenv()
-    gemini_key = os.getenv("GEMINI_API_KEY")
+    gemini_key = _SHARED_GEMINI_KEY
     if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요":
         return "[오류] .env 파일 또는 API 키 설정에 유효한 GEMINI_API_KEY가 없습니다. 설정 후 다시 시도해주세요."
 
@@ -197,7 +203,7 @@ def parse_brokerage_transactions(raw_text, broker_name="증권사"):
     반환 스키마: [{"증권사","티커","종목명","시장","수량","평균매수가","통화","매수일"}, ...]
     """
     load_dotenv()
-    gemini_key = os.getenv("GEMINI_API_KEY")
+    gemini_key = _SHARED_GEMINI_KEY
     if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요":
         return None, "[오류] .env 파일에 유효한 GEMINI_API_KEY가 없습니다."
 
@@ -261,7 +267,7 @@ def parse_brokerage_full_transactions(raw_text, broker_name="증권사"):
     반환 스키마: [{"증권사","일자","티커","종목명","시장","구분(매수/매도)","수량","단가","통화"}, ...]
     """
     load_dotenv()
-    gemini_key = os.getenv("GEMINI_API_KEY")
+    gemini_key = _SHARED_GEMINI_KEY
     if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요":
         return None, "[오류] .env 파일에 유효한 GEMINI_API_KEY가 없습니다."
 
@@ -319,7 +325,7 @@ def parse_brokerage_dividends(raw_text, broker_name="증권사"):
     반환 스키마: [{"증권사","일자","티커","종목명","통화","배당금"}, ...]
     """
     load_dotenv()
-    gemini_key = os.getenv("GEMINI_API_KEY")
+    gemini_key = _SHARED_GEMINI_KEY
     if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요":
         return None, "[오류] .env 파일에 유효한 GEMINI_API_KEY가 없습니다."
 
@@ -375,7 +381,7 @@ def review_toss_transactions(orders, name_map=None):
     반환: (dict{"summary": str, "issues": [ {...} ]} 또는 None, 에러메시지 또는 None)
     """
     load_dotenv()
-    gemini_key = os.getenv("GEMINI_API_KEY")
+    gemini_key = _SHARED_GEMINI_KEY
     if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요":
         return None, "[오류] .env 파일 또는 API 키 설정에 유효한 GEMINI_API_KEY가 없습니다."
 
@@ -523,7 +529,7 @@ def _build_toss_tools(token, account="1"):
     ]
 
 
-def chat_with_portfolio(user_message, chat_history, portfolio_json, trades_summary=None):
+def chat_with_portfolio(user_message, chat_history, portfolio_json, trades_summary=None, toss_credentials=None):
     """
     포트폴리오/거래 데이터를 컨텍스트로 삼아 Gemini와 대화합니다.
     Gemini가 필요 시 토스증권 API 도구를 스스로 호출해 실시간 데이터를 찾습니다.
@@ -534,7 +540,7 @@ def chat_with_portfolio(user_message, chat_history, portfolio_json, trades_summa
     반환: AI 응답 문자열
     """
     load_dotenv()
-    gemini_key = os.getenv("GEMINI_API_KEY")
+    gemini_key = _SHARED_GEMINI_KEY
     if not gemini_key or gemini_key == "여기에_발급받으신_Gemini_API_Key를_입력하세요":
         return "[오류] .env 파일에 유효한 GEMINI_API_KEY가 없습니다. 설정 후 다시 시도해주세요."
 
@@ -542,9 +548,10 @@ def chat_with_portfolio(user_message, chat_history, portfolio_json, trades_summa
 
     # 토스 API 도구 준비 (토큰 발급)
     tools = None
-    client_id = os.getenv("TOSS_CLIENT_ID")
-    client_secret = os.getenv("TOSS_CLIENT_SECRET")
-    account = os.getenv("TOSS_ACCOUNT_NO", "1")
+    credentials = toss_credentials or {}
+    client_id = credentials.get("TOSS_CLIENT_ID")
+    client_secret = credentials.get("TOSS_CLIENT_SECRET")
+    account = str(credentials.get("TOSS_ACCOUNT_NO") or "1")
     token = get_access_token(client_id, client_secret) if client_id and client_secret else None
     if token:
         tools = _build_toss_tools(token, account)

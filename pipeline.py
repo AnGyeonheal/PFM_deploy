@@ -46,14 +46,10 @@ def empty_portfolio(user, fx=1400.0):
 
 
 def apply_credentials(user):
-    """저장된 사용자 API 키를 os.environ에 주입하고 데이터 폴더를 설정합니다."""
+    """요청별 데이터 폴더를 선택하고 해당 사용자의 자격 증명을 반환합니다."""
     set_data_dir(auth.user_dir(user))
-    creds = auth.load_credentials(user)
-    for k in auth.CRED_KEYS:
-        v = creds.get(k)
-        if v:
-            os.environ[k] = str(v)
-    return creds
+    set_price_overrides(holdings_price_overrides(), replace=True)
+    return auth.load_credentials(user)
 
 
 def toss_portfolio(creds, account="1"):

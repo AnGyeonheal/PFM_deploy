@@ -10,10 +10,37 @@ import hmac
 import base64
 import re
 import secrets
+import tempfile
+from functools import wraps
+from threading import RLock
 from datetime import datetime, timezone
 
-BASE_DIR = os.path.join(os.path.dirname(__file__), "user_data")
+BASE_DIR = os.path.abspath(os.getenv("PFM_DATA_DIR") or os.path.join(os.path.dirname(__file__), "user_data"))
 USERS_FILE = os.path.join(BASE_DIR, "users.json")
+_STORE_LOCK = RLock()
+
+
+def _locked(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with _STORE_LOCK:
+            return function(*args, **kwargs)
+    return wrapped
+
+
+def _save_json(path, value):
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=os.path.dirname(path),
+                                         prefix=".write-", suffix=".json", delete=False) as handle:
+            temporary = handle.name
+            json.dump(value, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def _ensure_base():
@@ -33,10 +60,10 @@ def _load_users():
 
 def _save_users(users):
     _ensure_base()
-    with open(USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(users, f, ensure_ascii=False, indent=2)
+    _save_json(USERS_FILE, users)
 
 
+@_locked
 def delete_user(username, wipe_data=True):
     """단일 계정 삭제 + (옵션) 사용자 데이터 폴더 제거. 반환: 존재했는지 여부."""
     users = _load_users()
@@ -51,6 +78,7 @@ def delete_user(username, wipe_data=True):
     return existed
 
 
+@_locked
 def delete_all_users(wipe_data=True):
     """모든 계정을 삭제(users.json 비움)하고 모든 로그인 세션을 무효화합니다.
     wipe_data=True면 각 사용자 데이터 폴더도 제거합니다. 반환: (삭제 계정 수, 삭제 폴더 수)."""
@@ -78,8 +106,13 @@ def _now_iso():
 
 
 def _safe_username(username):
-    """폴더명으로 안전한 사용자 ID (영숫자/._- 만 허용)."""
-    return re.sub(r"[^A-Za-z0-9._-]", "_", username.strip())
+    """다른 사용자 폴더로 정규화되지 않는 사용자 ID만 허용합니다."""
+    value = username.strip()
+    reserved = {"CON", "PRN", "AUX", "NUL"} | {f"{prefix}{number}" for prefix in ("COM", "LPT") for number in range(1, 10)}
+    if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", value) or value.endswith(".")
+            or value.split(".")[0].upper() in reserved or value.casefold() in ("users.json", "sessions.json")):
+        raise ValueError("아이디는 영문·숫자로 시작하는 1~64자의 영문·숫자·점·밑줄·하이픈이어야 합니다.")
+    return value
 
 
 def user_dir(username):
@@ -89,15 +122,20 @@ def user_dir(username):
     return d
 
 
+@_locked
 def register_user(username, password):
     """신규 사용자 등록. 반환: (성공여부, 메시지)"""
     username = (username or "").strip()
     if not username or not password:
         return False, "아이디와 비밀번호를 입력하세요."
-    if len(password) < 4:
-        return False, "비밀번호는 4자 이상이어야 합니다."
+    try:
+        username = _safe_username(username)
+    except ValueError as error:
+        return False, str(error)
+    if not 8 <= len(password) <= 256:
+        return False, "비밀번호는 8~256자여야 합니다."
     users = _load_users()
-    if username in users:
+    if username.casefold() in {existing.casefold() for existing in users}:
         return False, "이미 존재하는 아이디입니다."
     salt = os.urandom(16)
     users[username] = {
@@ -111,9 +149,12 @@ def register_user(username, password):
     return True, "회원가입 완료! 로그인하세요."
 
 
+@_locked
 def verify_user(username, password):
     """로그인 검증. 반환: (성공여부, 메시지)"""
     username = (username or "").strip()
+    if len(password or "") > 256:
+        return False, "아이디 또는 비밀번호를 확인하세요."
     users = _load_users()
     rec = users.get(username)
     if not rec:
@@ -151,6 +192,7 @@ def load_credentials(username):
         return {}
 
 
+@_locked
 def save_credentials(username, creds):
     """전달된 자격 증명을 저장합니다. 값이 비어 있는 키는 기존 값을 유지(갱신하지 않음)합니다.
     반환: 저장된(비어있지 않은) 키 개수."""
@@ -162,9 +204,16 @@ def save_credentials(username, creds):
         if v:
             data[k] = str(v)
             saved += 1
-    with open(_cred_path(username), "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    _save_json(_cred_path(username), data)
     return saved
+
+
+@_locked
+def remove_toss_credentials(username):
+    data = load_credentials(username)
+    for key in ("TOSS_CLIENT_ID", "TOSS_CLIENT_SECRET", "TOSS_ACCOUNT_NO"):
+        data.pop(key, None)
+    _save_json(_cred_path(username), data)
 
 
 def has_toss_credentials(username):
@@ -208,8 +257,7 @@ def _load_sessions():
 
 def _save_sessions(sessions):
     _ensure_base()
-    with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
-        json.dump(sessions, f, ensure_ascii=False, indent=2)
+    _save_json(SESSIONS_FILE, sessions)
 
 
 def _prune_sessions(sessions):
@@ -221,6 +269,7 @@ def _prune_sessions(sessions):
     return bool(expired)
 
 
+@_locked
 def create_session(username):
     """로그인 성공 시 호출. 임의 세션 토큰을 발급·저장하고 토큰 문자열을 반환합니다."""
     username = (username or "").strip()
@@ -237,6 +286,7 @@ def create_session(username):
     return token
 
 
+@_locked
 def resolve_session(token):
     """유효한 세션 토큰이면 username을, 아니면 None을 반환합니다(만료·삭제된 사용자 토큰은 폐기)."""
     if not token:
@@ -252,6 +302,7 @@ def resolve_session(token):
     return rec.get("username")
 
 
+@_locked
 def destroy_session(token):
     """로그아웃 시 세션 토큰을 폐기합니다."""
     if not token:
