@@ -232,6 +232,7 @@ def build_import_template_xlsx():
         ["수량·단가", "0보다 큰 숫자. 단가는 통화 기준 체결단가", "10 / 71500"],
         ["배당금", "0보다 큰 숫자(통화 기준, 실수령액 권장)", "1500"],
         ["증권사", "비우면 '직접입력'으로 저장", "한화투자증권"],
+        ["계좌", "같은 증권사의 여러 계좌는 서로 다른 식별자를 사용. 같은 계좌의 매수·매도에는 동일한 값 입력", "A01"],
         ["※ 핵심", "시장·통화를 정확히 넣어야 현재가·티커가 제대로 조회됩니다.", ""],
     ]:
         ws0.append(row)
@@ -242,13 +243,15 @@ def build_import_template_xlsx():
 
     # 2) 거래내역
     ws1 = wb.create_sheet("거래내역")
-    tx_cols = ["증권사", "일자", "티커", "종목명", "시장", "구분", "수량", "단가", "통화"]
+    tx_cols = ["증권사", "일자", "티커", "종목명", "시장", "구분", "수량", "단가", "통화", "계좌"]
     ws1.append(tx_cols)
     ws1.append(["한화투자증권", "2024-03-15", "005930", "삼성전자", "KOSPI", "매수", 10, 71500, "KRW"])
     ws1.append(["한화투자증권", "2024-05-02", "AAPL", "Apple", "US", "매수", 5, 185.2, "USD"])
     _style_header(ws1, len(tx_cols))
-    for i, w in enumerate([14, 12, 10, 16, 10, 8, 8, 12, 8], start=1):
+    for i, w in enumerate([14, 12, 10, 16, 10, 8, 8, 12, 8, 14], start=1):
         ws1.column_dimensions[chr(64 + i)].width = w
+    for account_cells in ws1.iter_rows(min_row=2, max_row=1000, min_col=10, max_col=10):
+        account_cells[0].number_format = "@"
     dv_mk = DataValidation(type="list", formula1='"KOSPI,KOSDAQ,US"', allow_blank=True)
     dv_sd = DataValidation(type="list", formula1='"매수,매도"', allow_blank=True)
     dv_cur = DataValidation(type="list", formula1='"KRW,USD"', allow_blank=True)

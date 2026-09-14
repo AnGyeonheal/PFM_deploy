@@ -52,6 +52,45 @@ class ApiOptionTests(unittest.TestCase):
         self.assertAlmostEqual(view["summary"]["twrReturn"], expected, places=2)
         self.assertNotEqual(view["summary"]["twrReturn"], webapp._benchmark_view(frame, "ALL")["summary"]["twrReturn"])
 
+    def test_account_realized_profit_matches_scope_fx_and_period(self):
+        self.fixture.histories["NVDA"].loc[:] = 100.0
+        self.fixture.fx.loc[:] = 1000.0
+        self.fixture.fx.iloc[1:] = 1200.0
+        self.fixture.fx.iloc[150:] = 1300.0
+        self.fixture.data["fx_rate"] = 1300.0
+        self.fixture.dividends.clear()
+        self.fixture.orders[:] = [
+            {"symbol": "NVDA", "currency": "USD", "broker": "test", "account": account, "side": side,
+             "execution": {"filledQuantity": quantity, "averageFilledPrice": price,
+                           "filledAmount": quantity * price, "filledAt": str(self.fixture.index[offset])}}
+            for offset, account, side, quantity, price in
+            ((0, "001", "BUY", 10, 100), (1, "002", "BUY", 10, 200), (150, "002", "SELL", 5, 300))
+        ]
+        sale_date = self.fixture.index[150]
+        periods = (("ALL", 0), ("1M", 0), ("YOY", sale_date.year), ("YOY", self.fixture.index[-1].year))
+        for dividend, fx, ticker, (period, year) in product((0, 1), (0, 1), ("", "NVDA"), periods):
+            with self.subTest(dividend=dividend, fx=fx, ticker=ticker, period=period, year=year):
+                start, end = webapp._period_bounds(period, year)
+                contains_sale = (start is None or start <= sale_date) and (end is None or sale_date <= end)
+                expected = (750000.0 if fx else 600000.0) if contains_sale else 0.0
+                payload = json.loads(webapp.api_app_dashboard(None, div=dividend, fx=fx, ticker=ticker,
+                                                               period=period, year=year).body)
+                self.assertEqual(payload["analysis"]["status"], "complete")
+                self.assertAlmostEqual(payload["metrics"]["realizedPnL"], expected)
+                stock = next(row for row in payload["stocks"] if row["ticker"] == "NVDA")
+                self.assertAlmostEqual(stock["realizedPnL"], expected)
+                self.assertAlmostEqual(stock["buyTotal"], 2200000.0)
+
+    def test_wrong_account_sale_is_unavailable_not_funded_by_other_account(self):
+        for order in self.fixture.orders:
+            order["broker"] = "test"
+            order["account"] = "001" if order["side"] == "BUY" else "002"
+        payload = json.loads(webapp.api_app_dashboard(None, ticker="NVDA", period="ALL").body)
+        self.assertEqual(payload["analysis"]["status"], "unavailable")
+        self.assertIsNone(payload["metrics"]["realizedPnL"])
+        self.assertIsNone(payload["stocks"][0]["realizedPnL"])
+        self.assertTrue(payload["analysis"]["warnings"])
+
     def test_identical_assets_have_unit_beta_zero_alpha(self):
         self.fixture.histories["NVDA"] = self.fixture.spy
         self.fixture.orders[0]["execution"]["averageFilledPrice"] = float(self.fixture.spy.iloc[0])

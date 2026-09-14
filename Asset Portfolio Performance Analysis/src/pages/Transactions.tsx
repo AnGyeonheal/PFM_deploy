@@ -2,12 +2,12 @@ import { useState, useEffect } from "react";
 import { Card, CardHeader } from "../components/Shared";
 
 type Tab = "transactions" | "dividends";
-type Tx = { date: string; ticker: string; name: string; market: string; type: string; quantity: number; price: number; currency: string; broker: string };
+type Tx = { date: string; ticker: string; name: string; market: string; type: string; quantity: number; price: number; currency: string; broker: string; account?: string };
 type Div = { date: string; ticker: string; name: string; amount: number; currency: string; broker: string };
 type EstDiv = { date: string; ticker: string; name: string; amount: number; currency: string };
 type Snap = { id: string; label: string; time: string; tx: number; div: number };
 
-const emptyTx = (): Tx => ({ date: "", ticker: "", name: "", market: "", type: "buy", quantity: 0, price: 0, currency: "KRW", broker: "" });
+const emptyTx = (): Tx => ({ date: "", ticker: "", name: "", market: "", type: "buy", quantity: 0, price: 0, currency: "KRW", broker: "", account: "" });
 const emptyDiv = (): Div => ({ date: "", ticker: "", name: "", amount: 0, currency: "KRW", broker: "" });
 
 const inputCls = "w-full bg-[#0a0d14] border border-white/10 rounded-sm px-2 py-1.5 text-xs text-[#e8eaf0] font-mono focus:outline-none focus:border-[#00d4a1]/50 transition-colors";
@@ -113,10 +113,10 @@ export default function Transactions() {
           <CardHeader title="거래 내역 편집" sub="C1: 수동 거래 추가·수정·삭제 (토스 API 거래는 자동 수집·읽기전용)" />
           <div className="p-5">
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full min-w-[1100px] text-sm">
                 <thead>
                   <tr className="border-b border-white/7">
-                    {["날짜", "티커", "종목명", "시장", "유형", "수량", "단가", "통화", "증권사", ""].map(h => (
+                    {["날짜", "티커", "종목명", "시장", "유형", "수량", "단가", "통화", "증권사", "계좌", ""].map(h => (
                       <th key={h} className="px-2 py-2 text-left text-[11px] text-[#6b7494] font-mono uppercase tracking-wider">{h}</th>
                     ))}
                   </tr>
@@ -145,6 +145,7 @@ export default function Transactions() {
                         </select>
                       </td>
                       <td className="px-1 py-1"><input className={inputCls} value={t.broker} onChange={e => updTx(i, "broker", e.target.value)} placeholder="증권사" /></td>
+                      <td className="px-1 py-1"><input className={inputCls} value={t.account ?? ""} onChange={e => updTx(i, "account", e.target.value)} aria-label={`거래 ${i + 1} 계좌`} title="동일 증권사 내 계좌 식별자" /></td>
                       <td className="px-1 py-1 text-center">
                         <button onClick={() => setTransactions(prev => prev.filter((_, idx) => idx !== i))}
                           className="text-xs text-[#ff5c6a]/60 hover:text-[#ff5c6a] font-mono">삭제</button>
@@ -152,7 +153,7 @@ export default function Transactions() {
                     </tr>
                   ))}
                   {transactions.length === 0 && (
-                    <tr><td colSpan={10} className="px-2 py-6 text-center text-xs text-[#6b7494] font-mono">수동 거래가 없습니다. "거래 추가"로 입력하세요.</td></tr>
+                    <tr><td colSpan={11} className="px-2 py-6 text-center text-xs text-[#6b7494] font-mono">수동 거래가 없습니다. "거래 추가"로 입력하세요.</td></tr>
                   )}
                 </tbody>
               </table>

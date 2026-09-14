@@ -6,6 +6,7 @@
 import pandas as pd
 
 from benchmark import to_yf_ticker, get_history, get_usdkrw_history, get_native_price_now
+from pme import _trade_records
 
 
 def _fx_asof(fx_hist, date, fx_now):
@@ -19,34 +20,17 @@ def _fx_asof(fx_hist, date, fx_now):
 
 
 def _records(orders):
-    recs = []
-    for o in orders:
-        ex = o.get("execution") or {}
-        qty = float(ex.get("filledQuantity") or 0)
-        amt = float(ex.get("filledAmount") or 0)
-        if qty <= 0 or amt <= 0:
-            continue
-        raw = ex.get("filledAt") or o.get("orderedAt")
-        try:
-            ts = pd.to_datetime(raw).tz_localize(None)
-        except (TypeError, ValueError):
-            try:
-                ts = pd.to_datetime(raw, utc=True).tz_localize(None)
-            except Exception:
-                continue
-        if pd.isna(ts):
-            continue
-        recs.append({
-            "symbol": o.get("symbol"),
-            "currency": o.get("currency", "KRW"),
-            "side": o.get("side"),
-            "qty": qty,
-            "price": amt / qty,
-            "amount": amt,
-            "date": ts.normalize(),
-            "ts": ts,  # 같은 날 매수→매도 순서 보존을 위한 체결 시각(정규화 전)
-        })
-    return recs
+    records = _trade_records(orders)
+    quantities = {}
+    unavailable = set()
+    for record in records:
+        position = record["position"]
+        quantity = quantities.get(position, 0.0)
+        if record["side"] == "SELL" and record["qty"] > quantity + 1e-8:
+            unavailable.add(record["symbol"])
+        quantities[position] = quantity + (record["qty"] if record["side"] == "BUY" else -record["qty"])
+    return [dict(record, price=record["amount"] / record["qty"], ts=record["timestamp"])
+            for record in records if record["symbol"] not in unavailable]
 
 
 def compute_performance_summary(orders, fx_now=1400.0, div_krw_native=0.0, div_usd_native=0.0,
@@ -78,15 +62,17 @@ def compute_performance_summary(orders, fx_now=1400.0, div_krw_native=0.0, div_u
         cur_value_krw=0.0, cost_krw_remaining=0.0,
     )
 
-    for s in symbols:
-        cur = cur_map[s]
-        srecs = sorted((r for r in recs if r["symbol"] == s), key=lambda r: r["ts"])
-        qty = cost_native = cost_krw = 0.0
+    positions = {record["position"]: record["symbol"] for record in recs}
+    for position, s in positions.items():
+        cur = position[2]
+        srecs = [record for record in recs if record["position"] == position]
+        qty = cost_native = cost_krw = cost_fx_weight = 0.0
         for r in srecs:
             fx_d = _fx_asof(fx_hist, r["date"], fx_now) if cur == "USD" else 1.0
             if r["side"] == "BUY":
                 cost_native += r["qty"] * r["price"]
                 cost_krw += r["qty"] * r["price"] * fx_d
+                cost_fx_weight += r["qty"] * fx_d
                 qty += r["qty"]
                 t["buy_krw"] += r["amount"] * fx_d
             else:  # SELL — 평균단가 기준 매칭
@@ -95,14 +81,15 @@ def compute_performance_summary(orders, fx_now=1400.0, div_krw_native=0.0, div_u
                 sell_qty = min(r["qty"], qty)
                 avg_native_per = cost_native / qty
                 avg_krw_per = cost_krw / qty
-                avg_fx = (cost_krw / cost_native) if (cur == "USD" and cost_native > 0) else 1.0
+                avg_fx = cost_fx_weight / qty
                 cost_out_native = avg_native_per * sell_qty
                 cost_out_krw = avg_krw_per * sell_qty
-                price_native = sell_qty * r["price"] - cost_out_native
-                t["realized_price_krw"] += price_native * fx_d
+                fixed_proceeds = sell_qty * r["price"] * avg_fx
+                t["realized_price_krw"] += fixed_proceeds - cost_out_krw
                 if cur == "USD":
-                    t["realized_fx_krw"] += cost_out_native * (fx_d - avg_fx)
+                    t["realized_fx_krw"] += sell_qty * r["price"] * (fx_d - avg_fx)
                 t["sell_krw"] += sell_qty * r["price"] * fx_d
+                cost_fx_weight -= sell_qty * avg_fx
                 qty -= sell_qty
                 cost_native -= cost_out_native
                 cost_krw -= cost_out_krw
@@ -110,13 +97,13 @@ def compute_performance_summary(orders, fx_now=1400.0, div_krw_native=0.0, div_u
         pn = price_now.get(s)
         if qty > 1e-9 and pn is not None:
             avg_native_per = cost_native / qty if qty else 0.0
-            avg_fx = (cost_krw / cost_native) if (cur == "USD" and cost_native > 0) else 1.0
+            avg_fx = cost_fx_weight / qty
             u_price_native = (pn - avg_native_per) * qty
             fx_apply = fx_now if cur == "USD" else 1.0
             cur_val_krw = pn * qty * fx_apply
-            t["unreal_price_krw"] += u_price_native * fx_apply
+            t["unreal_price_krw"] += pn * qty * avg_fx - cost_krw
             if cur == "USD":
-                t["unreal_fx_krw"] += cost_native * (fx_now - avg_fx)
+                t["unreal_fx_krw"] += pn * qty * (fx_now - avg_fx)
                 t["unreal_native_usd"] += u_price_native
                 t["cost_native_usd_remaining"] += cost_native
             t["unreal_total_krw"] += cur_val_krw - cost_krw
@@ -190,39 +177,47 @@ def build_holdings_breakdown(orders, fx_now=1400.0, name_map=None, div_krw_by_ti
     for s in symbols:
         cur = cur_map[s]
         srecs = sorted((r for r in recs if r["symbol"] == s), key=lambda r: r["ts"])
-        qty = cost_native = cost_krw = 0.0
+        positions = {}
         buy_qty = buy_native = buy_krw = 0.0
         realized_pnl_krw = sell_proceeds_krw = 0.0
         realized_pnl_native = sell_proceeds_native = 0.0
         for r in srecs:
+            state = positions.setdefault(r["position"], {"qty": 0.0, "cost_native": 0.0,
+                                                         "cost_krw": 0.0, "cost_fx": 0.0})
             fx_d = _fx_asof(fx_hist, r["date"], fx_now) if cur == "USD" else 1.0
             if r["side"] == "BUY":
-                cost_native += r["qty"] * r["price"]
-                cost_krw += r["qty"] * r["price"] * fx_d
-                qty += r["qty"]
+                state["cost_native"] += r["qty"] * r["price"]
+                state["cost_krw"] += r["qty"] * r["price"] * fx_d
+                state["cost_fx"] += r["qty"] * fx_d
+                state["qty"] += r["qty"]
                 buy_qty += r["qty"]
                 buy_native += r["qty"] * r["price"]
                 buy_krw += r["qty"] * r["price"] * fx_d
             else:  # SELL — 평균단가 기준 실현 (분할매도 반영)
-                if qty <= 1e-9:
+                if state["qty"] <= 1e-9:
                     continue
-                sell_qty = min(r["qty"], qty)
-                avg_native_per = cost_native / qty
-                avg_krw_per = cost_krw / qty
+                sell_qty = min(r["qty"], state["qty"])
+                avg_native_per = state["cost_native"] / state["qty"]
+                avg_krw_per = state["cost_krw"] / state["qty"]
+                avg_fx = state["cost_fx"] / state["qty"]
                 cost_out_native = avg_native_per * sell_qty
                 cost_out_krw = avg_krw_per * sell_qty
                 proceeds_native = sell_qty * r["price"]  # 매도대금(네이티브) — 환율 미적용
-                proceeds_krw = sell_qty * r["price"] * fx_d
+                proceeds_krw = proceeds_native * (fx_d if include_fx else avg_fx)
                 realized_pnl_native += proceeds_native - cost_out_native
                 realized_pnl_krw += proceeds_krw - cost_out_krw
                 sell_proceeds_native += proceeds_native
                 sell_proceeds_krw += proceeds_krw
-                qty -= sell_qty
-                cost_native -= cost_out_native
-                cost_krw -= cost_out_krw
+                state["qty"] -= sell_qty
+                state["cost_native"] -= cost_out_native
+                state["cost_krw"] -= cost_out_krw
+                state["cost_fx"] -= sell_qty * avg_fx
 
         if buy_qty <= 1e-9:
             continue
+        qty = sum(state["qty"] for state in positions.values())
+        cost_native = sum(state["cost_native"] for state in positions.values())
+        cost_krw = sum(state["cost_krw"] for state in positions.values())
         held_qty = qty if qty > 1e-9 else 0.0
         avg_buy_native = cost_native / held_qty if held_qty else buy_native / buy_qty
         avg_buy_krw = cost_krw / held_qty if held_qty else buy_krw / buy_qty
@@ -231,6 +226,8 @@ def build_holdings_breakdown(orders, fx_now=1400.0, name_map=None, div_krw_by_ti
         unreal_pnl_krw = unreal_pnl_native = 0.0
         if held_qty > 0 and pn is not None:
             cur_val_krw = pn * held_qty * (fx_now if cur == "USD" else 1.0)
+            if cur == "USD" and not include_fx:
+                cur_val_krw = pn * sum(state["cost_fx"] for state in positions.values())
             unreal_pnl_krw = cur_val_krw - cost_krw
             unreal_pnl_native = pn * held_qty - cost_native  # 달러 기준 미실현손익(환차 제외)
 

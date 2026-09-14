@@ -1,17 +1,33 @@
 import json
+import asyncio
+import io
+import tempfile
 import unittest
-from unittest.mock import patch
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pandas as pd
 
 import manual_holdings
 import performance
 import pme
+import pipeline
 import webapp
 from analysis_fixture import AnalysisFixture
+from exporter import build_import_template_xlsx
+from openpyxl import load_workbook
 
 
 class TransactionPreprocessingTests(unittest.TestCase):
+    def account_trades(self):
+        frame = pd.DataFrame([
+            ("2025-01-01", "매수", 10, 100, "001"),
+            ("2025-01-02", "매수", 10, 200, "002"),
+            ("2025-02-01", "매도", 5, 300, "002"),
+        ], columns=["일자", "구분", "수량", "단가", "계좌"])
+        return frame.assign(증권사="test", 티커="005930", 종목명="삼성전자", 시장="KOSPI", 통화="KRW")
+
     def holdings(self, trades, price):
         frame = pd.DataFrame(trades, columns=["일자", "구분", "수량", "단가"])
         frame["티커"] = "005930"
@@ -69,6 +85,76 @@ class TransactionPreprocessingTests(unittest.TestCase):
         self.assertEqual(row["평가손익(원)"], -100)
         self.assertEqual(row["실현손익(원)"], -100)
         self.assertEqual(row["수익률(%)"], -25)
+
+
+    def test_manual_positions_and_orders_keep_accounts(self):
+        trades = self.account_trades()
+        history = pd.Series([150.0], index=pd.to_datetime(["2025-02-03"]))
+        with patch.object(manual_holdings, "get_history", return_value=history):
+            holdings = manual_holdings.derive_holdings_from_tx(trades).set_index("계좌")
+        self.assertEqual(holdings.loc["001", "수량"], 10)
+        self.assertEqual(holdings.loc["001", "평균매수가"], 100)
+        self.assertEqual(holdings.loc["002", "수량"], 5)
+        self.assertEqual(holdings.loc["002", "평균매수가"], 200)
+        orders = manual_holdings.transactions_to_orders(trades)
+        self.assertEqual([order["account"] for order in orders], ["001", "002", "002"])
+        snapshots = manual_holdings.manual_to_orders(holdings.reset_index())
+        self.assertEqual([order["account"] for order in snapshots], ["001", "002"])
+
+    def test_account_identifiers_survive_csv_roundtrip(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(manual_holdings, "TX_CSV", str(Path(directory) / "trades.csv")):
+            manual_holdings.write_transactions_csv(self.account_trades())
+            restored = manual_holdings.read_transactions_csv()
+            self.assertEqual(restored["계좌"].tolist(), ["001", "002", "002"])
+            manual_holdings.write_transactions_csv(self.account_trades().drop(columns="계좌"))
+            self.assertEqual(manual_holdings.read_transactions_csv()["계좌"].tolist(), ["", "", ""])
+
+    def test_template_preserves_optional_account_identifiers(self):
+        workbook = load_workbook(io.BytesIO(build_import_template_xlsx()))
+        sheet = workbook["거래내역"]
+        self.assertEqual(sheet["J1"].value, "계좌")
+        self.assertEqual(sheet["J2"].number_format, "@")
+        sheet["J2"] = "001"
+        sheet["J3"] = "002"
+        content = io.BytesIO()
+        workbook.save(content)
+        with patch.object(manual_holdings, "save_parsed_transactions", return_value=2) as save, \
+                patch.object(manual_holdings, "save_parsed_dividends", return_value=2):
+            result = manual_holdings.import_template_xlsx(content.getvalue())
+        self.assertEqual(result["errors"], [])
+        self.assertEqual([row["계좌"] for row in save.call_args.args[0]], ["001", "002"])
+
+    def test_toss_fetch_and_edits_preserve_account_identity(self):
+        original = {"symbol": "TEST", "currency": "USD", "side": "BUY", "execution": {
+            "filledQuantity": 1, "averageFilledPrice": 100, "filledAmount": 100, "filledAt": "2025-01-01"}}
+        with patch.object(pipeline, "get_access_token", return_value="test-token"), \
+                patch.object(pipeline, "get_exchange_rate", return_value=1000), \
+                patch.object(pipeline, "get_order_history", return_value=[original]), \
+                patch.object(pipeline, "get_holdings", return_value={}), \
+                patch.object(pipeline, "build_transaction_detail", return_value=pd.DataFrame()):
+            _, orders, _, _ = pipeline.toss_trades({"TOSS_CLIENT_ID": "test", "TOSS_CLIENT_SECRET": "test",
+                                                   "TOSS_ACCOUNT_NO": "001"})
+        self.assertEqual(pme.position_key(orders[0])[:2], ("toss", "001"))
+        self.assertNotIn("account", original)
+        edited = pipeline._override_to_order(orders[0], {"일자": "2025-01-02", "구분": "매수",
+                                                         "수량": 2, "단가": 110})
+        self.assertEqual(pme.position_key(edited), pme.position_key(orders[0]))
+
+    def test_edit_api_roundtrip_preserves_accounts(self):
+        with patch.object(webapp, "_current_user", return_value="test"), \
+                patch.object(pipeline, "apply_credentials"), \
+                patch.object(webapp, "get_portfolio", return_value={"dividends_rows": []}), \
+                patch.object(webapp, "read_transactions_csv", return_value=self.account_trades()), \
+                patch.object(webapp, "read_dividends_csv", return_value=pd.DataFrame()), \
+                patch.object(webapp, "list_snapshots", return_value=[]), \
+                patch.object(webapp, "snapshot_imports"), \
+                patch.object(webapp, "write_transactions_csv", return_value=3) as write:
+            payload = json.loads(webapp.api_app_edit_data(None).body)
+            request = SimpleNamespace(json=AsyncMock(return_value={"rows": payload["transactions"]}))
+            response = asyncio.run(webapp.api_app_edit_transactions(request))
+            self.assertTrue(json.loads(response.body)["ok"])
+            self.assertEqual(write.call_args.args[0]["계좌"].tolist(), ["001", "002", "002"])
 
 
 class KoreanValuationDateTests(unittest.TestCase):

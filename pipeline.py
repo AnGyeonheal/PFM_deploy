@@ -25,7 +25,7 @@ from advanced_analytics import compute_dividends, compute_dividend_events
 from pme import (
     compute_alpha_beta,
     build_trade_bars, build_asset_value_growth, build_stock_analytics, compute_rolling_beta,
-    build_spy_dca, build_twr_comparison,
+    build_spy_dca, build_twr_comparison, position_key,
 )
 import auth
 from names import enrich_name_map, resolve_ticker_map, normalize_kr_ticker, register_krw_foreign
@@ -90,7 +90,7 @@ def toss_trades(creds, account="1"):
     if not token:
         return pd.DataFrame(), [], 0.0, {}
     fx = get_exchange_rate(token)
-    orders = get_order_history(token, acc)
+    orders = [dict(order, broker="토스증권", account=acc) for order in get_order_history(token, acc)]
     holdings_data = get_holdings(token, acc) or {}
     name_map = {i.get("symbol"): i.get("name") for i in holdings_data.get("result", {}).get("items", [])}
     detail = build_transaction_detail(orders, fx, name_map)
@@ -122,7 +122,7 @@ def toss_display_row(o, name_map=None):
         except Exception:
             d = ""
     sym = o.get("symbol")
-    return {"증권사": o.get("broker", "토스증권"), "일자": d, "티커": sym,
+    return {"증권사": o.get("broker", "토스증권"), "계좌": position_key(o)[1], "일자": d, "티커": sym,
             "종목명": name_map.get(sym, sym), "시장": "",
             "구분": "매도" if o.get("side") == "SELL" else "매수",
             "수량": float(ex.get("filledQuantity") or 0),
@@ -326,10 +326,11 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True,
                     _t = _tmap.get(str(tx_df.at[_i, "종목명"]).strip())
                     if _t:
                         tx_df.at[_i, "티커"] = _t
-        tx_brokers = set(tx_df["증권사"].unique()) if has_tx else set()
+        tx_accounts = {position_key(row)[:2] for _, row in tx_df.iterrows()} if has_tx else set()
         holdings_snapshot = load_manual_holdings(fx_rate)
         if holdings_snapshot is not None and not holdings_snapshot.empty:
-            holdings_snapshot = holdings_snapshot[~holdings_snapshot["증권사"].isin(tx_brokers)]
+            has_history = holdings_snapshot.apply(lambda row: position_key(row)[:2] in tx_accounts, axis=1)
+            holdings_snapshot = holdings_snapshot[~has_history]
         tx_holdings = derive_holdings_from_tx(tx_df, fx_rate) if has_tx else pd.DataFrame()
         parts = [d for d in (tx_holdings, holdings_snapshot) if d is not None and not d.empty]
         manual_df = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()

@@ -45,6 +45,32 @@ zero. A subsequent purchase must not inherit the cost of previously sold shares.
 Displayed holding average prices likewise use remaining cost / remaining shares,
 not the average of all historical purchases.
 
+Cost pools are keyed by broker, account identifier, currency and symbol. A sale
+only removes average cost and purchase FX from its own pool; the resulting
+realized profit and remaining cost are then summed for symbol/portfolio display.
+Other accounts' low-cost purchases cannot subsidize a sale. Full liquidation
+clears that pool before any subsequent purchase. This applies to the daily
+ledger, performance summary, holdings breakdown and fixed-FX valuations.
+
+Toss orders carry the queried broker/account through edits and split adjustments.
+Imported trades and holding snapshots accept an optional `계좌` string column;
+CSV, Excel and the transaction editor preserve it, including leading zeros.
+Use stable account labels rather than credentials. Legacy files without that
+column use a separate unspecified-account pool within each broker. Missing
+identifiers are not inferred to refer to an explicitly identified account;
+multiple accounts with the same unspecified label cannot be distinguished.
+Transfers require matched source records and opening cost, not a sale funded
+by unrelated accounts. An unmatched sale is unavailable, not zero profit.
+
+The FX screen's average purchase rate now uses remaining USD cost after each
+account's sales, rather than all historical purchases including closed lots.
+Aggregated dividend events without account provenance use the remaining-share
+weighted purchase FX for the symbol when FX is excluded.
+
+Realized profit remains before commissions and taxes. Conversion uses historical
+market USD/KRW rates, not a broker's actual FX execution or settlement rate;
+these analytics are not a tax-basis or brokerage-statement reconciliation.
+
 A missing quote, insufficient history or unmatched sale excludes that symbol's
 entire transaction ledger from the aggregate, including its purchases, sales
 and dividends. Healthy symbols continue to be analyzed against the same subset

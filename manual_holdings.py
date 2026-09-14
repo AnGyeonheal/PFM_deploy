@@ -11,6 +11,7 @@ import pandas as pd
 
 from benchmark import to_yf_ticker, get_history
 from names import resolve_kr_code
+from pme import position_key
 
 MANUAL_CSV = os.path.join(os.path.dirname(__file__), "manual_holdings.csv")
 TX_CSV = os.path.join(os.path.dirname(__file__), "manual_transactions.csv")
@@ -20,8 +21,8 @@ TOSS_OVR_JSON = os.path.join(os.path.dirname(__file__), "toss_overrides.json")
 HOLDINGS_OVR_JSON = os.path.join(os.path.dirname(__file__), "holdings_overrides.json")
 TRASH_DIR = os.path.join(os.path.dirname(__file__), "trash")
 
-COLUMNS = ["증권사", "티커", "종목명", "시장", "수량", "평균매수가", "통화", "매수일"]
-TX_COLUMNS = ["증권사", "일자", "티커", "종목명", "시장", "구분", "수량", "단가", "통화"]
+COLUMNS = ["증권사", "티커", "종목명", "시장", "수량", "평균매수가", "통화", "매수일", "계좌"]
+TX_COLUMNS = ["증권사", "일자", "티커", "종목명", "시장", "구분", "수량", "단가", "통화", "계좌"]
 DIV_COLUMNS = ["증권사", "일자", "티커", "종목명", "통화", "배당금"]
 SPLIT_COLUMNS = ["티커", "종목명", "분할일", "비율"]
 
@@ -286,13 +287,13 @@ def read_transactions_csv():
     if not os.path.exists(TX_CSV):
         return pd.DataFrame(columns=TX_COLUMNS)
     try:
-        df = pd.read_csv(TX_CSV, encoding="utf-8-sig", dtype={"티커": str})
+        df = pd.read_csv(TX_CSV, encoding="utf-8-sig", dtype={"티커": str, "계좌": str})
         for c in TX_COLUMNS:
             if c not in df.columns:
                 df[c] = ""
         for c in ("수량", "단가"):
             df[c] = pd.to_numeric(df[c], errors="coerce")
-        for c in ("증권사", "일자", "티커", "종목명", "시장", "구분", "통화"):
+        for c in ("증권사", "일자", "티커", "종목명", "시장", "구분", "통화", "계좌"):
             df[c] = df[c].fillna("").astype(str)
         df["티커"] = df["티커"].map(normalize_ticker)  # FB→META 등 정규화
         return df[TX_COLUMNS]
@@ -327,7 +328,7 @@ def save_parsed_transactions(rows, replace_broker=None):
     new_df = new_df[TX_COLUMNS]
     if replace_broker and os.path.exists(TX_CSV):
         try:
-            old = pd.read_csv(TX_CSV, encoding="utf-8-sig", dtype={"티커": str})
+            old = pd.read_csv(TX_CSV, encoding="utf-8-sig", dtype={"티커": str, "계좌": str})
             old = old[old.get("증권사") != replace_broker]
             combined = pd.concat([old, new_df], ignore_index=True)
         except Exception:
@@ -448,7 +449,7 @@ def import_template_xlsx(file_bytes, replace_broker=None):
     import io
     errors = []
     try:
-        sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None, dtype={"티커": str})
+        sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None, dtype={"티커": str, "계좌": str})
     except Exception as e:
         return {"tx": 0, "div": 0, "errors": [f"엑셀을 읽지 못했습니다: {e}"]}
 
@@ -480,6 +481,7 @@ def import_template_xlsx(file_bytes, replace_broker=None):
                 mk = "KOSPI"  # 시장 미입력 국내코드는 KOSPI로 가정(KOSDAQ은 사용자가 명시)
             tx_rows.append({
                 "증권사": str(r.get("증권사", "") or "").strip() or "직접입력",
+                "계좌": position_key(r)[1],
                 "일자": _fmt_date(r.get("일자")),
                 "티커": normalize_ticker(tk),
                 "종목명": nm or tk,
@@ -559,6 +561,7 @@ def transactions_to_orders(tx_df):
                 "status": "FILLED",
                 "orderedAt": filled_at,
                 "broker": r.get("증권사", "타증권사"),
+                "account": position_key(r)[1],
                 "execution": {
                     "filledQuantity": qty,
                     "averageFilledPrice": price,
@@ -588,9 +591,9 @@ def derive_holdings_from_tx(tx_df, fx_rate=1400.0):
             price = float(r.get("단가", 0) or 0)
             if qty <= 0 or price <= 0:
                 continue
-            key = (r.get("증권사"), str(r.get("티커")))
+            key = position_key(r)
             e = agg.setdefault(key, {
-                "증권사": r.get("증권사"), "티커": str(r.get("티커")),
+                "증권사": r.get("증권사"), "계좌": key[1], "티커": str(r.get("티커")),
                 "종목명": r.get("종목명"), "시장": r.get("시장", "US"),
                 "통화": str(r.get("통화", "KRW")).upper(),
                 "net_qty": 0.0, "remaining_cost": 0.0,
@@ -627,7 +630,7 @@ def derive_holdings_from_tx(tx_df, fx_rate=1400.0):
         if pd.isna(return_pct):
             return_pct = 0.0
         rows.append({
-            "증권사": e["증권사"], "티커": e["티커"], "종목명": e["종목명"] or e["티커"],
+            "증권사": e["증권사"], "계좌": e["계좌"], "티커": e["티커"], "종목명": e["종목명"] or e["티커"],
             "시장": market, "통화": cur, "수량": e["net_qty"],
             "평균매수가": round(avg_price, 2), "현재가": round(last_price, 2),
             "평가액(원)": round(eval_krw), "수익률(%)": round(return_pct, 2), "매수일": "",
@@ -640,18 +643,18 @@ COLUMNS_HOLDINGS = COLUMNS  # 하위호환 별칭
 
 
 def read_manual_csv():
-    """원본 수동 보유 CSV(편집용 8개 컬럼)를 그대로 읽어 반환합니다."""
+    """선택적 계좌 식별자를 포함한 원본 수동 보유 CSV를 읽습니다."""
     if not os.path.exists(MANUAL_CSV):
         return pd.DataFrame(columns=COLUMNS)
     try:
-        df = pd.read_csv(MANUAL_CSV, encoding="utf-8-sig", dtype={"티커": str})
+        df = pd.read_csv(MANUAL_CSV, encoding="utf-8-sig", dtype={"티커": str, "계좌": str})
         for c in COLUMNS:
             if c not in df.columns:
                 df[c] = ""
         # 숫자 컬럼 타입 통일 (Arrow 직렬화 경고 방지)
         for c in ("수량", "평균매수가"):
             df[c] = pd.to_numeric(df[c], errors="coerce")
-        for c in ("증권사", "티커", "종목명", "시장", "통화", "매수일"):
+        for c in ("증권사", "티커", "종목명", "시장", "통화", "매수일", "계좌"):
             df[c] = df[c].fillna("").astype(str)
         df["티커"] = df["티커"].map(normalize_ticker)  # FB→META 등 정규화
         return df[COLUMNS]
@@ -693,7 +696,7 @@ def save_parsed_holdings(rows, replace_broker=None):
 
     if replace_broker and os.path.exists(MANUAL_CSV):
         try:
-            old = pd.read_csv(MANUAL_CSV, encoding="utf-8-sig")
+            old = pd.read_csv(MANUAL_CSV, encoding="utf-8-sig", dtype={"티커": str, "계좌": str})
             old = old[old.get("증권사") != replace_broker]
             combined = pd.concat([old, new_df], ignore_index=True)
         except Exception:
@@ -714,7 +717,7 @@ def load_manual_holdings(fx_rate=1400.0):
         return pd.DataFrame()
 
     try:
-        df = pd.read_csv(MANUAL_CSV, encoding="utf-8-sig")
+        df = pd.read_csv(MANUAL_CSV, encoding="utf-8-sig", dtype={"티커": str, "계좌": str})
     except Exception as e:
         print(f"[경고] 수동 보유 CSV 읽기 실패: {e}")
         return pd.DataFrame()
@@ -747,6 +750,7 @@ def load_manual_holdings(fx_rate=1400.0):
 
             rows.append({
                 "증권사": r.get("증권사", "수동입력"),
+                "계좌": position_key(r)[1],
                 "티커": normalize_ticker(r.get("티커")),
                 "종목명": r.get("종목명", r.get("티커")),
                 "시장": market,
@@ -801,6 +805,7 @@ def manual_to_orders(manual_df):
                 "status": "FILLED",
                 "orderedAt": filled_at,
                 "broker": r.get("증권사", "타증권사"),
+                "account": position_key(r)[1],
                 "execution": {
                     "filledQuantity": qty,
                     "averageFilledPrice": avg_price,

@@ -572,6 +572,7 @@ def api_app_edit_data(request: Request):
                 "type": "sell" if str(r.get("구분")) == "매도" else "buy",
                 "quantity": _num(r.get("수량")), "price": _num(r.get("단가")),
                 "currency": str(r.get("통화") or "KRW"), "broker": str(r.get("증권사") or ""),
+                "account": str(r.get("계좌") or ""),
             })
     dv = read_dividends_csv()
     div_rows = []
@@ -609,6 +610,7 @@ async def api_app_edit_transactions(request: Request):
     snapshot_imports("거래 편집 전")
     out = [{
         "증권사": str(r.get("broker") or "").strip(),
+        "계좌": str(r.get("account") or "").strip(),
         "일자": str(r.get("date") or "").strip(),
         "티커": str(r.get("ticker") or "").strip(),
         "종목명": str(r.get("name") or "").strip(),

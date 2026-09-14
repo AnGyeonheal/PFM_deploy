@@ -39,6 +39,7 @@ def _trade_records(orders):
         recs.append({
             "symbol": o.get("symbol"),
             "currency": o.get("currency", "KRW"),
+            "position": position_key(o),
             "side": o.get("side"),
             "qty": qty,
             "amount": amt,
@@ -46,6 +47,20 @@ def _trade_records(orders):
             "timestamp": timestamp,
         })
     return sorted(recs, key=lambda record: record["timestamp"])
+
+
+def position_key(order):
+    broker = str(order.get("broker") or order.get("증권사") or "").strip().casefold()
+    if broker.replace(" ", "") in ("toss", "토스", "토스증권"):
+        broker = "toss"
+    if broker in ("nan", "none", "<na>"):
+        broker = ""
+    account = next((str(order[field]).strip() for field in
+                    ("account", "accountId", "accountNo", "accountNumber", "계좌", "계좌번호")
+                    if order.get(field) is not None and
+                    str(order[field]).strip().casefold() not in ("", "nan", "none", "<na>")), "")
+    return (broker, account, str(order.get("currency") or order.get("통화") or "KRW").strip().upper(),
+            str(order.get("symbol") or order.get("티커") or "").strip())
 
 
 def _safe_asof(series, date, fallback):
@@ -86,17 +101,20 @@ def compute_rolling_beta(orders, fx_now=1400.0, ticker=None, window=60, period="
 def _avg_buy_fx_series(sym_recs, idx, fx_hist, fx_now):
     """USD 종목의 보유분 가중평균 매수환율 시계열(평균법). 환차손익 제거용."""
     eff = pd.Series(fx_now, index=idx)
-    cost_fx, hold_q, cur = 0.0, 0.0, fx_now
-    for r in sorted(sym_recs, key=lambda x: x["date"]):
-        fx_b = _safe_asof(fx_hist, r["date"], fx_now)
-        if r["side"] == "BUY":
-            cost_fx += r["qty"] * fx_b
-            hold_q += r["qty"]
-        elif hold_q > 0:
-            cost_fx -= r["qty"] * (cost_fx / hold_q)
-            hold_q -= r["qty"]
-        cur = (cost_fx / hold_q) if hold_q > 1e-9 else cur
-        eff.loc[eff.index >= r["date"]] = cur
+    positions = {}
+    current = fx_now
+    for record in sorted(sym_recs, key=lambda item: item["date"]):
+        state = positions.setdefault(record["position"], {"quantity": 0.0, "weighted_fx": 0.0})
+        if record["side"] == "BUY":
+            state["weighted_fx"] += record["qty"] * _safe_asof(fx_hist, record["date"], fx_now)
+            state["quantity"] += record["qty"]
+        elif state["quantity"] > 0:
+            state["weighted_fx"] *= max(1.0 - record["qty"] / state["quantity"], 0.0)
+            state["quantity"] = max(state["quantity"] - record["qty"], 0.0)
+        quantity = sum(balance["quantity"] for balance in positions.values())
+        if quantity > 1e-9:
+            current = sum(balance["weighted_fx"] for balance in positions.values()) / quantity
+        eff.loc[eff.index >= record["date"]] = current
     return eff
 
 
@@ -130,21 +148,22 @@ def _holdings_value_series(recs_sorted, symbols, sym_hist, sym_cur,
                           fx_daily, fx_hist, fx_now, idx, include_fx=True):
     """보유수량 × 주가 × 환율 일별 평가액(원화) 합계. include_fx=False면 달러 종목을 매수평균환율로 고정(환차 제거)."""
     my_val = pd.Series(0.0, index=idx)
-    for s in symbols:
-        if s not in sym_hist:
+    positions = {record["position"]: record["symbol"] for record in recs_sorted}
+    for position, symbol in positions.items():
+        if symbol not in sym_hist:
             continue
-        sym_recs = [x for x in recs_sorted if x["symbol"] == s]
+        sym_recs = [record for record in recs_sorted if record["position"] == position]
         qty = pd.Series(0.0, index=idx)
         for r in sym_recs:
             sign = 1 if r["side"] == "BUY" else -1
             qty.loc[qty.index >= r["date"]] += sign * r["qty"]
-        if sym_cur[s] != "USD":
-            my_val = my_val.add(qty * sym_hist[s], fill_value=0)
+        if sym_cur[symbol] != "USD":
+            my_val = my_val.add(qty * sym_hist[symbol], fill_value=0)
         elif include_fx:
-            my_val = my_val.add(qty * sym_hist[s] * fx_daily, fill_value=0)
+            my_val = my_val.add(qty * sym_hist[symbol] * fx_daily, fill_value=0)
         else:
             avg_fx = _avg_buy_fx_series(sym_recs, idx, fx_hist, fx_now)
-            my_val = my_val.add(qty * sym_hist[s] * avg_fx, fill_value=0)
+            my_val = my_val.add(qty * sym_hist[symbol] * avg_fx, fill_value=0)
     return my_val
 
 
@@ -180,13 +199,15 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
     native_history = {}
     for s in symbols:
         symbol_records = [record for record in recs if record["symbol"] == s]
-        quantity = 0.0
+        quantities = {}
         reason = None
         for record in symbol_records:
+            position = record["position"]
+            quantity = quantities.get(position, 0.0)
             if record["side"] == "SELL" and record["qty"] > quantity + 1e-8:
-                reason = "매도 수량에 대응하는 매수 이력이 부족합니다."
+                reason = "동일 증권사·계좌의 매도 수량에 대응하는 매수 이력이 부족합니다."
                 break
-            quantity += record["qty"] if record["side"] == "BUY" else -record["qty"]
+            quantities[position] = quantity + (record["qty"] if record["side"] == "BUY" else -record["qty"])
         first_trade = min(record["date"] for record in symbol_records)
         if not reason and first_trade < spy_hist.index.min():
             reason = "벤치마크 시세보다 오래된 거래가 있습니다."
@@ -242,9 +263,10 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
     spy_sell_cash = pd.Series(0.0, index=idx)
     spy_buy_fx = pd.Series(fx_now, index=idx)
     holding_cost = pd.Series(0.0, index=idx)
-    held = {s: 0.0 for s in symbols}
-    cost_basis = {s: 0.0 for s in symbols}
-    buy_fx = {s: 0.0 for s in symbols}
+    positions = {record["position"]: record["symbol"] for record in recs_sorted}
+    held = dict.fromkeys(positions, 0.0)
+    cost_basis = dict.fromkeys(positions, 0.0)
+    buy_fx = dict.fromkeys(positions, 0.0)
     spy_now = 0.0
     spy_average_fx = fx_now
 
@@ -257,6 +279,7 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
     for r in recs_sorted:
         d = r["date"]
         s = r["symbol"]
+        position = r["position"]
         fx_d = _safe_asof(fx_hist, d, fx_now)
         cf = r["amount"] * fx_d if r["currency"] == "USD" else r["amount"]
         spy_px = _safe_asof(spy_hist, d, float(spy_hist.iloc[-1]))
@@ -264,22 +287,22 @@ def build_asset_value_growth(orders, fx_now=1400.0, div_events=None, ticker=None
             spy_bought = cf / (spy_px * fx_d)
             spy_average_fx = (spy_now * spy_average_fx + spy_bought * fx_d) / (spy_now + spy_bought)
             spy_now += spy_bought
-            buy_fx[s] = (held[s] * buy_fx[s] + r["qty"] * fx_d) / (held[s] + r["qty"])
-            cost_basis[s] += cf
-            held[s] = held.get(s, 0.0) + r["qty"]
+            buy_fx[position] = (held[position] * buy_fx[position] + r["qty"] * fx_d) / (held[position] + r["qty"])
+            cost_basis[position] += cf
+            held[position] += r["qty"]
             gross_buy.loc[gross_buy.index >= d] += cf
         else:
-            port_val = sum(held[k] * _px_krw(k, d) for k in symbols if held.get(k, 0) > 0)
+            port_val = sum(held[key] * _px_krw(symbol, d) for key, symbol in positions.items() if held[key] > 0)
             sold_val = r["qty"] * _px_krw(s, d)
             w = min(max((sold_val / port_val) if port_val > 0 else 1.0, 0.0), 1.0)
             spy_sale_fx = fx_d if include_fx else spy_average_fx
             spy_sell_cash.loc[spy_sell_cash.index >= d] += spy_now * spy_px * spy_sale_fx * w
             spy_now *= (1.0 - w)  # 판 비중만큼 SPY 매도
             if not include_fx and sym_cur[s] == "USD":
-                cf = cf / fx_d * buy_fx[s]
-            if held[s] > 0:
-                cost_basis[s] *= max(1.0 - r["qty"] / held[s], 0.0)
-            held[s] = held.get(s, 0.0) - r["qty"]
+                cf = cf / fx_d * buy_fx[position]
+            if held[position] > 0:
+                cost_basis[position] *= max(1.0 - r["qty"] / held[position], 0.0)
+            held[position] -= r["qty"]
             sell_cash.loc[sell_cash.index >= d] += cf
         spy_shares.loc[spy_shares.index >= d] = spy_now
         spy_buy_fx.loc[spy_buy_fx.index >= d] = spy_average_fx
@@ -624,33 +647,26 @@ def build_spy_dca(orders, fx_now=1400.0, start_ym=None, ticker=None, include_div
 # ───────────── 달러 평단가 · 10년 환율 · S&P500 알파/베타 (방법 A: 현금흐름 PME) ─────────────
 
 def compute_usd_avg_cost(orders, fx_now=1400.0):
-    """USD 매수 체결의 '그 날 환율'을 매수금액(USD)으로 가중평균한 달러 평단가(원/달러).
-    매수일이 오래되어도 정확하도록 10년 환율 이력을 사용합니다.
-    반환: dict(avg_fx, total_usd, current_fx, invested_krw, fx_pnl_krw) 또는 None(USD 매수 없음)
-    """
+    """계좌별 잔여 USD 매수원가로 가중평균환율과 보유원가 환차를 계산합니다."""
     fx_hist = get_usdkrw_history(period="10y")
-
-    def fx_on(date):
-        if fx_hist.empty:
-            return fx_now
-        try:
-            v = fx_hist.asof(pd.to_datetime(date).tz_localize(None).normalize())
-            return float(v) if pd.notna(v) else float(fx_hist.iloc[0])
-        except Exception:
-            return fx_now
-
-    total_usd = 0.0
-    weighted = 0.0
-    for o in orders:
-        if o.get("currency") != "USD" or o.get("side") != "BUY":
+    positions = {}
+    for record in _trade_records(orders):
+        if record["currency"] != "USD":
             continue
-        ex = o.get("execution") or {}
-        usd_amt = float(ex.get("filledAmount") or 0)
-        if usd_amt <= 0:
-            continue
-        weighted += usd_amt * fx_on(ex.get("filledAt") or o.get("orderedAt"))
-        total_usd += usd_amt
-
+        state = positions.setdefault(record["position"], {"quantity": 0.0, "usd": 0.0, "krw": 0.0})
+        if record["side"] == "BUY":
+            state["quantity"] += record["qty"]
+            state["usd"] += record["amount"]
+            state["krw"] += record["amount"] * _safe_asof(fx_hist, record["date"], fx_now)
+        else:
+            if record["qty"] > state["quantity"] + 1e-8:
+                return None
+            remaining = max(1.0 - record["qty"] / state["quantity"], 0.0) if state["quantity"] > 0 else 0.0
+            state["usd"] *= remaining
+            state["krw"] *= remaining
+            state["quantity"] = max(state["quantity"] - record["qty"], 0.0)
+    total_usd = sum(state["usd"] for state in positions.values())
+    weighted = sum(state["krw"] for state in positions.values())
     if total_usd <= 0:
         return None
     avg_fx = weighted / total_usd

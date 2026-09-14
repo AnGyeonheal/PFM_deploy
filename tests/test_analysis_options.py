@@ -7,6 +7,7 @@ import pme
 import benchmark
 import names
 import advanced_analytics
+import performance
 
 
 class AnalysisOptionTests(unittest.TestCase):
@@ -23,6 +24,9 @@ class AnalysisOptionTests(unittest.TestCase):
         self.enterContext(patch.object(pme, "get_history", return_value=self.price))
         self.enterContext(patch.object(pme, "get_usdkrw_history", return_value=self.fx))
         self.enterContext(patch.object(pme, "get_dividends", return_value=pd.Series(dtype=float)))
+        self.enterContext(patch.object(performance, "get_usdkrw_history", return_value=self.fx))
+        self.enterContext(patch.object(performance, "get_native_price_now",
+                          side_effect=lambda *args: float(self.price.iloc[-1])))
 
     def test_twr_excludes_fx_for_both_portfolio_and_benchmark(self):
         result = pme.build_twr_comparison(self.orders, include_fx=False)
@@ -89,6 +93,88 @@ class AnalysisOptionTests(unittest.TestCase):
 
     def test_same_day_xirr_is_undefined(self):
         self.assertIsNone(pme.xirr([(self.index[0], -100), (self.index[0], 100)]))
+
+    def test_position_cost_is_separate_by_broker_and_account(self):
+        for first, second in (({"broker": "Other"}, {"broker": "Toss"}),
+                              ({"broker": "Toss", "account": "1"},
+                               {"broker": "Toss", "account": "2"})):
+            orders = [dict(self.orders[0], **first),
+                      dict(self.orders[0], **second, execution={
+                          "filledQuantity": 10, "averageFilledPrice": 200,
+                          "filledAt": str(self.index[1])}),
+                      dict(self.orders[0], **second, side="SELL", execution={
+                          "filledQuantity": 5, "averageFilledPrice": 300,
+                          "filledAt": str(self.index[-1])})]
+            for include_fx in (True, False):
+                with self.subTest(first=first, second=second, include_fx=include_fx):
+                    frame = pme.build_asset_value_growth(orders, include_fx=include_fx)
+                    profit = pme.profit_from_growth(frame)
+                    self.assertAlmostEqual(frame["보유원가"].iloc[-1], 2000000.0)
+                    self.assertAlmostEqual(profit["realizedPnL"], 800000.0 if include_fx else 500000.0)
+                    self.assertAlmostEqual(profit["totalPnL"], 600000.0 if include_fx else 0.0)
+                    summary = performance.compute_performance_summary(orders, fx_now=1200, include_fx=include_fx)
+                    breakdown = performance.build_holdings_breakdown(orders, fx_now=1200, include_fx=include_fx)
+                    self.assertAlmostEqual(summary["realized_total_krw"], profit["realizedPnL"])
+                    self.assertAlmostEqual(summary["unreal_total_krw"], profit["unrealizedPnL"])
+                    self.assertAlmostEqual(breakdown.iloc[0]["실현손익(원)"], profit["realizedPnL"])
+                    self.assertAlmostEqual(breakdown.iloc[0]["투자원금(원)"], 2000000.0)
+
+    def test_sale_cannot_consume_another_brokers_position(self):
+        bought = dict(self.orders[0], broker="Other")
+        sold = dict(self.orders[0], broker="Toss", side="SELL", execution={
+            "filledQuantity": 5, "averageFilledPrice": 100,
+            "filledAt": str(self.index[-1])})
+        frame = pme.build_asset_value_growth([bought, sold])
+        self.assertTrue(frame.empty)
+        self.assertTrue(frame.attrs["warnings"])
+        self.assertIsNone(performance.compute_performance_summary([bought, sold]))
+        self.assertTrue(performance.build_holdings_breakdown([bought, sold]).empty)
+        self.assertIsNone(pme.compute_usd_avg_cost([bought, sold]))
+
+    def test_remaining_fx_ignores_a_liquidated_account(self):
+        orders = [dict(self.orders[0], broker="Other"),
+                  dict(self.orders[0], broker="Toss", execution={
+                      "filledQuantity": 10, "averageFilledPrice": 100,
+                      "filledAt": str(self.index[30])}),
+                  dict(self.orders[0], broker="Other", side="SELL", execution={
+                      "filledQuantity": 10, "averageFilledPrice": 100,
+                      "filledAt": str(self.index[40])})]
+        frame = pme.build_asset_value_growth(orders, include_fx=False,
+                    div_events=[(self.index[-2], 12000.0, "TEST")])
+        self.assertAlmostEqual(frame["내 자산가치"].iloc[-1], 1212000.0)
+        self.assertAlmostEqual(frame["누적배당금액"].iloc[-1], 12000.0)
+        self.assertAlmostEqual(pme.profit_from_growth(frame)["realizedPnL"], 0.0)
+        average = pme.compute_usd_avg_cost(orders, fx_now=1300)
+        self.assertEqual(average["avg_fx"], 1200.0)
+        self.assertEqual(average["total_usd"], 1000.0)
+        self.assertEqual(average["fx_pnl_krw"], 100000.0)
+
+    def test_account_liquidation_and_repurchase_are_additive(self):
+        orders = [dict(self.orders[0], broker="Other"),
+                  dict(self.orders[0], broker="Toss", execution={
+                      "filledQuantity": 10, "averageFilledPrice": 200,
+                      "filledAt": str(self.index[30])}),
+                  dict(self.orders[0], broker="Toss", side="SELL", execution={
+                      "filledQuantity": 10, "averageFilledPrice": 250,
+                      "filledAt": str(self.index[40])}),
+                  dict(self.orders[0], broker="Toss", execution={
+                      "filledQuantity": 2, "averageFilledPrice": 300,
+                      "filledAt": str(self.index[50])})]
+        for currency in ("USD", "KRW"):
+            for include_fx in (False, True):
+                selected = [dict(order, currency=currency) for order in orders]
+                combined = pme.build_asset_value_growth(selected, include_fx=include_fx, include_div=False)
+                parts = [pme.build_asset_value_growth([order for order in selected if order["broker"] == broker],
+                            include_fx=include_fx, include_div=False) for broker in ("Other", "Toss")]
+                with self.subTest(currency=currency, include_fx=include_fx):
+                    for column in ("내 자산가치", "보유원가", "누적매수금액", "누적매도금액"):
+                        self.assertAlmostEqual(combined[column].iloc[-1], sum(part[column].iloc[-1] for part in parts))
+                    profit = pme.profit_from_growth(combined)
+                    for key in ("realizedPnL", "unrealizedPnL", "totalPnL"):
+                        self.assertAlmostEqual(profit[key], sum(pme.profit_from_growth(part)[key] for part in parts))
+                    summary = performance.compute_performance_summary(selected, fx_now=1200, include_fx=include_fx)
+                    self.assertAlmostEqual(summary["realized_total_krw"], profit["realizedPnL"])
+                    self.assertAlmostEqual(summary["unreal_total_krw"], profit["unrealizedPnL"])
 
     def test_lump_sum_simulation_uses_same_capital_and_fx_option(self):
         self.orders.append({"symbol": "TEST", "currency": "USD", "side": "BUY",
