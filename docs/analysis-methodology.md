@@ -146,6 +146,17 @@ stale saves. Legacy overrides remain readable. Live brokerage balances stay live
 transaction-derived performance uses the edited ledger. Separate manual imports
 are not automatically deduplicated against Toss by matching amount/date alone.
 
+The fully preprocessed `combined_orders` ledger is also materialized per user as
+`merged_transactions.csv` on successful full portfolio loads. The existing
+`manual_transactions.csv` remains an independent imported input. The merged
+output is atomically replaced, never read back as another source. It preserves
+broker/account, source, original scoped Toss ID, execution time/amount and fees
+when available, with normalized tickers and adjusted quantities/prices. A split
+flag marks adjusted rows; holdings snapshots/overrides are labelled synthetic
+sources. An API error, incomplete pagination or source-subset load must not
+replace a complete saved snapshot. The snapshot is not an offline fallback or a
+brokerage statement; do not reimport its adjusted values as raw executions.
+
 The valuation calendar ends at the latest available date among the included
 securities and SPY, subject to an explicitly selected end date. A new Korean
 trading session is not discarded just because the US session has not started.

@@ -11,7 +11,7 @@ import pandas as pd
 
 from pm import (
     get_access_token, get_holdings, get_buying_power, get_exchange_rate,
-    get_order_history, get_stock_info,
+    get_order_history, get_stock_info, OrderHistoryError,
 )
 from analytics_engine import transform_to_mvp_json, build_transaction_detail
 from benchmark import get_usdkrw_history, get_splits, to_yf_ticker, set_price_overrides
@@ -21,6 +21,7 @@ from manual_holdings import (
     transactions_to_orders, derive_holdings_from_tx,
     read_toss_overrides, write_toss_overrides,
     read_holdings_overrides, write_holdings_overrides,
+    write_merged_transactions_csv,
 )
 from performance import compute_performance_summary, build_holdings_breakdown
 from advanced_analytics import build_dividend_records
@@ -86,9 +87,9 @@ def toss_trades(creds, account="1"):
     acc = str(creds.get("TOSS_ACCOUNT_NO", account) or account)
     token = get_access_token(cid, sec) if (cid and sec) else None
     if not token:
-        return pd.DataFrame(), [], 0.0, {}
+        raise OrderHistoryError("토스 거래내역 인증에 실패했습니다. 이전 통합 저장본은 유지됩니다.")
     fx = get_exchange_rate(token)
-    orders = [dict(order, broker="토스증권", account=acc) for order in get_order_history(token, acc)]
+    orders = [dict(order, broker="토스증권", account=acc) for order in get_order_history(token, acc, strict=True)]
     holdings_data = get_holdings(token, acc) or {}
     name_map = {i.get("symbol"): i.get("name") for i in holdings_data.get("result", {}).get("items", [])}
     detail = build_transaction_detail(orders, fx, name_map)
@@ -326,9 +327,14 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True,
             use_toss = False
             portfolio_json = None
         else:
-            _, toss_orders, fx_rate, toss_name_map = toss_trades(creds)
+            try:
+                _, toss_orders, fx_rate, toss_name_map = toss_trades(creds)
+            except OrderHistoryError as error:
+                toss_err = str(error)
             toss_orders_raw = list(toss_orders)
-            toss_orders = apply_toss_overrides(toss_orders)
+            toss_orders = apply_toss_overrides([
+                dict(order, _source="toss", _source_id=key)
+                for key, order in indexed_toss_orders(toss_orders).items()])
     if not fx_rate:
         fx_rate = current_usdkrw()
     if portfolio_json is None:
@@ -366,9 +372,9 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True,
 
     combined_orders = list(toss_orders)
     if use_tx and has_tx:
-        combined_orders += transactions_to_orders(tx_df)
+        combined_orders += [dict(order, _source="import") for order in transactions_to_orders(tx_df)]
     if use_tx and holdings_snapshot is not None and not holdings_snapshot.empty:
-        combined_orders += manual_to_orders(holdings_snapshot)
+        combined_orders += [dict(order, _source="holdings") for order in manual_to_orders(holdings_snapshot)]
     for _o in combined_orders:  # 국내 A접두사 통일(A360750→360750): 중복 집계·시세 조회 실패 방지
         _o["symbol"] = normalize_kr_ticker(_o.get("symbol"))
     combined_orders = apply_split_adjustments(combined_orders)  # 분할/역분할을 현재 주식 수 기준으로 통일
@@ -390,6 +396,20 @@ def load_portfolio(user, use_toss=True, use_tx=True, include_div_est=True,
     except Exception:
         pass
     register_krw_foreign(name_map)  # 원화 상장 해외 ETF(환노출) 등록 → 환차손익 분리 계산
+
+    if use_tx and not toss_err and (use_toss or not (creds.get("TOSS_CLIENT_ID") and creds.get("TOSS_CLIENT_SECRET"))):
+        merged_rows = []
+        for order in combined_orders:
+            execution = order.get("execution") or {}
+            row = toss_display_row(order, name_map)
+            row.update({"출처": order.get("_source", "holdings_override"),
+                        "거래ID": order.get("_source_id", ""),
+                        "체결시각": execution.get("filledAt") or order.get("orderedAt") or "",
+                        "체결금액": execution.get("filledAmount"),
+                        "수수료": execution.get("commission"), "세금": execution.get("tax"),
+                        "분할보정": bool(order.get("_split_adjusted"))})
+            merged_rows.append(row)
+        write_merged_transactions_csv(merged_rows)
 
     detail_df = build_transaction_detail(combined_orders, fx_rate, name_map)
 
@@ -510,6 +530,7 @@ def apply_split_adjustments(orders):
             if avg:
                 ex["averageFilledPrice"] = avg / R
             o = dict(o)
+            o["_split_adjusted"] = True
             o["execution"] = ex  # filledAmount(투자원금)는 불변
         out.append(o)
     return out

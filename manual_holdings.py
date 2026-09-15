@@ -6,6 +6,7 @@ import os
 import json
 import re
 import shutil
+import tempfile
 from contextvars import ContextVar
 from datetime import datetime
 
@@ -31,6 +32,7 @@ class _DataPath(os.PathLike):
 
 MANUAL_CSV = _DataPath("manual_holdings.csv")
 TX_CSV = _DataPath("manual_transactions.csv")
+MERGED_TX_CSV = _DataPath("merged_transactions.csv")
 DIV_CSV = _DataPath("manual_dividends.csv")
 SPLIT_CSV = _DataPath("manual_splits.csv")
 TOSS_OVR_JSON = _DataPath("toss_overrides.json")
@@ -39,6 +41,7 @@ TRASH_DIR = _DataPath("trash")
 
 COLUMNS = ["증권사", "티커", "종목명", "시장", "수량", "평균매수가", "통화", "매수일", "계좌"]
 TX_COLUMNS = ["증권사", "일자", "티커", "종목명", "시장", "구분", "수량", "단가", "통화", "계좌"]
+MERGED_TX_COLUMNS = TX_COLUMNS + ["출처", "거래ID", "체결시각", "체결금액", "수수료", "세금", "분할보정"]
 DIV_COLUMNS = ["증권사", "일자", "티커", "종목명", "통화", "배당금", "계좌", "배당락일", "기준일", "배당ID"]
 SPLIT_COLUMNS = ["티커", "종목명", "분할일", "비율"]
 
@@ -102,7 +105,7 @@ def clear_all_imports():
     """현재 사용자 폴더의 임포트 데이터(거래·잔고·배당)와 보유·토스 수정 오버라이드까지 모두 삭제합니다.
     (오버라이드를 남기면 apply_holdings_overrides가 종목을 되살려 삭제가 안 먹히므로 함께 제거)"""
     removed = 0
-    for p in (MANUAL_CSV, TX_CSV, DIV_CSV, HOLDINGS_OVR_JSON, TOSS_OVR_JSON):
+    for p in (MANUAL_CSV, TX_CSV, DIV_CSV, HOLDINGS_OVR_JSON, TOSS_OVR_JSON, MERGED_TX_CSV):
         if os.path.exists(p):
             try:
                 os.remove(p)
@@ -176,6 +179,8 @@ def delete_broker_imports(broker):
             kept.to_csv(path, index=False, encoding="utf-8-sig")
             removed += before - len(kept)
     _prune_holdings_overrides(gone - remaining)  # 다른 증권사에도 없는 종목만 보유 수정 정리
+    if removed and os.path.exists(MERGED_TX_CSV):
+        os.remove(MERGED_TX_CSV)
     return removed
 
 
@@ -275,6 +280,8 @@ def restore_snapshot(snap_id):
                 os.remove(target)  # 스냅샷에 없던 파일은 그 시점처럼 제거
         except Exception:
             pass
+    if os.path.exists(MERGED_TX_CSV):
+        os.remove(MERGED_TX_CSV)
     return restored
 
 # 티커 변경/별칭 정규화 (과거 티커 → 현재 티커)
@@ -326,6 +333,23 @@ def write_transactions_csv(df):
     out = out[out["티커"].astype(str).str.strip() != ""]
     out.to_csv(TX_CSV, index=False, encoding="utf-8-sig")
     return len(out)
+
+
+def write_merged_transactions_csv(rows):
+    """Persist a derived ledger without feeding it back into the manual inputs."""
+    frame = pd.DataFrame(rows, columns=MERGED_TX_COLUMNS)
+    path = os.fspath(MERGED_TX_CSV)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8-sig", newline="",
+                                         dir=os.path.dirname(path), suffix=".tmp", delete=False) as stream:
+            temporary = stream.name
+            frame.to_csv(stream, index=False)
+        os.replace(temporary, path)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.remove(temporary)
+    return len(frame)
 
 
 def save_parsed_transactions(rows, replace_broker=None):
@@ -575,6 +599,8 @@ def transactions_to_orders(tx_df):
                 "orderedAt": filled_at,
                 "broker": r.get("증권사", "타증권사"),
                 "account": position_key(r)[1],
+                "name": r.get("종목명", ""),
+                "market": r.get("시장", ""),
                 "execution": {
                     "filledQuantity": qty,
                     "averageFilledPrice": price,
@@ -819,6 +845,8 @@ def manual_to_orders(manual_df):
                 "orderedAt": filled_at,
                 "broker": r.get("증권사", "타증권사"),
                 "account": position_key(r)[1],
+                "name": r.get("종목명", ""),
+                "market": r.get("시장", ""),
                 "execution": {
                     "filledQuantity": qty,
                     "averageFilledPrice": avg_price,

@@ -4,6 +4,7 @@ import io
 import tempfile
 import copy
 import unittest
+from contextvars import Context, ContextVar
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -16,6 +17,7 @@ import benchmark
 import performance
 import pme
 import pipeline
+import pm
 import webapp
 from analysis_fixture import AnalysisFixture
 from exporter import build_import_template_xlsx
@@ -298,6 +300,158 @@ class TransactionPreprocessingTests(unittest.TestCase):
         self.assertEqual(forwarded["sourceId"], "order-key")
         self.assertEqual(forwarded["revision"], "version")
         self.assertTrue(forwarded["deleted"])
+
+
+class MergedTransactionPersistenceTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(patch.object(manual_holdings, "_DATA_DIR",
+                                      ContextVar("test_data_dir", default=str(self.directory))))
+        self.enterContext(patch.object(pipeline, "apply_credentials", return_value={}))
+        self.enterContext(patch.object(pipeline, "toss_portfolio",
+                                      return_value=(pipeline.empty_portfolio("test"), None)))
+        self.original = {"orderId": "order-1", "symbol": "AAPL", "currency": "USD",
+                         "broker": "토스증권", "account": "001", "side": "BUY",
+                         "execution": {"filledQuantity": 3, "averageFilledPrice": 100,
+                                       "filledAmount": 300, "filledAt": "2025-01-02T13:04:05+09:00"}}
+        self.toss = self.enterContext(patch.object(pipeline, "toss_trades", side_effect=lambda *args:
+            (pd.DataFrame(), copy.deepcopy([self.original, self.original]), 1400, {"AAPL": "Apple"})))
+        self.enterContext(patch.object(pipeline, "load_manual_holdings", return_value=pd.DataFrame()))
+        self.enterContext(patch.object(pipeline, "derive_holdings_from_tx", return_value=pd.DataFrame()))
+        self.real_split_adjustments = pipeline.apply_split_adjustments
+        self.split_adjustments = self.enterContext(patch.object(pipeline, "apply_split_adjustments", side_effect=lambda orders: orders))
+        self.enterContext(patch.object(pipeline, "enrich_name_map", side_effect=lambda names, tickers: names))
+        self.enterContext(patch.object(pipeline, "current_usdkrw", return_value=1400))
+        self.enterContext(patch.object(pipeline, "_dividends", return_value=(0, 0, {}, [])))
+        self.enterContext(patch.object(pipeline, "_dated_div_events", return_value=[]))
+        self.enterContext(patch.object(pipeline, "compute_performance_summary", return_value=None))
+        self.enterContext(patch.object(pipeline, "compute_alpha_beta", return_value=None))
+        for name in ("build_transaction_detail", "build_holdings_breakdown", "build_stock_analytics"):
+            self.enterContext(patch.object(pipeline, name, return_value=pd.DataFrame()))
+        manual_holdings.write_transactions_csv(pd.DataFrame([{
+            "증권사": "manual", "일자": "2025-01-01", "티커": "005930", "종목명": "삼성전자",
+            "시장": "KOSPI", "구분": "매수", "수량": 2, "단가": 100, "통화": "KRW", "계좌": "002"}]))
+
+    def test_load_persists_both_sources_without_reimporting_toss(self):
+        original_csv = Path(manual_holdings.TX_CSV).read_bytes()
+        for _ in range(2):
+            data = pipeline.load_portfolio("test")
+            saved = pd.read_csv(self.directory / "merged_transactions.csv", dtype=str, keep_default_na=False)
+            self.assertEqual(len(saved), 2)
+            self.assertEqual(len(data["combined_orders"]), 2)
+            self.assertEqual(set(saved["출처"]), {"toss", "import"})
+            self.assertEqual(set(saved["계좌"]), {"001", "002"})
+            self.assertEqual(set(saved["티커"]), {"005930", "AAPL"})
+            self.assertEqual(saved.loc[saved["출처"] == "toss", "거래ID"].iloc[0],
+                             pipeline.toss_trade_key(self.original))
+        self.assertEqual(Path(manual_holdings.TX_CSV).read_bytes(), original_csv)
+
+    def test_saved_rows_include_edits_splits_and_original_source_identity(self):
+        manual_holdings.write_toss_overrides({pipeline.toss_trade_key(self.original): {"단가": 110}})
+        self.split_adjustments.side_effect = self.real_split_adjustments
+        with patch.object(pipeline, "_split_map", return_value={pd.Timestamp("2025-02-01"): 2}):
+            for _ in range(2):
+                pipeline.load_portfolio("test")
+                saved = pd.read_csv(self.directory / "merged_transactions.csv", dtype={"계좌": str, "티커": str})
+                toss = saved[saved["출처"] == "toss"].iloc[0]
+                self.assertEqual(toss["수량"], 6)
+                self.assertEqual(toss["단가"], 55)
+                self.assertEqual(toss["체결금액"], 330)
+                self.assertTrue(toss["분할보정"])
+                self.assertEqual(toss["체결시각"], self.original["execution"]["filledAt"])
+                self.assertEqual(toss["거래ID"], pipeline.toss_trade_key(self.original))
+                imported = saved[saved["출처"] == "import"].iloc[0]
+                self.assertEqual(imported["종목명"], "삼성전자")
+                self.assertEqual(imported["시장"], "KOSPI")
+
+    def test_partial_toss_failure_keeps_previous_merged_file(self):
+        pipeline.load_portfolio("test")
+        saved_path = self.directory / "merged_transactions.csv"
+        previous = saved_path.read_bytes()
+        self.toss.side_effect = pm.OrderHistoryError("incomplete history")
+        result = pipeline.load_portfolio("test")
+        self.assertEqual(result["toss_error"], "incomplete history")
+        self.assertEqual(saved_path.read_bytes(), previous)
+
+    def test_deletion_and_new_executions_replace_the_derived_snapshot(self):
+        pipeline.load_portfolio("test")
+        manual_holdings.write_toss_overrides({pipeline.toss_trade_key(self.original): {"deleted": True}})
+        self.toss.side_effect = lambda *args: (pd.DataFrame(), [self.original, dict(self.original, orderId="new")], 1400, {})
+        pipeline.load_portfolio("test")
+        saved = pd.read_csv(self.directory / "merged_transactions.csv")
+        self.assertEqual(len(saved), 2)
+        self.assertNotIn(pipeline.toss_trade_key(self.original), saved["거래ID"].tolist())
+        self.assertIn(pipeline.toss_trade_key(dict(self.original, orderId="new")), saved["거래ID"].tolist())
+
+    def test_failed_atomic_replace_keeps_previous_file_and_removes_temporary_file(self):
+        pipeline.load_portfolio("test")
+        previous = (self.directory / "merged_transactions.csv").read_bytes()
+        with patch.object(manual_holdings.os, "replace", side_effect=OSError("test write failure")):
+            with self.assertRaises(OSError):
+                manual_holdings.write_merged_transactions_csv([])
+        self.assertEqual((self.directory / "merged_transactions.csv").read_bytes(), previous)
+        self.assertEqual(list(self.directory.glob("*.tmp")), [])
+
+    def test_context_local_writes_do_not_mix_users(self):
+        for username in ("alice", "bob"):
+            (self.directory / username).mkdir()
+        alice, bob = Context(), Context()
+        alice.run(manual_holdings.set_data_dir, self.directory / "alice")
+        bob.run(manual_holdings.set_data_dir, self.directory / "bob")
+        alice.run(pipeline.load_portfolio, "alice")
+        self.toss.side_effect = lambda *args: (pd.DataFrame(), [dict(self.original, account="002")], 1400, {})
+        bob.run(pipeline.load_portfolio, "bob")
+        for username, account in (("alice", "001"), ("bob", "002")):
+            saved = pd.read_csv(self.directory / username / "merged_transactions.csv", dtype=str)
+            self.assertEqual(saved["계좌"].tolist(), [account])
+
+    def test_distinct_no_id_fills_are_not_collapsed(self):
+        original = {key: value for key, value in self.original.items() if key != "orderId"}
+        self.toss.side_effect = lambda *args: (pd.DataFrame(), [original, original], 1400, {})
+        pipeline.load_portfolio("test")
+        saved = pd.read_csv(self.directory / "merged_transactions.csv")
+        toss = saved[saved["출처"] == "toss"]
+        self.assertEqual(len(toss), 2)
+        self.assertEqual(toss["거래ID"].nunique(), 2)
+
+    def test_subset_load_does_not_replace_full_snapshot(self):
+        pipeline.load_portfolio("test")
+        previous = (self.directory / "merged_transactions.csv").read_bytes()
+        pipeline.load_portfolio("test", use_tx=False)
+        self.assertEqual((self.directory / "merged_transactions.csv").read_bytes(), previous)
+
+    def test_deleting_imports_removes_stale_merged_output(self):
+        pipeline.load_portfolio("test")
+        self.assertEqual(manual_holdings.delete_broker_imports("manual"), 1)
+        self.assertFalse((self.directory / "merged_transactions.csv").exists())
+        pipeline.load_portfolio("test")
+        manual_holdings.clear_all_imports()
+        self.assertFalse((self.directory / "merged_transactions.csv").exists())
+
+
+class TossHistoryCompletenessTests(unittest.TestCase):
+    def test_strict_fetch_rejects_partial_pages(self):
+        first = SimpleNamespace(status_code=200, raise_for_status=lambda: None,
+                                json=lambda: {"result": {"orders": [{"orderId": "one"}],
+                                                         "hasNext": True, "nextCursor": "next"}})
+        with patch.object(pm.requests, "get", side_effect=[first, pm.requests.Timeout("private response")]), \
+                patch.object(pm.time, "sleep"):
+            with self.assertRaises(pm.OrderHistoryError) as result:
+                pm.get_order_history("test-token", strict=True)
+        self.assertNotIn("private response", str(result.exception))
+
+    def test_strict_fetch_rejects_page_limit_and_malformed_response(self):
+        for payload in ({"result": {"orders": [], "hasNext": True, "nextCursor": "next"}}, {"result": {}}):
+            response = SimpleNamespace(status_code=200, raise_for_status=lambda: None, json=lambda: payload)
+            with patch.object(pm.requests, "get", return_value=response), patch.object(pm.time, "sleep"):
+                with self.assertRaises(pm.OrderHistoryError):
+                    pm.get_order_history("test-token", max_pages=1, strict=True)
+
+    def test_strict_fetch_accepts_complete_empty_history(self):
+        response = SimpleNamespace(status_code=200, raise_for_status=lambda: None,
+                                   json=lambda: {"result": {"orders": [], "hasNext": False}})
+        with patch.object(pm.requests, "get", return_value=response):
+            self.assertEqual(pm.get_order_history("test-token", strict=True), [])
 
 
 class DividendPaymentTests(unittest.TestCase):

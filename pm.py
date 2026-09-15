@@ -189,7 +189,11 @@ def get_current_prices(access_token, symbols, chunk=50):
             print(f"[에러] 배치 현재가 조회 실패({batch[:3]}…): {e}")
     return out
 
-def get_order_history(access_token, account="1", max_pages=50):
+class OrderHistoryError(RuntimeError):
+    pass
+
+
+def get_order_history(access_token, account="1", max_pages=50, *, strict=False):
     """7) 체결 완료된 주문(매수/매도) 전체 이력 조회 (페이지네이션)"""
     url = 'https://openapi.tossinvest.com/api/v1/orders'
     headers = {
@@ -209,14 +213,24 @@ def get_order_history(access_token, account="1", max_pages=50):
                 continue
             response.raise_for_status()
             result = response.json().get("result", {})
+            if strict and (not isinstance(result, dict) or not isinstance(result.get("orders"), list)
+                           or not isinstance(result.get("hasNext"), bool)):
+                raise OrderHistoryError("토스 거래내역 응답 형식이 올바르지 않습니다.")
             all_orders.extend(result.get("orders", []))
             if not result.get("hasNext"):
-                break
-            cursor = result.get("nextCursor")
+                return all_orders
+            next_cursor = result.get("nextCursor")
+            if strict and (not next_cursor or next_cursor == cursor):
+                raise OrderHistoryError("토스 거래내역의 다음 페이지를 확인할 수 없습니다.")
+            cursor = next_cursor
             time.sleep(1.1)  # 계좌 API 초당 1회 제한 준수
         except Exception as e:
+            if strict:
+                raise OrderHistoryError("토스 거래내역 전체 조회에 실패했습니다. 이전 통합 저장본은 유지됩니다.") from None
             print(f"[에러] 주문 이력 조회 중 예외 발생: {e}")
             break
+    if strict:
+        raise OrderHistoryError("토스 거래내역 조회 한도에 도달했습니다. 이전 통합 저장본은 유지됩니다.")
     return all_orders
 
 if __name__ == "__main__":

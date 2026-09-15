@@ -82,6 +82,25 @@ An unavailable IP lookup is displayed as unknown, not guessed.
 - Files and per-user price overrides use request-local contexts. Toss calls use
   explicit credentials from the current account. A user with no keys does not
   inherit the operator's keys. Per-user mutations are serialized.
+- A successful full portfolio refresh writes `merged_transactions.csv` in that
+  user's directory, combining confirmed imports and preprocessed Toss API trades.
+  It includes broker/account, source (`toss`, `import`, `holdings`, or
+  `holdings_override`), scoped Toss transaction ID, execution timestamp/amount,
+  fees/taxes when supplied, and a split-adjustment flag. An import with no
+  execution ID leaves that ID blank. Holdings-derived rows are synthetic, not
+  brokerage fills. The snapshot includes ticker normalization, trade edits,
+  exclusions, split adjustments and holdings overrides used by analysis.
+- `manual_transactions.csv` remains the imported source; the merged CSV is a
+  derived output, never an additional analysis input. Refresh atomically replaces
+  it instead of appending, so repeated sync does not duplicate API trades or apply
+  splits twice. Do not reimport this adjusted output as raw brokerage history.
+  The file represents the last successful full refresh, not a live database:
+  edits/import confirmation appear after the next uncached portfolio load
+  (the web cache lasts up to five minutes and is invalidated by saves).
+  Failed/incomplete Toss pagination leaves the previous file unchanged. It is
+  not used as an offline API fallback. Import deletion or backup restoration
+  invalidates the derived output; a later refresh rebuilds it. The file is private
+  user data and remains excluded from Git.
 - This is a single-process test server. JSON storage uses in-process locks and
   atomic credential/account writes. Do not run multiple workers/instances against
   this store. A production service needs a transactional database, stronger
