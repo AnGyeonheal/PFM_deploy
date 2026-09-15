@@ -118,6 +118,20 @@ An unavailable IP lookup is displayed as unknown, not guessed.
 
 ## Import Failure Diagnostics
 
+Uploads from the React app start a background analysis and return immediately.
+The browser polls short status requests every two seconds, so analysis can run
+beyond a proxy's single-request timeout. Progress shows the current transaction
+or dividend stage, source chunk, elapsed time and request ID. Navigating within
+the app or reloading the same browser tab resumes the saved job ID. Closing the
+tab, clearing browser storage or restarting the server can prevent automatic
+resume; background jobs and drafts are intentionally in-memory for this
+single-process test service. A production deployment needs a durable job queue.
+
+Repeated submissions while the same user's job is running reuse that job rather
+than spending quota on a duplicate. Other users cannot read its status. A
+completed job creates only the same 15-minute preview draft as before and still
+requires explicit Save Confirmation.
+
 Analysis errors show a safe reason, suggested next action, failed stage and, when
 available, the file, sheet and split chunk. The chunk is not an Excel row number.
 The error code, response wait time and request ID help the operator find the
@@ -160,10 +174,21 @@ timeout, 502/503 are server/proxy errors, 413 is an upload limit and 401 require
 login. It displays `CF-Ray` when supplied, but never renders the proxy's HTML.
 A network error or proxy timeout does not prove that the server stopped working;
 analysis may continue. Avoid repeated immediate uploads. No save confirmation is
-sent by analysis. Request IDs may be unavailable when a proxy rejects the request
-before the application responds. Existing historical failures cannot be diagnosed
-retroactively from status-only logs. This change does not extend tunnel timeouts
-or introduce background jobs.
+sent by analysis. Request IDs may be unavailable when a proxy rejects the initial
+upload before the application responds. Existing historical failures cannot be
+diagnosed retroactively from status-only logs. This change avoids the tunnel's
+request timeout; it does not change Cloudflare's timeout setting.
+
+If `cloudflared tunnel --url http://127.0.0.1:8001` is managed in a separate
+terminal, restart only the HTTPS-cookie origin with:
+
+```powershell
+.\run_test_web.bat --external-tunnel
+```
+
+Do not use the default local-only mode behind a public tunnel. Keep the separate
+`cloudflared` process running to retain its current Quick Tunnel URL. A Quick
+Tunnel URL still changes whenever that tunnel process itself restarts.
 
 ## Checks
 

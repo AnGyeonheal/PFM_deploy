@@ -1,6 +1,7 @@
 import os
 import json
 import io
+import time
 import tempfile
 import unittest
 from contextvars import Context
@@ -134,9 +135,13 @@ class UserConnectionApiTests(unittest.TestCase):
         webapp._USER_REQUEST_LOCKS.clear()
         webapp._REQUEST_LIMITS.clear()
         webapp._IMPORT_DRAFTS.clear()
+        webapp._IMPORT_JOBS.clear()
+        webapp._USER_IMPORT_JOBS.clear()
         self.addCleanup(webapp._USER_REQUEST_LOCKS.clear)
         self.addCleanup(webapp._REQUEST_LIMITS.clear)
         self.addCleanup(webapp._IMPORT_DRAFTS.clear)
+        self.addCleanup(webapp._IMPORT_JOBS.clear)
+        self.addCleanup(webapp._USER_IMPORT_JOBS.clear)
         self.enterContext(patch.object(ai_copilot, "_SHARED_GEMINI_KEY", "shared-test-key"))
         self.alice = TestClient(webapp.app)
         self.bob = TestClient(webapp.app)
@@ -205,6 +210,77 @@ class UserConnectionApiTests(unittest.TestCase):
         repeated = self.preview(self.alice, "ALICE")
         saved = self.alice.post("/api/app/import/confirm", json={"draftId": repeated.json()["draftId"]})
         self.assertEqual(saved.json()["transactions"], 0)
+
+    def test_background_import_returns_before_analysis_and_can_be_polled(self):
+        from threading import Event
+
+        release = Event()
+
+        def parse(uploads, broker, progress=None):
+            if progress:
+                progress(0, 2, "transactions", {"file": uploads[0][0], "sheet": "", "chunk": 1})
+            release.wait(timeout=3)
+            return self.parsed_trade("AAPL"), []
+
+        with patch.object(webapp, "_parse_import_files", side_effect=parse):
+            started = time.monotonic()
+            response = self.alice.post("/api/app/import", data={"consent": "true", "background": "true"},
+                                       files={"files": ("Trades.CSV", b"TEST", "text/csv")})
+            self.assertEqual(response.status_code, 202)
+            self.assertLess(time.monotonic() - started, 1)
+            job_id = response.json()["jobId"]
+            processing = self.alice.get(f"/api/app/import/jobs/{job_id}")
+            self.assertEqual(processing.json()["status"], "processing")
+            self.assertEqual(processing.json()["stage"], "transactions")
+            self.assertNotIn("alice", webapp._IMPORT_DRAFTS)
+            self.assertEqual(self.bob.get(f"/api/app/import/jobs/{job_id}").status_code, 404)
+            release.set()
+            for _ in range(50):
+                completed = self.alice.get(f"/api/app/import/jobs/{job_id}").json()
+                if completed["status"] != "processing":
+                    break
+                time.sleep(0.01)
+        self.assertEqual(completed["status"], "complete")
+        self.assertEqual(completed["transactions"], 1)
+        self.assertFalse(completed["saved"])
+        self.assertIn("alice", webapp._IMPORT_DRAFTS)
+
+    def test_background_import_returns_structured_failure_without_a_draft(self):
+        failure = ai_copilot.GeminiFailure("GEMINI_OUTPUT_LIMIT")
+        with patch.object(ai_copilot, "parse_brokerage_full_transactions", return_value=(None, failure)):
+            response = self.alice.post("/api/app/import", data={"consent": "true", "background": "true"},
+                                       files={"files": ("Trades.CSV", b"TEST", "text/csv")})
+            job_id = response.json()["jobId"]
+            for _ in range(50):
+                completed = self.alice.get(f"/api/app/import/jobs/{job_id}").json()
+                if completed["status"] != "processing":
+                    break
+                time.sleep(0.01)
+        self.assertEqual(completed["status"], "failed")
+        self.assertEqual(completed["failure"]["code"], "GEMINI_OUTPUT_LIMIT")
+        self.assertFalse(completed["saved"])
+        self.assertNotIn("alice", webapp._IMPORT_DRAFTS)
+
+    def test_repeated_background_upload_reuses_the_active_job(self):
+        from threading import Event
+
+        release = Event()
+
+        def parse(uploads, broker, progress=None):
+            release.wait(timeout=3)
+            return self.parsed_trade("AAPL"), []
+
+        with patch.object(webapp, "_parse_import_files", side_effect=parse) as parser:
+            first = self.alice.post("/api/app/import", data={"consent": "true", "background": "true"},
+                                    files={"files": ("First.CSV", b"TEST", "text/csv")})
+            second = self.alice.post("/api/app/import", data={"consent": "true", "background": "true"},
+                                     files={"files": ("Second.CSV", b"TEST", "text/csv")})
+            self.assertEqual(second.status_code, 202)
+            self.assertTrue(second.json()["existing"])
+            self.assertEqual(second.json()["jobId"], first.json()["jobId"])
+            self.assertEqual(parser.call_count, 1)
+            release.set()
+
 
     def test_long_file_tail_is_not_truncated(self):
         text = "date,ticker\n" + "2025-01-01,TEST\n" * 1500 + "LAST_ROW\n"

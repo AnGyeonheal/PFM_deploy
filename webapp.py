@@ -13,7 +13,7 @@ import asyncio
 import secrets as _secrets
 from collections import Counter
 from datetime import datetime
-from threading import RLock
+from threading import RLock, Thread
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
@@ -52,7 +52,10 @@ _SHARE_MODE = os.getenv("PFM_SHARE_MODE") == "1"
 _USER_REQUEST_LOCKS = {}
 _REQUEST_LIMITS = {}
 _IMPORT_DRAFTS = {}
+_IMPORT_JOBS = {}
+_USER_IMPORT_JOBS = {}
 _LIMIT_LOCK = RLock()
+_IMPORT_JOB_LOCK = RLock()
 
 
 def _allow_request(category, identifier, maximum, window):
@@ -1169,7 +1172,7 @@ class _ImportFailure(ValueError):
                    status=reason.http_status, provider_status=reason.provider_status, attempts=reason.attempts)
 
 
-def _parse_import_files(uploads, broker):
+def _parse_import_files(uploads, broker, progress=None):
     from ai_copilot import parse_brokerage_full_transactions, parse_brokerage_dividends
     raw_texts = []
     for filename, content in uploads:
@@ -1206,15 +1209,20 @@ def _parse_import_files(uploads, broker):
         raise _ImportFailure("IMPORT_TOO_LARGE", f"분석 분량이 {len(chunks)}개 구간으로 최대 20개를 초과했습니다.",
                              "파일을 분기·반기별로 나누어 한 개씩 업로드하세요.", stage="split")
     rows, dividends, issues = [], [], []
+    total_steps = len(chunks) * 2
+    completed_steps = 0
     for source, chunk in chunks:
         for parser, is_dividend, target, stage in ((parse_brokerage_full_transactions, False, rows, "transactions"),
                                                   (parse_brokerage_dividends, True, dividends, "dividends")):
+            if progress:
+                progress(completed_steps, total_steps, stage, source)
             try:
                 parsed_rows, error = parser(chunk, broker)
             except Exception as error:
                 raise _ImportFailure.from_gemini(error, source, stage) from None
             if error:
                 raise _ImportFailure.from_gemini(error, source, stage)
+            completed_steps += 1
             try:
                 target.extend(_validate_import_rows(parsed_rows, broker, dividend=is_dividend))
             except _ImportValidationError as error:
@@ -1225,6 +1233,96 @@ def _parse_import_files(uploads, broker):
         raise _ImportFailure("NO_RECORDS", "AI 응답에 거래·배당 내역이 없습니다.",
                              "실제 체결·입금 내역이 포함된 시트인지 확인하세요. 빈 결과만으로 원본에 거래가 없다고 단정할 수 없습니다.", stage="validation")
     return rows, dividends
+
+
+def _import_log_record(request_id, started, status, code, details):
+    record = {"event": "import_result", "time": datetime.now().isoformat(), "requestId": request_id,
+              "status": status, "code": code, "elapsedSeconds": round(time.monotonic() - started, 2),
+              "stage": details.get("stage"), "chunk": (details.get("source") or {}).get("chunk"),
+              "providerStatus": details.get("providerStatus"), "attempts": details.get("attempts", [])}
+    logging.getLogger("uvicorn.error").log(logging.WARNING if status >= 400 else logging.INFO,
+                                          "import_result %s", json.dumps(record, ensure_ascii=True))
+
+
+def _import_failure_payload(failure, request_id, started, issues=None):
+    details = dict(failure.details, requestId=request_id, elapsedSeconds=round(time.monotonic() - started, 2))
+    _import_log_record(request_id, started, failure.status, details["code"], details)
+    payload = {"ok": False, "saved": False, "error": str(failure), "failure": details}
+    if issues is not None:
+        payload.update(issues=issues, issueCount=len(issues))
+    return payload
+
+
+def _run_import_analysis(user, uploads, broker, request_id, started, progress=None):
+    try:
+        pipeline.apply_credentials(user)
+        rows, dividends = (_parse_import_files(uploads, broker, progress=progress) if progress
+                           else _parse_import_files(uploads, broker))
+    except _ImportValidationError as error:
+        failure = _ImportFailure("VALIDATION_FAILED", str(error),
+                                 "아래 미매핑·검증 필요 내역을 확인하고 원본 파일을 수정해 다시 분석하세요.",
+                                 stage="validation")
+        return None, _import_failure_payload(failure, request_id, started, error.issues), failure.status
+    except _ImportFailure as error:
+        return None, _import_failure_payload(error, request_id, started), error.status
+    except Exception:
+        failure = _ImportFailure("IMPORT_INTERNAL_ERROR", "서버에서 예상하지 못한 전처리 오류가 발생했습니다.",
+                                 "문의 코드를 운영자에게 전달하세요. 기존 데이터는 변경하지 않았습니다.",
+                                 stage="processing", status=500)
+        return None, _import_failure_payload(failure, request_id, started), failure.status
+    now = time.monotonic()
+    draft_id = _secrets.token_urlsafe(24)
+    draft = {"id": draft_id, "expires": now + 900, "rows": rows, "dividends": dividends}
+    result = {"ok": True, "draftId": draft_id, "transactions": len(rows), "dividends": len(dividends),
+              "txPreview": rows[:30], "divPreview": dividends[:30], "saved": False,
+              "requestId": request_id, "elapsedSeconds": round(time.monotonic() - started, 2)}
+    _import_log_record(request_id, started, 200, "OK", {"stage": "preview"})
+    return draft, result, 200
+
+
+def _run_import_job(job_id, user, uploads, broker):
+    with _IMPORT_JOB_LOCK:
+        job = _IMPORT_JOBS.get(job_id)
+        if not job:
+            return
+
+    def progress(completed, total, stage, source):
+        with _IMPORT_JOB_LOCK:
+            current = _IMPORT_JOBS.get(job_id)
+            if current and current["status"] == "processing":
+                current.update(completedSteps=completed, totalSteps=total, stage=stage, source=source,
+                               updated=time.monotonic())
+
+    draft, payload, status = _run_import_analysis(user, uploads, broker, job["requestId"], job["started"], progress)
+    with _IMPORT_JOB_LOCK:
+        current = _IMPORT_JOBS.get(job_id)
+        if not current or current["status"] != "processing":
+            return
+        if _USER_IMPORT_JOBS.get(user) != job_id:
+            current.update(status="failed", httpStatus=409, payload={"ok": False, "saved": False,
+                           "error": "더 최근에 시작한 분석으로 대체됐습니다.",
+                           "failure": {"code": "IMPORT_SUPERSEDED", "action": "최근 분석 결과를 기다리세요.",
+                                       "stage": "admission", "requestId": current["requestId"],
+                                       "elapsedSeconds": round(time.monotonic() - current["started"], 2)}})
+            return
+        if draft is not None:
+            _IMPORT_DRAFTS[user] = draft
+            current.update(status="complete", httpStatus=200, payload=payload)
+        else:
+            current.update(status="failed", httpStatus=status, payload=payload)
+        current["updated"] = time.monotonic()
+
+
+def _expire_import_state():
+    now = time.monotonic()
+    with _IMPORT_JOB_LOCK:
+        for job_id in [job_id for job_id, job in _IMPORT_JOBS.items()
+                       if job["status"] != "processing" and job["updated"] + 900 <= now]:
+            job = _IMPORT_JOBS.pop(job_id)
+            if _USER_IMPORT_JOBS.get(job["user"]) == job_id:
+                _USER_IMPORT_JOBS.pop(job["user"], None)
+    for owner in [owner for owner, draft in _IMPORT_DRAFTS.items() if draft["expires"] <= now]:
+        _IMPORT_DRAFTS.pop(owner, None)
 
 
 def _merge_import_rows(existing, incoming, columns):
@@ -1258,27 +1356,15 @@ def _merge_import_rows(existing, incoming, columns):
 
 @app.post("/api/app/import")
 async def api_app_import(request: Request, broker: str = Form("증권사"), consent: bool = Form(False),
-                        files: list[UploadFile] = File(default=[])):
+                        background: bool = Form(False), files: list[UploadFile] = File(default=[])):
     user = _current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     started = time.monotonic()
     request_id = _secrets.token_hex(8)
 
-    def log_result(status, code, details):
-        record = {"event": "import_result", "time": datetime.now().isoformat(), "requestId": request_id,
-                  "status": status, "code": code, "elapsedSeconds": round(time.monotonic() - started, 2),
-                  "stage": details.get("stage"), "chunk": (details.get("source") or {}).get("chunk"),
-                  "providerStatus": details.get("providerStatus"), "attempts": details.get("attempts", [])}
-        logging.getLogger("uvicorn.error").log(logging.WARNING if status >= 400 else logging.INFO,
-                                              "import_result %s", json.dumps(record, ensure_ascii=True))
-
     def failed(failure, issues=None):
-        details = dict(failure.details, requestId=request_id, elapsedSeconds=round(time.monotonic() - started, 2))
-        log_result(failure.status, details["code"], details)
-        payload = {"ok": False, "saved": False, "error": str(failure), "failure": details}
-        if issues is not None:
-            payload.update(issues=issues, issueCount=len(issues))
+        payload = _import_failure_payload(failure, request_id, started, issues)
         return JSONResponse(payload, status_code=failure.status, headers={"X-Request-ID": request_id})
     if not consent:
         return JSONResponse({"error": "거래내역의 Google Gemini 전송에 동의해야 AI 분석을 사용할 수 있습니다."}, status_code=400)
@@ -1293,31 +1379,56 @@ async def api_app_import(request: Request, broker: str = Form("증권사"), cons
         if len(content) > 5 * 1024 * 1024:
             return JSONResponse({"error": "파일 한 개는 5MB 이하여야 합니다."}, status_code=413)
         uploads.append((filename, content))
-    _IMPORT_DRAFTS.pop(user, None)
+    _expire_import_state()
+    if background:
+        with _IMPORT_JOB_LOCK:
+            active_id = _USER_IMPORT_JOBS.get(user)
+            active = _IMPORT_JOBS.get(active_id) if active_id else None
+            if active and active["status"] == "processing":
+                return JSONResponse({"ok": True, "saved": False, "status": "processing", "jobId": active_id,
+                                     "requestId": active["requestId"], "existing": True}, status_code=202,
+                                    headers={"X-Request-ID": active["requestId"]})
     try:
         _consume_ai_quota(user)
-        pipeline.apply_credentials(user)
-        rows, dividends = await run_in_threadpool(_parse_import_files, uploads, broker.strip())
     except HTTPException as error:
         return failed(_ImportFailure("AI_REQUEST_LIMIT" if error.status_code == 429 else "GEMINI_NOT_CONFIGURED",
                                       str(error.detail), "시간당 한도는 잠시 후 초기화됩니다. 키 미설정은 운영자에게 문의하세요.",
                                       stage="admission", status=error.status_code))
-    except _ImportValidationError as error:
-        return failed(_ImportFailure("VALIDATION_FAILED", str(error), "아래 미매핑·검증 필요 내역을 확인하고 원본 파일을 수정해 다시 분석하세요.",
-                                      stage="validation"), error.issues)
-    except _ImportFailure as error:
-        return failed(error)
-    except Exception:
-        return failed(_ImportFailure("IMPORT_INTERNAL_ERROR", "서버에서 예상하지 못한 전처리 오류가 발생했습니다.",
-                                      "문의 코드를 운영자에게 전달하세요. 기존 데이터는 변경하지 않았습니다.", stage="processing", status=500))
-    now = time.monotonic()
-    for owner in [owner for owner, draft in _IMPORT_DRAFTS.items() if draft["expires"] <= now]:
-        _IMPORT_DRAFTS.pop(owner, None)
-    draft_id = _secrets.token_urlsafe(24)
-    _IMPORT_DRAFTS[user] = {"id": draft_id, "expires": now + 900, "rows": rows, "dividends": dividends}
-    log_result(200, "OK", {"stage": "preview"})
-    return JSONResponse({"ok": True, "draftId": draft_id, "transactions": len(rows), "dividends": len(dividends),
-                         "txPreview": rows[:30], "divPreview": dividends[:30], "saved": False}, headers={"X-Request-ID": request_id})
+    _IMPORT_DRAFTS.pop(user, None)
+    if background:
+        job_id = _secrets.token_urlsafe(18)
+        with _IMPORT_JOB_LOCK:
+            _IMPORT_JOBS[job_id] = {"id": job_id, "user": user, "requestId": request_id, "status": "processing",
+                                    "started": started, "updated": started, "completedSteps": 0, "totalSteps": 0,
+                                    "stage": "read", "source": None}
+            _USER_IMPORT_JOBS[user] = job_id
+        Thread(target=_run_import_job, args=(job_id, user, uploads, broker.strip()), daemon=True,
+               name=f"import-{request_id}").start()
+        return JSONResponse({"ok": True, "saved": False, "status": "processing", "jobId": job_id,
+                             "requestId": request_id}, status_code=202, headers={"X-Request-ID": request_id})
+
+    draft, payload, status = await run_in_threadpool(_run_import_analysis, user, uploads, broker.strip(), request_id, started)
+    if draft is not None:
+        _IMPORT_DRAFTS[user] = draft
+    return JSONResponse(payload, status_code=status, headers={"X-Request-ID": request_id})
+
+
+@app.get("/api/app/import/jobs/{job_id}")
+def api_app_import_job(request: Request, job_id: str):
+    user = _current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    _expire_import_state()
+    with _IMPORT_JOB_LOCK:
+        job = _IMPORT_JOBS.get(job_id)
+        if not job or job["user"] != user:
+            return JSONResponse({"error": "본인의 유효한 분석 작업이 없습니다."}, status_code=404)
+        if job["status"] == "processing":
+            return JSONResponse({"ok": True, "saved": False, "status": "processing", "jobId": job_id,
+                                 "requestId": job["requestId"], "elapsedSeconds": round(time.monotonic() - job["started"], 2),
+                                 "completedSteps": job["completedSteps"], "totalSteps": job["totalSteps"],
+                                 "stage": job["stage"], "source": job["source"]})
+        return JSONResponse(dict(job["payload"], status=job["status"], httpStatus=job["httpStatus"]), status_code=200)
 
 
 @app.post("/api/app/import/confirm")

@@ -38,11 +38,13 @@ def configure_test_server(directory, https):
 def main():
     parser = argparse.ArgumentParser(description="Run an isolated PFM user-testing server.")
     parser.add_argument("--share", action="store_true", help="Publish an HTTPS Cloudflare Quick Tunnel.")
+    parser.add_argument("--external-tunnel", action="store_true",
+                        help="Use HTTPS cookies with an already-running external tunnel without starting another tunnel.")
     parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--data-dir", default=str(Path(__file__).resolve().parent / "test_user_data"))
     args = parser.parse_args()
     load_dotenv(Path(__file__).resolve().parent / ".env")
-    configure_test_server(args.data_dir, https=args.share)
+    configure_test_server(args.data_dir, https=args.share or args.external_tunnel)
     from ai_copilot import shared_gemini_available
     if not shared_gemini_available():
         parser.error("Configure the server GEMINI_API_KEY in .env first. Do not send the key to testers.")
@@ -79,6 +81,8 @@ def main():
                 tunnel = subprocess.Popen([cloudflared, "tunnel", "--url", f"http://127.0.0.1:{args.port}"],
                                            env=tunnel_environment)
                 print("Share the printed https://*.trycloudflare.com URL with /app/ appended.", flush=True)
+            elif args.external_tunnel:
+                print(f"HTTPS proxy origin: http://127.0.0.1:{args.port}/app/ (external tunnel remains separate)", flush=True)
             else:
                 print(f"Local user-testing app: http://127.0.0.1:{args.port}/app/ (not public)", flush=True)
             config = uvicorn.Config(webapp.app, host="127.0.0.1", port=args.port, workers=1,

@@ -7,9 +7,11 @@ type ImportIssue = { kind: "transaction" | "dividend"; responseRow: number | nul
 type ImportFailure = { code: string; action: string; stage?: string; source?: { file: string; sheet?: string; chunk?: number } | null; providerStatus?: number | null; elapsedSeconds: number; requestId?: string; httpStatus?: number; rayId?: string };
 type DSData = { tossConnected: boolean; txCount: number; divCount: number; tickerCount: number; mappedCount: number; unmappedCount: number; unmappedTickers?: UnmappedTicker[]; sources: Src[] };
 type ImportResult = { draftId: string; saved: boolean; transactions: number; dividends: number; txPreview: Record<string, string | number>[]; divPreview: Record<string, string | number>[] };
+type ImportProgress = { jobId: string; stage: string; source?: { file: string; sheet?: string; chunk?: number } | null; completedSteps: number; totalSteps: number; elapsedSeconds: number; requestId?: string };
 type Connections = { geminiAvailable: boolean; tossConfigured: boolean; account: string; outboundIp: string; aiRequestsPerHour: number };
 const fieldClass = "w-full min-w-0 bg-[#0a0d14] border border-white/10 rounded-sm px-3 py-2 text-sm text-[#e8eaf0] font-mono focus:outline-none focus:border-[#00d4a1]/50";
 const importStages: Record<string, string> = { admission: "요청 확인", read: "파일 읽기", split: "파일 분할", transactions: "거래내역 AI 분석", dividends: "배당내역 AI 분석", validation: "분석 결과 검증", processing: "서버 전처리" };
+const importJobStorageKey = "portfolio-lens-import-job";
 
 function importHttpFailure(status: number): [string, string, string] {
   if (status === 524) return ["CLOUDFLARE_TIMEOUT", "Cloudflare의 응답 대기 시간이 초과됐습니다.", "서버에서는 분석이 계속될 수 있습니다. 즉시 반복 요청하지 말고 잠시 기다린 뒤 파일을 기간별로 나누어 시도하세요. 저장 확정은 실행되지 않았습니다."];
@@ -43,8 +45,10 @@ export default function DataSources({ onChanged }: { onChanged?: (data: DSData) 
   const [uploadErr, setUploadErr] = useState("");
   const [importFailure, setImportFailure] = useState<ImportFailure | null>(null);
   const [importIssues, setImportIssues] = useState<ImportIssue[]>([]);
+  const [importProgress, setImportProgress] = useState<ImportProgress | null>(null);
   const [clearing, setClearing] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const pollingRef = useRef<AbortController | null>(null);
 
   const loadData = (changed = false) => {
     fetch("/api/app/datasources", { credentials: "include" })
@@ -59,6 +63,7 @@ export default function DataSources({ onChanged }: { onChanged?: (data: DSData) 
       .catch(error => setConnectionError(error.message));
   };
   useEffect(() => { loadData(); loadConnections(); }, []);
+  useEffect(() => () => pollingRef.current?.abort(), []);
 
   const connectToss = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -97,6 +102,74 @@ export default function DataSources({ onChanged }: { onChanged?: (data: DSData) 
     setFiles(selected); setResult(null); setUploadErr(""); setImportIssues([]); setImportFailure(null);
   };
 
+  const showImportFailure = (payload: Record<string, any>, httpStatus: number, started: number, headers?: Headers) => {
+    const [code, message, action] = importHttpFailure(httpStatus);
+    const knownFailure = payload.failure && typeof payload.failure.code === "string" && typeof payload.failure.action === "string" ? payload.failure : null;
+    setUploadErr(typeof payload.error === "string" ? payload.error : typeof payload.detail === "string" ? payload.detail : message);
+    setImportFailure({ code, action, ...knownFailure, elapsedSeconds: knownFailure?.elapsedSeconds ?? (performance.now() - started) / 1000,
+      httpStatus: payload.httpStatus || httpStatus, requestId: knownFailure?.requestId || headers?.get("x-request-id") || undefined,
+      rayId: headers?.get("cf-ray") || undefined });
+    setImportIssues(Array.isArray(payload.issues) ? payload.issues : []);
+  };
+
+  const pollImportJob = async (jobId: string, started: number) => {
+    pollingRef.current?.abort();
+    const controller = new AbortController();
+    pollingRef.current = controller;
+    let networkFailures = 0;
+    try {
+      while (!controller.signal.aborted) {
+        try {
+          const response = await fetch(`/api/app/import/jobs/${encodeURIComponent(jobId)}`, {
+            credentials: "include", signal: controller.signal,
+          });
+          const decoded = await response.json().catch(() => null);
+          const payload = decoded && typeof decoded === "object" && !Array.isArray(decoded) ? decoded : {};
+          if (!response.ok) {
+            sessionStorage.removeItem(importJobStorageKey);
+            showImportFailure(payload, response.status, started, response.headers);
+            return;
+          }
+          networkFailures = 0;
+          if (payload.status === "processing") {
+            setImportProgress({ jobId, stage: payload.stage || "processing", source: payload.source,
+              completedSteps: Number(payload.completedSteps) || 0, totalSteps: Number(payload.totalSteps) || 0,
+              elapsedSeconds: Number(payload.elapsedSeconds) || 0, requestId: payload.requestId });
+          } else {
+            sessionStorage.removeItem(importJobStorageKey);
+            setImportProgress(null);
+            if (payload.status === "complete" && payload.ok && typeof payload.draftId === "string") {
+              setResult(payload); setFiles([]); setUploadErr(""); setImportFailure(null); setImportIssues([]);
+            } else {
+              showImportFailure(payload, Number(payload.httpStatus) || 500, started, response.headers);
+            }
+            return;
+          }
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          networkFailures += 1;
+          if (networkFailures >= 6) throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    } catch {
+      sessionStorage.removeItem(importJobStorageKey);
+      setImportProgress(null);
+      setUploadErr("분석 상태를 서버에서 확인하지 못했습니다.");
+      setImportFailure({ code: "NETWORK_ERROR", action: "인터넷·서버·터널 연결을 확인하세요. 분석은 서버에서 계속될 수 있으며, 화면을 새로고침하면 진행 중인 작업 확인을 다시 시도할 수 있습니다.", elapsedSeconds: (performance.now() - started) / 1000 });
+    } finally {
+      if (pollingRef.current === controller) pollingRef.current = null;
+      setUploading(false);
+    }
+  };
+
+  useEffect(() => {
+    const jobId = sessionStorage.getItem(importJobStorageKey);
+    if (!jobId) return;
+    setUploading(true);
+    void pollImportJob(jobId, performance.now());
+  }, []);
+
   const doUpload = async () => {
     setImportFailure(null);
     if (files.length === 0) { setUploadErr("업로드할 파일을 선택하세요."); return; }
@@ -105,30 +178,28 @@ export default function DataSources({ onChanged }: { onChanged?: (data: DSData) 
     const fd = new FormData();
     fd.append("broker", broker.trim() || "증권사");
     fd.append("consent", "true");
+    fd.append("background", "true");
     files.forEach(f => fd.append("files", f));
     const started = performance.now();
     try {
       const r = await fetch("/api/app/import", { method: "POST", body: fd, credentials: "include" });
       const decoded = await r.json().catch(() => null);
       const j = decoded && typeof decoded === "object" && !Array.isArray(decoded) ? decoded : {};
-      if (r.ok && j.ok && typeof j.draftId === "string") {
+      if (r.status === 202 && j.status === "processing" && typeof j.jobId === "string") {
+        sessionStorage.setItem(importJobStorageKey, j.jobId);
+        setImportProgress({ jobId: j.jobId, stage: "read", completedSteps: 0, totalSteps: 0,
+          elapsedSeconds: 0, requestId: j.requestId });
+        await pollImportJob(j.jobId, started);
+      } else if (r.ok && j.ok && typeof j.draftId === "string") {
         setResult(j);
         setFiles([]);
       } else {
-        const [code, message, action] = importHttpFailure(r.status);
-        const knownFailure = j.failure && typeof j.failure.code === "string" && typeof j.failure.action === "string" ? j.failure : null;
-        setUploadErr(typeof j.error === "string" ? j.error : typeof j.detail === "string" ? j.detail : message);
-        setImportFailure({ code, action, ...knownFailure, elapsedSeconds: (performance.now() - started) / 1000,
-          httpStatus: r.status, requestId: knownFailure?.requestId || r.headers.get("x-request-id") || undefined,
-          rayId: r.headers.get("cf-ray") || undefined });
-        setImportIssues(Array.isArray(j.issues) ? j.issues : []);
+        showImportFailure(j, r.status, started, r.headers);
       }
     } catch {
       setUploadErr("분석 요청의 응답을 받지 못했습니다.");
       setImportFailure({ code: "NETWORK_ERROR", action: "인터넷·서버·터널 연결 상태를 확인하세요. 서버에서 분석이 진행 중일 수 있으므로 즉시 반복 업로드하지 마세요.", elapsedSeconds: (performance.now() - started) / 1000 });
-    } finally {
-      setUploading(false);
-    }
+    } finally { if (!pollingRef.current) setUploading(false); }
   };
 
   const confirmImport = async () => {
@@ -320,9 +391,25 @@ export default function DataSources({ onChanged }: { onChanged?: (data: DSData) 
               </div>
             </section>
           )}
+          {importProgress && (
+            <section role="status" aria-label="AI 분석 진행 상태" className="border-l-2 border-[#4f8cff] pl-3 space-y-1 text-xs leading-relaxed">
+              <p className="text-[#a0c4ff]">서버에서 분석 중입니다. 다른 메뉴로 이동해도 작업은 계속됩니다.</p>
+              <p className="text-[#6b7494]">
+                {importStages[importProgress.stage] || "분석 중"}
+                {importProgress.source?.file ? ` · ${importProgress.source.file}` : ""}
+                {importProgress.source?.sheet ? ` · ${importProgress.source.sheet}` : ""}
+                {importProgress.source?.chunk ? ` · 분할 ${importProgress.source.chunk}` : ""}
+              </p>
+              <p className="font-mono text-[#6b7494]">
+                {importProgress.totalSteps > 0 ? `${importProgress.completedSteps}/${importProgress.totalSteps} 단계 · ` : ""}
+                {importProgress.elapsedSeconds.toFixed(0)}초
+                {importProgress.requestId ? ` · 문의 ${importProgress.requestId}` : ""}
+              </p>
+            </section>
+          )}
           <button onClick={doUpload} disabled={uploading || confirming || files.length === 0 || !consent || !connections?.geminiAvailable}
             className="w-full bg-[#00d4a1] text-[#0a0d14] font-semibold text-sm py-2.5 rounded-sm hover:bg-[#00d4a1]/90 transition-colors disabled:opacity-50">
-            {uploading ? "AI가 분석 중…" : "업로드 & AI 분석"}
+            {uploading ? "서버에서 AI 분석 중…" : "업로드 & AI 분석"}
           </button>
           {result && (
             <div className="border-t border-white/10 pt-4 space-y-3">
